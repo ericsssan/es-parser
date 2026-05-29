@@ -1,0 +1,9 @@
+[submodule "tests/conformance/test262-parser-tests"]
+	path = tests/conformance/test262-parser-tests
+	url = https://github.com/tc39/test262-parser-tests.git
+[submodule "tests/conformance/test262"]
+	path = tests/conformance/test262
+	url = https://github.com/tc39/test262.git
+[submodule "tests/conformance/babel"]
+	path = tests/conformance/babel
+	url = https://github.com/babel/babel.git
