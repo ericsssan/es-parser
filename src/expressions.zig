@@ -1118,7 +1118,13 @@ fn validateRegexVFlagClass(p: *Parser, body: []const u8, i_ptr: *usize) Error!vo
         i += 1;
         atom_count += 1;
     }
-    if (i < body.len) i += 1; // consume ]
+    if (i >= body.len) {
+        // Outer `[` was never closed — in v-mode this is a SyntaxError because
+        // nested class syntax gives `[` a special meaning that requires matching `]`.
+        try p.emitError("Unterminated character class in v-mode regular expression");
+        return error.ParseError;
+    }
+    i += 1; // consume ]
     i_ptr.* = i;
 }
 
@@ -1979,6 +1985,43 @@ fn validateRegexBodyUnicode(p: *Parser, body: []const u8, v_mode: bool) Error!vo
 
 fn isHexDigit(c: u8) bool {
     return (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
+}
+
+/// Walk AST and return true if `node` (or any descendant, stopping at function
+/// boundaries) has the given tag. Used to detect yield_expr/await_expr in
+/// arrow param defaults (ArrowParameters Contains YieldExpression/AwaitExpression).
+fn containsNodeTag(p: *Parser, node: NodeIndex, target: ast.Node.Tag) bool {
+    if (node == .none) return false;
+    const idx = node.toInt();
+    if (idx >= p.nodes.len) return false;
+    const tag = p.node_tags_ptr[idx];
+    if (tag == target) return true;
+    switch (tag) {
+        // Stop at function/arrow boundaries — they have their own Yield/Await context.
+        .fn_expr, .async_fn_expr, .generator_fn_expr, .async_generator_fn_expr,
+        .fn_decl, .async_fn_decl, .generator_fn_decl, .async_generator_fn_decl,
+        .method_def, .getter_def, .setter_def,
+        .arrow_fn, .async_arrow_fn,
+        => return false,
+        else => {},
+    }
+    const data = p.node_data_ptr[idx];
+    if (containsNodeTag(p, data.lhs, target)) return true;
+    switch (tag) {
+        .array_literal, .array_pattern, .object_literal, .object_pattern,
+        .var_decl, .let_decl, .const_decl, .sequence_expr,
+        => {
+            var i = data.lhs.toInt();
+            while (i < data.rhs.toInt()) : (i += 1) {
+                const child = NodeIndex.fromInt(p.extra_data.items[i]);
+                if (containsNodeTag(p, child, target)) return true;
+            }
+            return false;
+        },
+        else => {},
+    }
+    if (containsNodeTag(p, data.rhs, target)) return true;
+    return false;
 }
 
 fn containsAwaitIdentifier(p: *Parser, node: NodeIndex) bool {
@@ -3429,6 +3472,24 @@ fn parseParenthesized(p: *Parser) Error!NodeIndex {
                     validateArrowParam(p, param_node) catch {
                         return p.makeErrorNode();
                     };
+                    // Check default expression for yield/await — spec early errors:
+                    // "ArrowParameters Contains YieldExpression/AwaitExpression"
+                    if (!p.is_ts) {
+                        const d = p.node_data_ptr[param_node.toInt()];
+                        if (d.rhs != .none) {
+                            if (p.in_generator and
+                                (containsNodeTag(p, d.rhs, .yield_expr) or
+                                 containsNodeTag(p, d.rhs, .yield_delegate)))
+                            {
+                                try p.emitError("Arrow function parameters cannot contain yield expressions");
+                                return p.makeErrorNode();
+                            }
+                            if (p.in_async and containsNodeTag(p, d.rhs, .await_expr)) {
+                                try p.emitError("Arrow function parameters cannot contain await expressions");
+                                return p.makeErrorNode();
+                            }
+                        }
+                    }
                 },
                 .array_pattern, .object_pattern, .array_literal,
                 .object_literal,

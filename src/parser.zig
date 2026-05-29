@@ -570,6 +570,41 @@ fn collectLexNamesInNode(
     }
 }
 
+/// Collect ONLY plain FunctionDeclaration (fn_decl) names from a statement range.
+/// Used for AnnexB B.3.3.4/B.3.3.5: in sloppy mode, duplicate lex names are
+/// allowed in block/switch when all duplicates come from FunctionDeclarations.
+fn collectFnDeclNamesInRange(
+    p: *const Parser,
+    start: usize,
+    end: usize,
+    buf: [][]const u8,
+    count: *usize,
+) void {
+    if (start >= end or end > p.extra_data.items.len) return;
+    for (p.extra_data.items[start..end]) |raw| {
+        if (count.* >= buf.len) return;
+        if (raw == 0) continue;
+        const node: NodeIndex = @enumFromInt(raw);
+        if (node == .none) continue;
+        const idx = node.toInt();
+        if (idx >= p.nodes.len) continue;
+        if (p.node_tags_ptr[idx] != .fn_decl) continue;
+        const extra_idx = p.node_data_ptr[idx].lhs.toInt();
+        if (extra_idx >= p.extra_data.items.len) continue;
+        const name_node: NodeIndex = @enumFromInt(p.extra_data.items[extra_idx]);
+        if (name_node == .none) continue;
+        const ni = name_node.toInt();
+        if (ni >= p.nodes.len) continue;
+        const tok = p.node_main_token_ptr[ni];
+        const s = p.tok_starts_ptr[tok];
+        const l = p.tok_lens_ptr[tok];
+        if (s + l <= p.source.len) {
+            buf[count.*] = p.source[s .. s + l];
+            count.* += 1;
+        }
+    }
+}
+
 /// Recursive descent parser for JavaScript/ES2024.
 ///
 /// Follows the Zig compiler's pattern: MultiArrayList-backed nodes,
@@ -2616,9 +2651,13 @@ pub const Parser = struct {
             if (self.tok_lens_ptr[self.tok_i] == 5) {
                 const text = self.tokenText(@intCast(self.tok_i));
                 const next_using = self.peekAt(1);
-                if (std.mem.eql(u8, text, "using") and (next_using == .identifier or
-                    next_using == .kw_await or next_using == .kw_yield or
-                    next_using == .kw_of or next_using == .kw_let)) {
+                // No LineTerminator may appear between `using` and its binding list.
+                const no_nl_before_binding = !self.newlines_ptr[self.tok_i + 1];
+                if (std.mem.eql(u8, text, "using") and no_nl_before_binding and
+                    (next_using == .identifier or next_using == .kw_await or
+                    next_using == .kw_yield or next_using == .kw_of or
+                    next_using == .kw_let))
+                {
                     return self.parseUsingDeclaration(false);
                 }
             }
@@ -4094,6 +4133,30 @@ pub const Parser = struct {
             }
 
             if (lex_names_n > 0) {
+                // AnnexB B.3.3.5: in non-strict mode, duplicate lex names in a
+                // switch CaseBlock are allowed when ALL occurrences are from
+                // plain FunctionDeclarations (not async/generator/class/let/const).
+                var fn_decl_names_buf: [128][]const u8 = undefined;
+                var fn_decl_names_n: usize = 0;
+                if (!self.in_strict) {
+                    for (cases) |case_raw| {
+                        const case_node: NodeIndex = @enumFromInt(case_raw);
+                        if (case_node == .none) continue;
+                        const ci = case_node.toInt();
+                        if (ci >= self.nodes.len) continue;
+                        const ctag2 = self.node_tags_ptr[ci];
+                        const cdata2 = self.node_data_ptr[ci];
+                        if (ctag2 == .switch_case or ctag2 == .switch_default) {
+                            const stmt_extra_idx2 = cdata2.rhs.toInt();
+                            if (stmt_extra_idx2 + 1 < self.extra_data.items.len) {
+                                const ss2 = self.extra_data.items[stmt_extra_idx2];
+                                const se2 = self.extra_data.items[stmt_extra_idx2 + 1];
+                                collectFnDeclNamesInRange(self, ss2, se2, &fn_decl_names_buf, &fn_decl_names_n);
+                            }
+                        }
+                    }
+                }
+
                 // Check lex-lex duplicates across all cases
                 var checked_buf: [128][]const u8 = undefined;
                 var checked_n: usize = 0;
@@ -4106,6 +4169,18 @@ pub const Parser = struct {
                         }
                     }
                     if (is_dup) {
+                        // AnnexB: allow if not strict and all occurrences are fn_decl
+                        if (!self.in_strict and fn_decl_names_n > 0) {
+                            var total: usize = 0;
+                            var fn_count: usize = 0;
+                            for (lex_names_buf[0..lex_names_n]) |n| {
+                                if (std.mem.eql(u8, n, lex_name)) total += 1;
+                            }
+                            for (fn_decl_names_buf[0..fn_decl_names_n]) |n| {
+                                if (std.mem.eql(u8, n, lex_name)) fn_count += 1;
+                            }
+                            if (fn_count == total) continue;
+                        }
                         try self.emitDiagnostic(self.currentSpan(),
                             "Identifier '{s}' has already been declared", .{lex_name});
                     } else if (checked_n < checked_buf.len) {
