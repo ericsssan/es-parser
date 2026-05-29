@@ -1,0 +1,58 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: '0 0 * * *'   # 00:00 UTC daily
+  workflow_dispatch:        # allow manual trigger
+
+jobs:
+  test:
+    name: Zig master (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install latest Zig master
+        uses: mlugg/setup-zig@v2
+        with:
+          version: master
+
+      - name: Show Zig version
+        run: zig version
+
+      - name: Unit tests + conformance (test262-parser-tests)
+        run: zig build test --summary all
+
+  notify:
+    name: Notify on failure
+    needs: test
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create issue on failure
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `Nightly CI failed (${new Date().toISOString().slice(0, 10)})`;
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'nightly-failure',
+            });
+            if (existing.data.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body: `Nightly CI failed against Zig master.\n\nRun: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+                labels: ['nightly-failure'],
+              });
+            }
