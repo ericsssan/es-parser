@@ -24,8 +24,12 @@ jobs:
         with:
           version: master
 
-      - name: Build
-        run: zig build
+      - name: Cache Zig build artifacts
+        uses: actions/cache@v4
+        with:
+          path: .zig-cache
+          key: zig-${{ matrix.os }}-${{ hashFiles('build.zig', 'build.zig.zon', 'src/**') }}
+          restore-keys: zig-${{ matrix.os }}-
 
       - name: Unit tests + conformance (test262-parser-tests)
         run: zig build test --summary all

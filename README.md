@@ -2,7 +2,7 @@
 
 A fast JavaScript and TypeScript parser written in Zig.
 
-Includes a lexer, recursive-descent parser, and semantic analyzer (scope tree, symbol table, reference tracking). Extracted from the [Ez](https://github.com/nicolo-ribaudo/ez) linter.
+Includes a lexer, recursive-descent parser, and semantic analyzer (scope tree, symbol table, reference tracking). Extracted from the Ez linter.
 
 ## Conformance
 
