@@ -33,8 +33,8 @@ Add to your `build.zig.zon`:
 ```zig
 .dependencies = .{
     .es_parser = .{
-        .url = "https://github.com/ericsssan/es-parser/archive/COMMIT.tar.gz",
-        .hash = "...",
+        .url = "https://github.com/ericsssan/es-parser/archive/refs/tags/v0.1.0.tar.gz",
+        .hash = "es_parser-0.1.0-C15LK7riGQA442nDjkR8yefVUXwbXCVNRJRhYFUGefdp",
     },
 },
 ```

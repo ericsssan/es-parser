@@ -7,3 +7,6 @@
 [submodule "tests/conformance/babel"]
 	path = tests/conformance/babel
 	url = https://github.com/babel/babel.git
+[submodule "tests/conformance/typescript"]
+	path = tests/conformance/typescript
+	url = https://github.com/microsoft/TypeScript.git

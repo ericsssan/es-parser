@@ -31,6 +31,7 @@ pub fn isAlwaysReservedStr(text: []const u8) bool {
         "default", "try", "catch", "finally", "throw", "new", "delete",
         "typeof", "void", "instanceof", "in", "var", "const", "class",
         "extends", "super", "this", "import", "export", "debugger", "with",
+        "enum",
     };
     inline for (list) |kw| {
         if (std.mem.eql(u8, text, kw)) return true;
@@ -186,6 +187,66 @@ fn collectBindingName(
             collectBindingName(p, data.lhs, buf, count);
         },
         else => {},
+    }
+}
+
+/// Returns true if `node` is a LabelledStatement whose innermost LabelledItem
+/// is a FunctionDeclaration (possibly through nested labels). Per spec 14.13.1,
+/// IsLabelledFunction is true for doubly-nested labels leading to a fn decl.
+fn isLabelledFunction(p: *const Parser, node: NodeIndex) bool {
+    if (node == .none) return false;
+    const idx = node.toInt();
+    if (idx >= p.nodes.len) return false;
+    if (p.node_tags_ptr[idx] != .labeled_stmt) return false;
+    const inner = p.node_data_ptr[idx].lhs;
+    if (inner == .none) return false;
+    const inner_tag = p.node_tags_ptr[inner.toInt()];
+    if (inner_tag == .fn_decl or inner_tag == .async_fn_decl) return true;
+    return isLabelledFunction(p, inner);
+}
+
+/// Check that bound names from a lex declaration in a for head (let/const) do not
+/// conflict with var-declared names in the body. Emits a diagnostic for each conflict.
+fn checkForLexVarConflict(self: *Parser, lex_decl: NodeIndex, body: NodeIndex) Error!void {
+    if (lex_decl == .none or body == .none or self.is_ts) return;
+    const tag = self.node_tags_ptr[lex_decl.toInt()];
+    if (tag != .let_decl and tag != .const_decl) return;
+    var lex_buf: [32][]const u8 = undefined;
+    var lex_n: usize = 0;
+    collectLexNamesInNode(self, lex_decl, &lex_buf, &lex_n);
+    if (lex_n == 0) return;
+    var var_buf: [128][]const u8 = undefined;
+    var var_n: usize = 0;
+    collectVarNamesInNode(self, body, &var_buf, &var_n);
+    for (lex_buf[0..lex_n]) |lex_name| {
+        for (var_buf[0..var_n]) |var_name| {
+            if (std.mem.eql(u8, lex_name, var_name)) {
+                try self.emitDiagnostic(self.currentSpan(),
+                    "Identifier '{s}' has already been declared", .{lex_name});
+                break;
+            }
+        }
+    }
+}
+
+/// Check that bound names in a for-in/of lex declaration are unique.
+fn checkForBindingNamesDup(self: *Parser, lex_decl: NodeIndex) Error!void {
+    if (lex_decl == .none or self.is_ts) return;
+    const tag = self.node_tags_ptr[lex_decl.toInt()];
+    if (tag != .let_decl and tag != .const_decl) return;
+    var buf: [32][]const u8 = undefined;
+    var n: usize = 0;
+    collectLexNamesInNode(self, lex_decl, &buf, &n);
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        var j: usize = i + 1;
+        while (j < n) : (j += 1) {
+            if (std.mem.eql(u8, buf[i], buf[j])) {
+                try self.emitDiagnostic(self.currentSpan(),
+                    "Identifier '{s}' has already been declared", .{buf[i]});
+                break;
+            }
+        }
     }
 }
 
@@ -3134,11 +3195,17 @@ pub const Parser = struct {
         // are no longer emitted for if — the resolver merges them).
         const if_ev = try self.emitIfOpen(false, .none);
         const consequent = try self.parseIfBody();
+        if (!self.in_strict and isLabelledFunction(self, consequent)) {
+            try self.emitDiagnostic(self.currentSpan(), "Labeled function declarations are not allowed in loop or if-statement bodies", .{});
+        }
 
         if (self.eat(.kw_else)) |_| {
             if (self.emit_scope_events) self.ev_ptr[if_ev].aux = 1;
             const if_alt_ev = try self.emitIfAlt(.none);
             const alternate = try self.parseIfBody();
+            if (!self.in_strict and isLabelledFunction(self, alternate)) {
+                try self.emitDiagnostic(self.currentSpan(), "Labeled function declarations are not allowed in loop or if-statement bodies", .{});
+            }
             const extra = try self.addExtra(ast.IfData, .{
                 .consequent = consequent,
                 .alternate = alternate,
@@ -3198,6 +3265,9 @@ pub const Parser = struct {
         // the loop may not execute at all, so post-loop alive == pre-loop alive.
         try self.emitBranchOpen(.none);
         const body = try self.parseNonDeclStatement();
+        if (!self.in_strict and isLabelledFunction(self, body)) {
+            try self.emitDiagnostic(self.currentSpan(), "Labeled function declarations are not allowed in loop or if-statement bodies", .{});
+        }
         try self.emitBranchClose(.none);
         try self.emitLoopBodyEnd(.@"while", .none);
         try self.emitLoopClose(.@"while", .none);
@@ -3225,6 +3295,9 @@ pub const Parser = struct {
         const loop_ev = try self.emitLoopOpen(.do_while, .none);
         try self.emitBranchOpen(.none);
         const body = try self.parseNonDeclStatement();
+        if (!self.in_strict and isLabelledFunction(self, body)) {
+            try self.emitDiagnostic(self.currentSpan(), "Labeled function declarations are not allowed in loop or if-statement bodies", .{});
+        }
         try self.emitBranchClose(.none);
         try self.emitLoopBodyEnd(.do_while, .none);
         _ = try self.expect(.kw_while);
@@ -3337,6 +3410,7 @@ pub const Parser = struct {
         if (self.eat(.kw_in)) |_| {
             try self.rejectForInOfInitializer(init, true);
             try self.validateForInOfBinding(init, false);
+            try checkForBindingNamesDup(self, init);
             expressions.reinterpretAsPattern(self, init);
             try expressions.validatePattern(self, init);
             try self.upgradePatternRefsToWrite(init);
@@ -3346,6 +3420,10 @@ pub const Parser = struct {
             try self.emitLoopTestEnd(.for_in, .none);
             try self.emitBranchOpen(.none);
             const body = try self.parseNonDeclStatement();
+            try checkForLexVarConflict(self, init, body);
+            if (!self.in_strict and isLabelledFunction(self, body)) {
+                try self.emitDiagnostic(self.currentSpan(), "Labeled function declarations are not allowed in loop or if-statement bodies", .{});
+            }
             try self.emitBranchClose(.none);
             try self.emitLoopBodyEnd(.for_in, .none);
             try self.emitLoopClose(.for_in, .none);
@@ -3380,6 +3458,7 @@ pub const Parser = struct {
             }
             try self.rejectForInOfInitializer(init, false);
             try self.validateForInOfBinding(init, true);
+            try checkForBindingNamesDup(self, init);
             expressions.reinterpretAsPattern(self, init);
             try expressions.validatePattern(self, init);
             try self.upgradePatternRefsToWrite(init);
@@ -3389,6 +3468,10 @@ pub const Parser = struct {
             try self.emitLoopTestEnd(.for_of, .none);
             try self.emitBranchOpen(.none);
             const body = try self.parseNonDeclStatement();
+            try checkForLexVarConflict(self, init, body);
+            if (!self.in_strict and isLabelledFunction(self, body)) {
+                try self.emitDiagnostic(self.currentSpan(), "Labeled function declarations are not allowed in loop or if-statement bodies", .{});
+            }
             try self.emitBranchClose(.none);
             try self.emitLoopBodyEnd(.for_of, .none);
             try self.emitLoopClose(.for_of, .none);
@@ -3759,6 +3842,10 @@ pub const Parser = struct {
 
         try self.emitBranchOpen(.none);
         const body = try self.parseNonDeclStatement();
+        try checkForLexVarConflict(self, init, body);
+        if (!self.in_strict and isLabelledFunction(self, body)) {
+            try self.emitDiagnostic(self.currentSpan(), "Labeled function declarations are not allowed in loop or if-statement bodies", .{});
+        }
         try self.emitBranchClose(.none);
         try self.emitLoopBodyEnd(.@"for", .none);
         try self.emitLoopClose(.@"for", .none);
@@ -4207,7 +4294,10 @@ pub const Parser = struct {
             var resolved_buf: [256]u8 = undefined;
             if (resolveUnicodeEscapesParser(text, &resolved_buf)) |resolved| {
                 if (isAlwaysReservedStr(resolved) or
-                    (self.in_strict and isStrictReservedStr(resolved)))
+                    (self.in_strict and isStrictReservedStr(resolved)) or
+                    (std.mem.eql(u8, resolved, "await") and
+                        (self.in_async or self.is_module or (self.in_static_block and !self.in_function))) or
+                    (std.mem.eql(u8, resolved, "yield") and (self.in_generator or self.in_strict)))
                 {
                     try self.emitDiagnosticAtToken(label_tok, "escaped reserved word cannot be used as a label", .{});
                     return error.ParseError;
@@ -4413,6 +4503,9 @@ pub const Parser = struct {
         _ = try self.expect(.r_paren);
         const with_scope_ev = try self.emitScopeOpen(.with_stmt, .none);
         const body = try self.parseNonDeclStatement();
+        if (!self.in_strict and isLabelledFunction(self, body)) {
+            try self.emitDiagnostic(self.currentSpan(), "Labeled function declarations are not allowed in loop or if-statement bodies", .{});
+        }
         try self.emitScopeClose(.none);
 
         const with_node = try self.addNode(.{

@@ -120,7 +120,7 @@ fn parseExpressionPrec(p: *Parser, min_prec: Precedence) Error!NodeIndex {
     const saved_priv_lhs = p.private_in_lhs_allowed;
     p.private_in_lhs_allowed = (@intFromEnum(min_prec) <= @intFromEnum(Precedence.relational));
     defer p.private_in_lhs_allowed = saved_priv_lhs;
-    var left = try parsePrefixExpression(p);
+    var left = try parsePrefixExpression(p, min_prec);
     // After consuming the LHS, nested operands (e.g. RHS of `in`) are not
     // valid `#x` positions at this same level — but they go through their
     // own parseExpressionPrec recursion which sets its own flag.
@@ -331,7 +331,7 @@ fn parseExpressionPrec(p: *Parser, min_prec: Precedence) Error!NodeIndex {
 // Prefix dispatch
 // =====================================================================
 
-fn parsePrefixExpression(p: *Parser) Error!NodeIndex {
+fn parsePrefixExpression(p: *Parser, min_prec: Precedence) Error!NodeIndex {
     const tag = p.peek();
     // Fast path: plain identifier is the most common primary expression.
     // Skip the parsePrimaryExpression call and switch overhead for this case.
@@ -378,7 +378,12 @@ fn parsePrefixExpression(p: *Parser) Error!NodeIndex {
         .kw_await => try parseAwaitExpression(p),
 
         // ── Yield ────────────────────────────────────────────
-        .kw_yield => try parseYieldExpression(p),
+        .kw_yield => blk: {
+            if (p.in_generator and @intFromEnum(min_prec) > @intFromEnum(Precedence.assignment)) {
+                try p.emitError("'yield' expression not allowed in this context");
+            }
+            break :blk try parseYieldExpression(p);
+        },
 
         // ── New ──────────────────────────────────────────────
         .kw_new => try parseNewExpression(p),
@@ -965,6 +970,21 @@ pub fn validatePattern(p: *Parser, node: NodeIndex) Error!void {
                         if ((p.in_strict or p.is_module) and std.mem.eql(u8, sp_text, "yield")) {
                             try p.emitError("'yield' is reserved");
                             return error.ParseError;
+                        }
+                        // Escaped keywords in shorthand destructuring: {var} = {} is a SyntaxError.
+                        if (p.tokenTagAt(sp_tok) == .escaped_keyword) {
+                            var resolved_buf_esc: [256]u8 = undefined;
+                            if (parser_mod.resolveUnicodeEscapesParser(sp_text, &resolved_buf_esc)) |resolved| {
+                                if (parser_mod.isAlwaysReservedStr(resolved) or
+                                    (p.in_strict and parser_mod.Parser.isStrictReservedStr(resolved)) or
+                                    (std.mem.eql(u8, resolved, "yield") and (p.in_generator or p.in_strict)) or
+                                    (std.mem.eql(u8, resolved, "await") and
+                                        (p.in_async or p.is_module or (p.in_static_block and !p.in_function))))
+                                {
+                                    try p.emitError("Escaped reserved word cannot be used as an identifier in a destructuring pattern");
+                                    return error.ParseError;
+                                }
+                            }
                         }
                     }
                 }
