@@ -9,6 +9,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
 
     // Expose as a named module so external projects can depend on it.
@@ -16,6 +17,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
 
     // ── Unit tests (embedded in src/) ────────────────────
@@ -27,6 +29,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("tests/parser_test.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     parser_test_mod.addImport("es_parser", lib_mod);
     const parser_tests = b.addTest(.{ .root_module = parser_test_mod });
@@ -37,6 +40,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("tests/lexer_test.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     lexer_test_mod.addImport("es_parser", lib_mod);
     const lexer_tests = b.addTest(.{ .root_module = lexer_test_mod });
@@ -47,6 +51,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("tests/semantic_test.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     semantic_test_mod.addImport("es_parser", lib_mod);
     const semantic_tests = b.addTest(.{ .root_module = semantic_test_mod });
@@ -57,11 +62,13 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = .ReleaseFast,
+        .link_libc = true,
     });
     const ptr_mod = b.createModule(.{
         .root_source_file = b.path("tests/conformance/parser_tests_runner.zig"),
         .target = target,
         .optimize = .ReleaseFast,
+        .link_libc = true,
     });
     ptr_mod.addImport("es_parser", conf_mod);
     const ptr_exe = b.addExecutable(.{ .name = "parser_tests_runner", .root_module = ptr_mod });
@@ -87,12 +94,14 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = .ReleaseFast,
+        .link_libc = true,
     });
 
     const parser_tests_runner_mod = b.createModule(.{
         .root_source_file = b.path("tests/conformance/parser_tests_runner.zig"),
         .target = target,
         .optimize = .ReleaseFast,
+        .link_libc = true,
     });
     parser_tests_runner_mod.addImport("es_parser", conf_releaseFast);
     const parser_tests_runner = b.addExecutable(.{
@@ -108,6 +117,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("tests/conformance/test262_runner.zig"),
         .target = target,
         .optimize = .ReleaseFast,
+        .link_libc = true,
     });
     test262_runner_mod.addImport("es_parser", conf_releaseFast);
     const test262_runner = b.addExecutable(.{
@@ -123,6 +133,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("tests/conformance/babel_runner.zig"),
         .target = target,
         .optimize = .ReleaseFast,
+        .link_libc = true,
     });
     babel_runner_mod.addImport("es_parser", conf_releaseFast);
     const babel_runner = b.addExecutable(.{
@@ -138,6 +149,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("tests/conformance/typescript_runner.zig"),
         .target = target,
         .optimize = .ReleaseFast,
+        .link_libc = true,
     });
     typescript_runner_mod.addImport("es_parser", conf_releaseFast);
     const typescript_runner = b.addExecutable(.{
