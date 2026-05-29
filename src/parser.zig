@@ -250,6 +250,53 @@ fn checkForBindingNamesDup(self: *Parser, lex_decl: NodeIndex) Error!void {
     }
 }
 
+/// Check that no name in catch_param's BoundNames appears in the LexicallyDeclaredNames
+/// of the catch body block (top-level only, not nested blocks). Also checks for duplicate
+/// names within catch_param itself.
+fn checkCatchBindingConflicts(self: *Parser, catch_param: NodeIndex, catch_body: NodeIndex) Error!void {
+    if (self.is_ts) return;
+    // Check for duplicate names within the catch parameter itself.
+    if (catch_param != .none) {
+        var dup_buf: [16][]const u8 = undefined;
+        var dup_n: usize = 0;
+        collectBindingName(self, catch_param, &dup_buf, &dup_n);
+        var i: usize = 0;
+        while (i < dup_n) : (i += 1) {
+            var j: usize = i + 1;
+            while (j < dup_n) : (j += 1) {
+                if (std.mem.eql(u8, dup_buf[i], dup_buf[j])) {
+                    try self.emitDiagnostic(self.currentSpan(),
+                        "Identifier '{s}' has already been declared", .{dup_buf[i]});
+                    return error.ParseError;
+                }
+            }
+        }
+    }
+    // Check catch param names against lex names declared at the TOP LEVEL of the catch body.
+    // Nested block contents are NOT included (LexicallyDeclaredNames is not transitive).
+    if (catch_param == .none or catch_body == .none) return;
+    const body_idx = catch_body.toInt();
+    if (body_idx >= self.nodes.len) return;
+    if (self.node_tags_ptr[body_idx] != .block_stmt) return;
+    const body_data = self.node_data_ptr[body_idx];
+    var param_buf: [16][]const u8 = undefined;
+    var param_n: usize = 0;
+    collectBindingName(self, catch_param, &param_buf, &param_n);
+    if (param_n == 0) return;
+    var lex_buf: [64][]const u8 = undefined;
+    var lex_n: usize = 0;
+    collectLexNamesInRange(self, body_data.lhs.toInt(), body_data.rhs.toInt(), &lex_buf, &lex_n);
+    for (param_buf[0..param_n]) |pname| {
+        for (lex_buf[0..lex_n]) |lname| {
+            if (std.mem.eql(u8, pname, lname)) {
+                try self.emitDiagnostic(self.currentSpan(),
+                    "Identifier '{s}' has already been declared", .{pname});
+                return error.ParseError;
+            }
+        }
+    }
+}
+
 /// Collect names from var_decl nodes in extra_data[start..end].
 /// Recurses into nested non-function blocks. Stops at function/class scope boundaries.
 fn collectVarNamesInRange(
@@ -2392,6 +2439,8 @@ pub const Parser = struct {
             const Entry = struct { name: []const u8, kind: BindingKindU8, fn_flavor: u32 };
             var names_buf: [128]Entry = undefined;
             var names_n: usize = 0;
+            var var_names_buf: [128][]const u8 = undefined;
+            var var_names_n: usize = 0;
             const allow_fn_dup = !self.is_module and !self.in_strict and self.annex_b;
             for (evs) |ev| {
                 // Guard against corrupt enum bytes: reading past the live event count
@@ -2404,6 +2453,16 @@ pub const Parser = struct {
                     .scope_close => depth -= 1,
                     .declare => if (depth == 0) {
                         const bk: BindingKindU8 = @enumFromInt(ev.aux);
+                        // Collect module-level var declarations for lex-var conflict check.
+                        if (bk == .@"var" and self.is_module and !self.is_ts) {
+                            const vt = self.node_main_token_ptr[@intCast(ev.node)];
+                            const vs = self.tok_starts_ptr[vt];
+                            const vl = self.tok_lens_ptr[vt];
+                            if (vs + vl <= self.source.len and var_names_n < var_names_buf.len) {
+                                var_names_buf[var_names_n] = self.source[vs..vs + vl];
+                                var_names_n += 1;
+                            }
+                        }
                         if (bk == .@"var" or bk == .parameter) continue;
                         // Sloppy script top-level: function decls hoist as var-bindings;
                         // any flavor pair coexists. Module: strict lexical check applies.
@@ -2435,6 +2494,20 @@ pub const Parser = struct {
                         }
                     },
                     else => {},
+                }
+            }
+            // Module-level lex-vs-var conflict check.
+            // "It is a Syntax Error if any element of the LexicallyDeclaredNames of
+            // ModuleItemList also occurs in the VarDeclaredNames of ModuleItemList."
+            if (self.is_module and !self.is_ts and names_n > 0 and var_names_n > 0) {
+                for (names_buf[0..names_n]) |lex_entry| {
+                    for (var_names_buf[0..var_names_n]) |var_name| {
+                        if (std.mem.eql(u8, lex_entry.name, var_name)) {
+                            try self.emitDiagnostic(self.currentSpan(),
+                                "Identifier '{s}' has already been declared", .{lex_entry.name});
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -2924,18 +2997,15 @@ pub const Parser = struct {
                 }
 
                 // Check lex names against var names (lex-var conflict).
-                // Collect var-declared names from the block's statement range.
+                // Spec rule: "It is a Syntax Error if any element of the
+                // LexicallyDeclaredNames of StatementList also occurs in the
+                // VarDeclaredNames of StatementList." AnnexB has no exception to
+                // this specific rule (function decls ARE lexically declared in blocks).
                 if (names_n > 0 and !self.is_ts) {
                     var var_names_buf: [128][]const u8 = undefined;
                     var var_names_n: usize = 0;
                     collectVarNamesInRange(self, range.start, range.end, &var_names_buf, &var_names_n);
                     for (names_buf[0..names_n]) |lex_entry| {
-                        // AnnexB B.3.3: in sloppy script mode, plain (non-async, non-generator)
-                        // FunctionDeclarations are var-hoisted and do not conflict with var.
-                        // async/generator function decls (fn_flavor != 0) are NOT exempt.
-                        if (allow_fn_dup and
-                            (lex_entry.kind == .function_decl or lex_entry.kind == .function_decl_annex_b) and
-                            lex_entry.fn_flavor == 0) continue;
                         for (var_names_buf[0..var_names_n]) |var_name| {
                             if (std.mem.eql(u8, lex_entry.name, var_name)) {
                                 try self.emitDiagnostic(self.currentSpan(),
@@ -3047,9 +3117,14 @@ pub const Parser = struct {
                 // In non-strict, `let` followed by newline or non-binding token is an identifier.
                 if (!self.in_strict) {
                     const next = self.peekAt(1);
-                    const could_be_binding = (next == .identifier or next == .l_bracket or next == .l_brace or next.isKeyword());
-                    if (!could_be_binding or self.hasNewLineBetween(self.tokIdx(), @intCast(self.tok_i + 1))) {
-                        return self.parseStatement();
+                    // `let [` is forbidden regardless of newline: either a lex decl (not allowed
+                    // here) or an ExpressionStatement starting with `let [` (also forbidden by
+                    // the ExpressionStatement lookahead restriction).
+                    if (next != .l_bracket) {
+                        const could_be_binding = (next == .identifier or next == .l_brace or next.isKeyword());
+                        if (!could_be_binding or self.hasNewLineBetween(self.tokIdx(), @intCast(self.tok_i + 1))) {
+                            return self.parseStatement();
+                        }
                     }
                 }
                 try self.emitDiagnostic(self.currentSpan(), "lexical declaration not allowed in single-statement context", .{});
@@ -3115,9 +3190,13 @@ pub const Parser = struct {
             .kw_let => {
                 if (!self.in_strict) {
                     const next = self.peekAt(1);
-                    const could_be_binding = (next == .identifier or next == .l_bracket or next == .l_brace or next.isKeyword());
-                    if (!could_be_binding or self.hasNewLineBetween(self.tokIdx(), @intCast(self.tok_i + 1))) {
-                        return self.parseStatement();
+                    // `let [` is forbidden (lex decl not allowed here, and ExpressionStatement
+                    // starting with `let [` is also forbidden by lookahead restriction).
+                    if (next != .l_bracket) {
+                        const could_be_binding = (next == .identifier or next == .l_brace or next.isKeyword());
+                        if (!could_be_binding or self.hasNewLineBetween(self.tokIdx(), @intCast(self.tok_i + 1))) {
+                            return self.parseStatement();
+                        }
                     }
                 }
                 try self.emitDiagnostic(self.currentSpan(), "lexical declaration not allowed in single-statement context", .{});
@@ -3448,12 +3527,20 @@ pub const Parser = struct {
         }
 
         if (self.eat(.kw_of)) |_| {
-            // TS1106: The left-hand side of a 'for...of' statement may not be 'async'.
-            if (self.is_ts and !is_await and init != .none) {
+            // The left-hand side of a 'for...of' statement may not be 'async'
+            // (only applies to for-of, not for-await-of).
+            if (!is_await and init != .none) {
                 const init_tag = self.node_tags_ptr[init.toInt()];
                 const init_tok = self.node_main_token_ptr[init.toInt()];
-                if (init_tag == .identifier and std.mem.eql(u8, self.tokenText(init_tok), "async")) {
-                    try self.emitDiagnostic(self.currentSpan(), "The left-hand side of a 'for...of' statement may not be 'async'", .{});
+                const is_async_id = init_tag == .identifier and
+                    self.tokenTagAt(init_tok) == .kw_async;
+                if (is_async_id) {
+                    if (self.is_ts) {
+                        try self.emitDiagnostic(self.currentSpan(), "The left-hand side of a 'for...of' statement may not be 'async'", .{});
+                    } else {
+                        try self.emitDiagnostic(self.currentSpan(), "'async' is not allowed as the LHS of a for-of loop", .{});
+                        return error.ParseError;
+                    }
                 }
             }
             try self.rejectForInOfInitializer(init, false);
@@ -3684,14 +3771,16 @@ pub const Parser = struct {
                 try self.validateAssignmentTargetObject(unwrapped.node);
             },
             .var_decl, .let_decl, .const_decl => {
-                // TS1493/TS1494: using/await using not allowed on for-in LHS
-                if (!is_for_of and self.is_ts and init_tag == .const_decl) {
+                // using/await using not allowed on for-in LHS (spec: only for-of).
+                if (!is_for_of and init_tag == .const_decl) {
                     const decl_main = self.node_main_token_ptr[init.toInt()];
                     const decl_tag = self.tokenTagAt(decl_main);
                     if (decl_tag == .identifier and std.mem.eql(u8, self.tokenText(decl_main), "using")) {
                         try self.emitDiagnostic(self.currentSpan(), "The left-hand side of a 'for...in' statement cannot be a 'using' declaration", .{});
+                        return error.ParseError;
                     } else if (decl_tag == .kw_await) {
                         try self.emitDiagnostic(self.currentSpan(), "The left-hand side of a 'for...in' statement cannot be an 'await using' declaration", .{});
+                        return error.ParseError;
                     }
                 }
                 // Must have exactly one declarator
@@ -3699,6 +3788,26 @@ pub const Parser = struct {
                 const count = @intFromEnum(d.rhs) - @intFromEnum(d.lhs);
                 if (count != 1) {
                     try self.emitDiagnostic(self.currentSpan(), "for-in/of must have a single binding", .{});
+                }
+                // using/await-using declarations cannot bind `let`.
+                if (!self.is_ts and init_tag == .const_decl) {
+                    const decl_main_tok = self.node_main_token_ptr[init.toInt()];
+                    const decl_main_tag = self.tokenTagAt(decl_main_tok);
+                    const is_using_decl = (decl_main_tag == .identifier and
+                        std.mem.eql(u8, self.tokenText(decl_main_tok), "using")) or
+                        decl_main_tag == .kw_await;
+                    if (is_using_decl) {
+                        var names: [8][]const u8 = undefined;
+                        var names_n: usize = 0;
+                        collectLexNamesInNode(self, init, &names, &names_n);
+                        for (names[0..names_n]) |nm| {
+                            if (std.mem.eql(u8, nm, "let")) {
+                                try self.emitDiagnostic(self.currentSpan(),
+                                    "'let' is not allowed as a 'using' binding name", .{});
+                                return error.ParseError;
+                            }
+                        }
+                    }
                 }
             },
             .call_expr => {
@@ -3719,7 +3828,7 @@ pub const Parser = struct {
             .fn_expr, .class_expr, .template_literal, .tagged_template,
             .logical_or, .logical_and, .bitwise_or, .bitwise_xor, .bitwise_and,
             .strict_equal, .strict_not_equal,
-            .regex_literal,
+            .regex_literal, .import_meta,
             => {
                 // In TS mode, invalid for-in/of LHS is a type error, not syntax error
                 if (!self.is_ts) {
@@ -3803,8 +3912,21 @@ pub const Parser = struct {
         const init_tag = self.node_tags_ptr[init.toInt()];
         // Variable declarations with initializers
         if (init_tag == .var_decl or init_tag == .let_decl or init_tag == .const_decl) {
-            // Annex B: `for (var x = expr in y)` is allowed in non-strict for-in (not for-of), but not in TS.
-            if (is_for_in and init_tag == .var_decl and !self.in_strict and !self.is_ts) return;
+            // Annex B: `for (var x = expr in y)` is allowed in non-strict for-in ONLY for
+            // simple (identifier) bindings. Destructuring patterns are always rejected.
+            if (is_for_in and init_tag == .var_decl and !self.in_strict and !self.is_ts) {
+                // Check that the binding is a simple identifier (not a pattern).
+                const init_data = self.node_data_ptr[init.toInt()];
+                if (init_data.lhs.toInt() + 1 == init_data.rhs.toInt()) {
+                    const decl_node = NodeIndex.fromInt(self.extra_data.items[init_data.lhs.toInt()]);
+                    if (decl_node != .none and self.node_tags_ptr[decl_node.toInt()] == .declarator) {
+                        const binding = self.node_data_ptr[decl_node.toInt()].lhs;
+                        if (binding != .none and self.node_tags_ptr[binding.toInt()] == .identifier) {
+                            return; // Simple binding: allow via AnnexB
+                        }
+                    }
+                }
+            }
             const init_data = self.node_data_ptr[init.toInt()];
             const range = ast.SubRange{
                 .start = @intFromEnum(init_data.lhs),
@@ -4289,7 +4411,21 @@ pub const Parser = struct {
     /// Parse `label: statement`.
     pub fn parseLabeledStatement(self: *Parser) Error!NodeIndex {
         const label_tok = self.advance(); // eat identifier (the label)
-        if (self.tokenTagAt(label_tok) == .escaped_keyword) {
+        // Check for contextual keyword labels that are restricted in certain contexts.
+        const label_raw_tag = self.tokenTagAt(label_tok);
+        if (label_raw_tag == .kw_await and !self.is_ts) {
+            if (self.in_async or self.is_module or (self.in_static_block and !self.in_function)) {
+                try self.emitDiagnosticAtToken(label_tok, "'await' cannot be used as a label in this context", .{});
+                return error.ParseError;
+            }
+        }
+        if (label_raw_tag == .kw_yield and !self.is_ts) {
+            if (self.in_generator or self.in_strict) {
+                try self.emitDiagnosticAtToken(label_tok, "'yield' cannot be used as a label in this context", .{});
+                return error.ParseError;
+            }
+        }
+        if (label_raw_tag == .escaped_keyword) {
             const text = self.tokenText(label_tok);
             var resolved_buf: [256]u8 = undefined;
             if (resolveUnicodeEscapesParser(text, &resolved_buf)) |resolved| {
@@ -4316,22 +4452,24 @@ pub const Parser = struct {
 
         const label_name = self.tokenText(label_tok);
 
-        // TS1114: Duplicate label check
-        if (self.is_ts) {
+        // Duplicate label check (always for strict/module/TS mode).
+        const check_dup_labels = self.is_ts or self.is_module or self.in_strict;
+        if (check_dup_labels) {
             if (self.ts_label_stack) |stack| {
                 var i: u8 = 0;
                 while (i < self.ts_label_count) : (i += 1) {
                     if (std.mem.eql(u8, stack[i].name, label_name)) {
                         try self.emitDiagnostic(self.currentSpan(), "Duplicate label", .{});
+                        if (!self.is_ts) return error.ParseError;
                         break;
                     }
                 }
             }
         }
 
-        // Push label onto stack for TS cross-function-boundary detection
+        // Push label onto stack for duplicate detection and cross-function-boundary detection.
         const prev_label_count = self.ts_label_count;
-        if (self.is_ts and self.ts_label_count < 32) {
+        if ((self.is_ts or self.is_module or self.in_strict) and self.ts_label_count < 32) {
             if (self.ts_label_stack == null)
                 self.ts_label_stack = try self.gpa.create([32]LabelEntry);
             self.ts_label_stack.?[self.ts_label_count] = .{ .name = label_name, .fn_depth = self.ts_label_fn_depth };
@@ -4357,10 +4495,16 @@ pub const Parser = struct {
                 }
             },
             .kw_let => {
+                const next = self.peekAt(1);
+                // `let [` is always forbidden after a label: either a lex decl (not allowed)
+                // or an ExpressionStatement starting with `let [` (blocked by lookahead restriction).
+                if (next == .l_bracket) {
+                    try self.emitDiagnostic(self.currentSpan(), "lexical declaration not allowed after label", .{});
+                    return error.ParseError;
+                }
                 const is_decl = blk: {
                     if (self.in_strict) break :blk true;
-                    const next = self.peekAt(1);
-                    const could_be_binding = (next == .identifier or next == .l_bracket or next == .l_brace or next.isKeyword());
+                    const could_be_binding = (next == .identifier or next == .l_brace or next.isKeyword());
                     break :blk could_be_binding and !self.hasNewLineBetween(self.tokIdx(), @intCast(self.tok_i + 1));
                 };
                 if (is_decl) {
@@ -4377,6 +4521,37 @@ pub const Parser = struct {
                 if (self.in_strict) {
                     try self.emitDiagnostic(self.currentSpan(), "In strict mode, function declarations are not allowed after a label", .{});
                     return error.ParseError;
+                }
+            },
+            .kw_async => {
+                // `async function` and `async function*` are not allowed in labeled position.
+                if (self.peekAt(1) == .kw_function and
+                    !self.hasNewLineBetween(self.tokIdx(), @intCast(self.tok_i + 1)))
+                {
+                    try self.emitDiagnostic(self.currentSpan(), "async function declaration not allowed after label", .{});
+                    return error.ParseError;
+                }
+            },
+            .kw_await => {
+                // `await using x = ...` is a declaration, not allowed after label.
+                if (!self.is_ts and self.peekAt(1) == .identifier and
+                    std.mem.eql(u8, self.tokenText(@intCast(self.tok_i + 1)), "using") and
+                    !self.hasNewLineBetween(self.tokIdx(), @intCast(self.tok_i + 1)))
+                {
+                    try self.emitDiagnostic(self.currentSpan(), "'await using' declaration not allowed after label", .{});
+                    return error.ParseError;
+                }
+            },
+            .identifier => {
+                // `using x = ...` is a declaration, not allowed after label.
+                if (!self.is_ts and std.mem.eql(u8, self.tokenText(self.tokIdx()), "using")) {
+                    const next = self.peekAt(1);
+                    if ((next == .identifier or next == .kw_let) and
+                        !self.hasNewLineBetween(self.tokIdx(), @intCast(self.tok_i + 1)))
+                    {
+                        try self.emitDiagnostic(self.currentSpan(), "'using' declaration not allowed after label", .{});
+                        return error.ParseError;
+                    }
                 }
             },
             .kw_import, .kw_export => {
@@ -4435,6 +4610,7 @@ pub const Parser = struct {
                 _ = try self.expect(.r_paren);
             }
             const catch_body = try self.parseBlockStatement();
+            try checkCatchBindingConflicts(self, catch_param, catch_body);
             try self.emitScopeClose(.none);
             catch_node = try self.addNode(.{
                 .tag = .catch_clause,
@@ -4916,6 +5092,10 @@ pub const Parser = struct {
         self.in_fn_params = false; // body is outside params — clear for nested await/yield
         defer self.in_fn_params = prev_fp_body;
         const body = try self.parseBlockStatement();
+        // Param vs lex body conflict: applies to generators, async, methods, and strict.
+        if (self.in_async or self.in_generator or self.in_method or self.in_strict) {
+            try self.checkParamBodyLexConflict(params, body);
+        }
         try self.emitScopeClose(.none); // close function scope
 
         const tag: Node.Tag = if (is_async and is_generator)
@@ -5013,6 +5193,12 @@ pub const Parser = struct {
         const class_type_params = if (self.is_ts and self.peek() == .less_than) blk: {
             break :blk try typescript.parseTypeParameterList(self);
         } else ast.SubRange{ .start = 0, .end = 0 };
+
+        // Class definitions (including extends clause and body) are always strict mode code.
+        const prev_strict_class = self.in_strict;
+        self.in_strict = true;
+        self.syncYieldLex();
+        defer { self.in_strict = prev_strict_class; self.syncYieldLex(); }
 
         // Optional: extends superClass (must be LeftHandSideExpression)
         const super_class: NodeIndex = if (self.eat(.kw_extends) != null) blk: {
@@ -5173,10 +5359,19 @@ pub const Parser = struct {
                 if (self.tokenTagAt(key_tok) != .hash) continue;
                 if (key_tok + 1 >= self.tokens.len) continue;
                 const name_text = self.tokenText(key_tok + 1);
+                // Check if this member is static.
+                const extra_idx = m_data.rhs.toInt();
+                const is_static_member = if (extra_idx + 4 < self.extra_data.items.len)
+                    (self.extra_data.items[extra_idx + 4] & ast.ModifierBit.@"static") != 0
+                else
+                    false;
+                // Bit encoding: non-static getter=1, non-static setter=2, static getter=4,
+                // static setter=8, non-static other=16, static other=32.
+                // Allowed pairs: 1|2 (non-static g+s) or 4|8 (static g+s).
                 const bit: u32 = switch (m_tag) {
-                    .getter_def => 1,
-                    .setter_def => 2,
-                    else => 4,
+                    .getter_def => if (is_static_member) @as(u32, 4) else @as(u32, 1),
+                    .setter_def => if (is_static_member) @as(u32, 8) else @as(u32, 2),
+                    else => if (is_static_member) @as(u32, 32) else @as(u32, 16),
                 };
                 const gop = try seen.getOrPut(name_text);
                 if (!gop.found_existing) {
@@ -5184,7 +5379,9 @@ pub const Parser = struct {
                     try self.private_decls.append(self.gpa, name_text);
                 } else {
                     const combined = gop.value_ptr.* | bit;
-                    if (combined != (1 | 2) and !self.is_ts) {
+                    // Allowed: non-static getter+setter (1|2=3) or static getter+setter (4|8=12)
+                    const allowed = combined == (1 | 2) or combined == (4 | 8);
+                    if (!allowed and !self.is_ts) {
                         try self.emitError("Duplicate private name in class body");
                         return error.ParseError;
                     }
@@ -5230,6 +5427,38 @@ pub const Parser = struct {
             }
             self.private_refs.shrinkRetainingCapacity(write);
             self.private_decls.shrinkRetainingCapacity(private_decls_start);
+        }
+
+        // Duplicate constructor check: only one non-static constructor allowed per class.
+        if (!self.is_ts) {
+            var ctor_count: u8 = 0;
+            for (members) |idx_int| {
+                const m = NodeIndex.fromInt(idx_int);
+                if (m == .none) continue;
+                const m_tag = self.node_tags_ptr[m.toInt()];
+                if (m_tag != .method_def) continue;
+                const m_data = self.node_data_ptr[m.toInt()];
+                const key = m_data.lhs;
+                if (key == .none) continue;
+                const key_tag = self.node_tags_ptr[key.toInt()];
+                const key_tok = self.node_main_token_ptr[key.toInt()];
+                const is_ctor_name = (key_tag == .identifier and
+                    std.mem.eql(u8, self.tokenText(key_tok), "constructor")) or
+                    (key_tag == .string_literal and
+                    std.mem.eql(u8, self.getStringContent(self.tokenStart(key_tok)), "constructor"));
+                if (!is_ctor_name) continue;
+                // Check if static (bit 6 in modifiers at extra_data[rhs + 4])
+                const extra_idx = m_data.rhs.toInt();
+                if (extra_idx + 4 < self.extra_data.items.len) {
+                    const modifiers = self.extra_data.items[extra_idx + 4];
+                    if ((modifiers & ast.ModifierBit.@"static") != 0) continue;
+                }
+                ctor_count += 1;
+                if (ctor_count > 1) {
+                    try self.emitError("A class may only have one constructor");
+                    return error.ParseError;
+                }
+            }
         }
 
         return self.listToSubRange(members);
@@ -5432,65 +5661,93 @@ pub const Parser = struct {
             }
             const static_tok = self.advance(); // eat 'static'
             _ = self.advance(); // eat '{'
-            // Static blocks isolate break/continue/return context;
-            // `arguments` is also forbidden (reuse class-field check).
+            // Static blocks isolate break/continue/return context, async/generator
+            // context. Per spec: [~Yield, +Await, ~Return] — but ContainsYield and
+            // ContainsAwait are early errors, so we reset in_generator/in_async to
+            // detect accidental use of yield/await from enclosing context.
             const prev_in_loop = self.in_loop;
             const prev_in_switch = self.in_switch;
             const prev_in_function = self.in_function;
+            const prev_in_async_sb = self.in_async;
+            const prev_in_generator_sb = self.in_generator;
             const prev_cf_sb = self.in_class_field;
             const prev_in_static_block = self.in_static_block;
             const prev_nta_sb = self.new_target_allowed;
             self.in_loop = false;
             self.in_switch = false;
             self.in_function = false;
+            self.in_async = false;
+            self.in_generator = false;
             self.in_class_field = true;
             self.in_static_block = true;
             self.new_target_allowed = true;
+            self.syncYieldLex();
             const static_scope_ev = try self.emitScopeOpen(.static_block, .none);
             const range = try self.parseStatementList(.r_brace);
             try self.emitScopeClose(.none);
 
-            // Detect duplicate lexical declarations at static block's top level.
-            if (self.emit_scope_events) {
+            // Detect duplicate lexical declarations and lex-vs-var conflicts in static block.
+            if (self.emit_scope_events and !self.is_ts) {
                 var sb_depth: i32 = 0;
                 const sb_evs = self.ev_ptr[0..self.ev_len][static_scope_ev + 1 ..];
                 const SbEntry = struct { name: []const u8 };
-                var sb_names: [64]SbEntry = undefined;
-                var sb_names_n: usize = 0;
+                var sb_lex: [64]SbEntry = undefined;
+                var sb_lex_n: usize = 0;
+                var sb_var: [64]SbEntry = undefined;
+                var sb_var_n: usize = 0;
                 for (sb_evs) |ev| {
                     switch (ev.kind) {
                         .scope_open => if (ev.aux != @intFromEnum(ScopeKindU8.elided)) { sb_depth += 1; },
                         .scope_close => sb_depth -= 1,
                         .declare => if (sb_depth == 0) {
                             const bk: BindingKindU8 = @enumFromInt(ev.aux);
-                            if (bk == .@"var" or bk == .parameter or bk == .function_decl or bk == .function_decl_annex_b) continue;
                             const main_tok_idx = self.node_main_token_ptr[@intCast(ev.node)];
                             const tok_start = self.tok_starts_ptr[main_tok_idx];
                             const tok_len = self.tok_lens_ptr[main_tok_idx];
                             if (tok_start + tok_len > self.source.len) continue;
                             const name = self.source[tok_start..tok_start + tok_len];
-                            var dup = false;
-                            for (sb_names[0..sb_names_n]) |existing| {
-                                if (std.mem.eql(u8, existing.name, name)) { dup = true; break; }
-                            }
-                            if (dup) {
-                                try self.emitDiagnostic(self.currentSpan(),
-                                    "Identifier '{s}' has already been declared", .{name});
-                            } else if (sb_names_n < sb_names.len) {
-                                sb_names[sb_names_n] = .{ .name = name };
-                                sb_names_n += 1;
+                            if (bk == .@"var" or bk == .parameter) {
+                                if (sb_var_n < sb_var.len) {
+                                    sb_var[sb_var_n] = .{ .name = name };
+                                    sb_var_n += 1;
+                                }
+                            } else if (bk != .function_decl and bk != .function_decl_annex_b) {
+                                var dup = false;
+                                for (sb_lex[0..sb_lex_n]) |existing| {
+                                    if (std.mem.eql(u8, existing.name, name)) { dup = true; break; }
+                                }
+                                if (dup) {
+                                    try self.emitDiagnostic(self.currentSpan(),
+                                        "Identifier '{s}' has already been declared", .{name});
+                                } else if (sb_lex_n < sb_lex.len) {
+                                    sb_lex[sb_lex_n] = .{ .name = name };
+                                    sb_lex_n += 1;
+                                }
                             }
                         },
                         else => {},
+                    }
+                }
+                // Check lex-vs-var conflict in static block.
+                for (sb_lex[0..sb_lex_n]) |lex_entry| {
+                    for (sb_var[0..sb_var_n]) |var_entry| {
+                        if (std.mem.eql(u8, lex_entry.name, var_entry.name)) {
+                            try self.emitDiagnostic(self.currentSpan(),
+                                "Identifier '{s}' has already been declared", .{lex_entry.name});
+                            break;
+                        }
                     }
                 }
             }
             self.in_loop = prev_in_loop;
             self.in_switch = prev_in_switch;
             self.in_function = prev_in_function;
+            self.in_async = prev_in_async_sb;
+            self.in_generator = prev_in_generator_sb;
             self.in_class_field = prev_cf_sb;
             self.in_static_block = prev_in_static_block;
             self.new_target_allowed = prev_nta_sb;
+            self.syncYieldLex();
             _ = try self.expect(.r_brace);
             const static_node = try self.addNode(.{
                 .tag = .static_block,
@@ -5813,6 +6070,20 @@ pub const Parser = struct {
             try self.emitDiagnostic(self.currentSpan(), "'(' expected", .{});
         }
 
+        // Accessor (getter/setter) methods cannot be named "constructor" (non-static).
+        // Spec: ClassElement : MethodDefinition is a SyntaxError if PropName is "constructor"
+        // and SpecialMethod is true (getter, setter, generator, or async).
+        if ((is_getter or is_setter) and !is_static and key != .none and !self.is_ts) {
+            const kt = self.node_tags_ptr[key.toInt()];
+            const kk = self.node_main_token_ptr[key.toInt()];
+            const is_ctor_name = (kt == .identifier and std.mem.eql(u8, self.tokenText(kk), "constructor")) or
+                (kt == .string_literal and std.mem.eql(u8, self.getStringContent(self.tokenStart(kk)), "constructor"));
+            if (is_ctor_name) {
+                try self.emitError("Accessor method cannot be named 'constructor'");
+                return error.ParseError;
+            }
+        }
+
         // TS: `constructor` in a class must always be followed by `(` — it cannot be a field.
         if (self.is_ts and !is_static and !is_getter and !is_setter and self.peek() != .l_paren) {
             const key_tag_ck = self.node_tags_ptr[key.toInt()];
@@ -5840,9 +6111,22 @@ pub const Parser = struct {
             }
             const prev_in_constructor_early = self.in_constructor;
             if (early_is_ctor) self.in_constructor = true;
+            // Set async/generator context before parsing params so await/yield are
+            // correctly recognized as reserved in async/generator method params.
+            const prev_async_params = self.in_async;
+            const prev_gen_params = self.in_generator;
+            if (is_async_method) self.in_async = true;
+            if (is_generator_method) { self.in_generator = true; self.syncYieldLex(); }
+            // Method params are a function scope — class-field restrictions (arguments, static-block)
+            // don't apply inside method params. Temporarily clear in_class_field before params.
+            const prev_cf_params = self.in_class_field;
+            self.in_class_field = false;
             // Open method's function scope before params so declares land in it.
             const method_scope_ev = try self.emitScopeOpen(.function, .none);
             const params = try self.parseFormalParameters();
+            self.in_class_field = prev_cf_params;
+            self.in_async = prev_async_params;
+            if (is_generator_method) { self.in_generator = prev_gen_params; self.syncYieldLex(); }
             self.in_constructor = prev_in_constructor_early;
 
             // Validate getter/setter parameter counts
@@ -6815,6 +7099,17 @@ pub const Parser = struct {
                 }
             }
 
+            // In strict mode (modules are always strict), eval/arguments cannot be
+            // used as binding identifiers (including import local bindings).
+            if (self.is_module and !self.is_ts) {
+                const local_text = self.tokenText(local_tok);
+                if (std.mem.eql(u8, local_text, "eval") or std.mem.eql(u8, local_text, "arguments")) {
+                    try self.emitDiagnostic(self.currentSpan(),
+                        "'{s}' cannot be used as a binding in strict mode", .{local_text});
+                    return error.ParseError;
+                }
+            }
+
             // local binding: if no alias and imported was an identifier, reuse imported as local.
             // Otherwise, create a fresh identifier node for the local binding.
             const local_node = if (!has_alias and !imported_is_string)
@@ -7474,13 +7769,14 @@ pub const Parser = struct {
             // Emit diagnostic but continue parsing so the binding is established.
             // This matches Espree's lenient behavior (error recovery without abort).
         }
-        // TS1547/TS1548: using/await using not allowed directly in case/default clause
-        if (self.is_ts and self.in_case_clause) {
+        // using/await using not allowed directly in case/default clause (needs a block).
+        if (self.in_case_clause) {
             if (is_await) {
                 try self.emitDiagnostic(self.currentSpan(), "'await using' declarations are not allowed in 'case' or 'default' clauses unless contained within a block", .{});
             } else {
                 try self.emitDiagnostic(self.currentSpan(), "'using' declarations are not allowed in 'case' or 'default' clauses unless contained within a block", .{});
             }
+            if (!self.is_ts) return error.ParseError;
         }
         if (is_await) _ = self.advance(); // eat 'await'
         _ = self.advance(); // eat 'using'
@@ -8160,8 +8456,11 @@ pub const Parser = struct {
                         if (key_tag == .kw_yield and self.in_generator) {
                             try self.emitDiagnostic(self.currentSpan(), "'yield' is not allowed as a binding name in generator", .{});
                         }
-                        if (key_tag == .kw_await and (self.in_async or self.is_module)) {
+                        if (key_tag == .kw_await and
+                            (self.in_async or self.is_module or (self.in_static_block and !self.in_function)))
+                        {
                             try self.emitDiagnostic(self.currentSpan(), "'await' is not allowed as a binding name in async/module", .{});
+                            return error.ParseError;
                         }
                         // 'enum' is a future-reserved word in any mode — never valid as a binding.
                         if (key_tag == .kw_enum) {
@@ -8437,13 +8736,14 @@ pub const Parser = struct {
         }
         if (tag == .identifier) {
             const text = self.tokenText(tok);
-            // For raw .identifier text: let/yield/static/interface are already keyword tags;
-            // implements is kw_implements in TS mode. Only public/package/private/protected
-            // (all start with 'p') plus implements (JS-only, starts with 'i') can match.
+            // In JS mode (is_ts = false), `interface` and `implements` are lexed as .identifier
+            // (they are only keyword tokens in TypeScript mode). Check them explicitly.
             if (text.len >= 6) {
                 if (text[0] == 'p' and isStrictReservedAccessModifier(text)) return true;
-                if (!self.is_ts and text[0] == 'i' and text.len == 10 and
-                    std.mem.eql(u8, text, "implements")) return true;
+                if (!self.is_ts and text[0] == 'i') {
+                    if (text.len == 9 and std.mem.eql(u8, text, "interface")) return true;
+                    if (text.len == 10 and std.mem.eql(u8, text, "implements")) return true;
+                }
             }
             // Plain .identifier with \u escapes: decoded text might be a strict reserved word
             // not in Token.keywords. The lexer sets has_unicode_escape for identifiers that
@@ -8723,6 +9023,40 @@ pub const Parser = struct {
             while (b < names.items.len) : (b += 1) {
                 if (std.mem.eql(u8, names.items[a], names.items[b])) {
                     try self.emitError("Duplicate parameter name not allowed in this context");
+                    return error.ParseError;
+                }
+            }
+        }
+    }
+
+    /// Check that no formal parameter name also appears as a lex-declared name
+    /// in the function body block (top-level only). Applies to methods, generators,
+    /// async functions, and strict-mode functions.
+    pub fn checkParamBodyLexConflict(self: *Parser, params: SubRange, body: NodeIndex) !void {
+        if (self.is_ts) return;
+        if (body == .none) return;
+        const body_idx = body.toInt();
+        if (body_idx >= self.nodes.len) return;
+        if (self.node_tags_ptr[body_idx] != .block_stmt) return;
+        const body_data = self.node_data_ptr[body_idx];
+        // Collect lex names from top-level of body.
+        var lex_buf: [64][]const u8 = undefined;
+        var lex_n: usize = 0;
+        collectLexNamesInRange(self, body_data.lhs.toInt(), body_data.rhs.toInt(), &lex_buf, &lex_n);
+        if (lex_n == 0) return;
+        // Collect param names.
+        const names = &self.param_names_scratch;
+        names.clearRetainingCapacity();
+        var i = params.start;
+        while (i < params.end) : (i += 1) {
+            const pnode = NodeIndex.fromInt(self.extra_data.items[i]);
+            try self.collectParamNames(pnode, names);
+        }
+        for (names.items) |pname| {
+            for (lex_buf[0..lex_n]) |lname| {
+                if (std.mem.eql(u8, pname, lname)) {
+                    try self.emitDiagnostic(self.currentSpan(),
+                        "Identifier '{s}' has already been declared", .{pname});
                     return error.ParseError;
                 }
             }

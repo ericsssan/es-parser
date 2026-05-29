@@ -405,10 +405,10 @@ test "no false positive: var-var in block" {
     try expectNoErrors(&tree);
 }
 
-test "no false positive: plain fn-decl then var in sloppy mode" {
+test "lex-var conflict: fn-decl and var in same block is SyntaxError" {
     var tree = try parseSource("{ function f() {} var f }");
     defer tree.deinit(testing.allocator);
-    try expectNoErrors(&tree);
+    try testing.expect(tree.errors.len > 0);
 }
 
 test "no false positive: var in outer let in inner block" {

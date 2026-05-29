@@ -561,9 +561,9 @@ fn parseAwaitExpression(p: *Parser) Error!NodeIndex {
             try p.emitError("'await' is not allowed as an identifier in module mode");
             return error.ParseError;
         }
-        // Inside a class static initialization block (not nested in a fn within),
+        // Inside a class static initialization block (not nested in a fn or its params),
         // `await` is reserved.
-        if (p.in_static_block and !p.in_function) {
+        if (p.in_static_block and !p.in_function and !p.in_fn_params) {
             try p.emitError("'await' is not allowed as an identifier in static initialization block");
             return error.ParseError;
         }
@@ -971,8 +971,12 @@ pub fn validatePattern(p: *Parser, node: NodeIndex) Error!void {
                             try p.emitError("'yield' is reserved");
                             return error.ParseError;
                         }
-                        // Escaped keywords in shorthand destructuring: {var} = {} is a SyntaxError.
-                        if (p.tokenTagAt(sp_tok) == .escaped_keyword) {
+                        // Escaped reserved words in shorthand destructuring: {var}={}, {public}={} (strict).
+                        // Covers .escaped_keyword (resolves to a true keyword) and .identifier with \u
+                        // escapes resolving to a strict-reserved word (public/private/protected/etc.).
+                        if (std.mem.indexOf(u8, sp_text, "\\") != null or
+                            p.tokenTagAt(sp_tok) == .escaped_keyword)
+                        {
                             var resolved_buf_esc: [256]u8 = undefined;
                             if (parser_mod.resolveUnicodeEscapesParser(sp_text, &resolved_buf_esc)) |resolved| {
                                 if (parser_mod.isAlwaysReservedStr(resolved) or
@@ -2679,10 +2683,23 @@ fn parseIdentifier(p: *Parser) Error!NodeIndex {
 
 /// Expression-position identifier: produces a `.identifier` node AND emits a
 /// `reference(.read)` semantic event.  Used from parsePrimaryExpression.
+fn identRefsArguments(p: *const Parser, tok: u32) bool {
+    const raw = p.tokenText(tok);
+    if (std.mem.eql(u8, raw, "arguments")) return true;
+    // Check escaped form: arguments → "arguments"
+    if (std.mem.indexOfScalar(u8, raw, '\\') != null) {
+        var buf: [256]u8 = undefined;
+        if (parser_mod.resolveUnicodeEscapesParser(raw, &buf)) |resolved| {
+            return std.mem.eql(u8, resolved, "arguments");
+        }
+    }
+    return false;
+}
+
 fn parseIdentifierRef(p: *Parser) Error!NodeIndex {
     const tok = p.advance();
     // Class field initializers cannot reference 'arguments'.
-    if (p.in_class_field and std.mem.eql(u8, p.tokenText(tok), "arguments")) {
+    if (p.in_class_field and identRefsArguments(p, tok)) {
         try p.emitError("'arguments' is not allowed in class field initializer");
         return error.ParseError;
     }
@@ -2702,7 +2719,7 @@ fn parseIdentifierOrArrow(p: *Parser) Error!NodeIndex {
         return parseArrowFunctionBody(p, tok, false);
     }
     // Class field initializers cannot reference 'arguments'.
-    if (p.in_class_field and std.mem.eql(u8, p.tokenText(tok), "arguments")) {
+    if (p.in_class_field and identRefsArguments(p, tok)) {
         try p.emitError("'arguments' is not allowed in class field initializer");
         return error.ParseError;
     }
@@ -3041,6 +3058,10 @@ fn parseAsyncParenArrowOrCall(p: *Parser, async_tok: TokenIndex) Error!NodeIndex
         for (params) |node_raw| {
             reinterpretAsPattern(p, NodeIndex.fromInt(node_raw));
         }
+        for (params) |node_raw| {
+            const pn = NodeIndex.fromInt(node_raw);
+            if (pn != .none) try validatePattern(p, pn);
+        }
 
         // Check restrictions on async arrow params
         for (params, 0..) |node_raw, idx| {
@@ -3109,6 +3130,9 @@ fn parseAsyncParenArrowOrCall(p: *Parser, async_tok: TokenIndex) Error!NodeIndex
 
         const params_range = try p.addSlice(params);
         p.scratchPop(scratch_top);
+
+        // Async arrow params must be unique (UniqueFormalParameters).
+        try p.checkUniqueParams(params_range);
 
         _ = p.advance(); // consume `=>`
         const saved_async = p.in_async;
@@ -3323,6 +3347,10 @@ fn parseParenthesized(p: *Parser) Error!NodeIndex {
             for (params) |node_raw| {
                 reinterpretAsPattern(p, NodeIndex.fromInt(node_raw));
             }
+            for (params) |node_raw| {
+                const pn = NodeIndex.fromInt(node_raw);
+                if (pn != .none) try validatePattern(p, pn);
+            }
             const params_range = try p.addSlice(params);
             p.scratchPop(scratch_top);
             _ = p.advance(); // consume `=>`
@@ -3475,6 +3503,10 @@ fn parseParenthesized(p: *Parser) Error!NodeIndex {
 
         for (params) |node_raw| {
             reinterpretAsPattern(p, NodeIndex.fromInt(node_raw));
+        }
+        for (params) |node_raw| {
+            const pn = NodeIndex.fromInt(node_raw);
+            if (pn != .none) try validatePattern(p, pn);
         }
 
         // Check strict-mode restrictions on arrow params
@@ -4423,8 +4455,8 @@ fn parseRegularProperty(p: *Parser) Error!NodeIndex {
     const key_tag = p.tokenTag(key_tok);
     if (key_tag.isKeyword()) {
         const is_contextual = isContextualKeyword(key_tag);
-        // yield is reserved in generators, await is reserved in async/module
-        const yield_reserved = key_tag == .kw_yield and p.in_generator;
+        // yield is reserved in generators AND in strict mode
+        const yield_reserved = key_tag == .kw_yield and (p.in_generator or p.in_strict);
         const await_reserved = key_tag == .kw_await and (p.in_async or p.is_module or (p.in_static_block and !p.in_function));
         // let/static are reserved as binding names in strict mode
         const let_reserved = (key_tag == .kw_let or key_tag == .kw_static) and p.in_strict;
@@ -4711,12 +4743,36 @@ fn parseClassExpression(p: *Parser) Error!NodeIndex {
         const nx = p.peekAt(1);
         break :blk nx == .l_brace or nx == .less_than or nx == .kw_extends or nx == .kw_implements;
     };
+    // Class bodies are always strict mode — `yield` is never a valid class name.
+    if (p.peek() == .kw_yield) {
+        try p.emitDiagnostic(p.currentSpan(), "'yield' is not a valid class name in strict mode", .{});
+        return error.ParseError;
+    }
     const can_name = (p.peek() == .identifier or p.peek() == .escaped_keyword or
-        (p.peek() == .kw_await and !p.in_async and !p.is_module and !(p.in_static_block and !p.in_function)) or
-        (p.peek() == .kw_yield and !p.in_generator and !p.in_strict)) and
+        (p.peek() == .kw_await and !p.in_async and !p.is_module and !(p.in_static_block and !p.in_function))) and
         (!peek_is_ts_modifier or next_is_class_continuation);
     const name_node: NodeIndex = if (can_name) blk: {
         const name_tok = p.advance();
+        // Class bodies are always strict mode — reject strict-reserved identifiers.
+        if (p.isStrictReservedWord(name_tok)) {
+            try p.emitDiagnostic(p.currentSpan(),
+                "'{s}' is not a valid class name in strict mode", .{p.tokenText(name_tok)});
+            return error.ParseError;
+        }
+        // `await` reserved in module / async function (escape form too).
+        if (p.is_module or p.in_async) {
+            const t = p.tokenText(name_tok);
+            if (std.mem.indexOfScalar(u8, t, '\\') != null) {
+                var rb: [256]u8 = undefined;
+                if (parser_mod.resolveUnicodeEscapesParser(t, &rb)) |r| {
+                    if (std.mem.eql(u8, r, "await")) {
+                        try p.emitDiagnostic(p.currentSpan(),
+                            "'await' cannot be used as identifier here", .{});
+                        return error.ParseError;
+                    }
+                }
+            }
+        }
         break :blk try p.addNode(.{
             .tag = .identifier,
             .main_token = name_tok,
@@ -4850,22 +4906,79 @@ fn parseClassExpression(p: *Parser) Error!NodeIndex {
 
     const members = p.scratchSlice(scratch_top);
 
-    // Collect this class's private decls into private_decls (for AllPrivateNamesValid).
-    for (members) |idx_int| {
-        const m = NodeIndex.fromInt(idx_int);
-        if (m == .none) continue;
-        const m_tag = p.node_tags_ptr[m.toInt()];
-        if (m_tag != .property_def and m_tag != .method_def and
-            m_tag != .getter_def and m_tag != .setter_def) continue;
-        const m_data = p.node_data_ptr[m.toInt()];
-        const key = m_data.lhs;
-        if (key == .none) continue;
-        const key_tag = p.node_tags_ptr[key.toInt()];
-        if (key_tag != .identifier) continue;
-        const key_tok = p.node_main_token_ptr[key.toInt()];
-        if (p.tokenTag(key_tok) != .hash) continue;
-        if (key_tok + 1 >= p.tokens.len) continue;
-        try p.private_decls.append(p.gpa, p.tokenText(key_tok + 1));
+    // Collect this class's private decls and check for duplicates.
+    {
+        var seen = std.StringHashMap(u32).init(p.gpa);
+        defer seen.deinit();
+        for (members) |idx_int| {
+            const m = NodeIndex.fromInt(idx_int);
+            if (m == .none) continue;
+            const m_tag = p.node_tags_ptr[m.toInt()];
+            if (m_tag != .property_def and m_tag != .method_def and
+                m_tag != .getter_def and m_tag != .setter_def) continue;
+            const m_data = p.node_data_ptr[m.toInt()];
+            const key = m_data.lhs;
+            if (key == .none) continue;
+            const key_tag = p.node_tags_ptr[key.toInt()];
+            if (key_tag != .identifier) continue;
+            const key_tok = p.node_main_token_ptr[key.toInt()];
+            if (p.tokenTag(key_tok) != .hash) continue;
+            if (key_tok + 1 >= p.tokens.len) continue;
+            const name_text = p.tokenText(key_tok + 1);
+            const extra_idx = m_data.rhs.toInt();
+            const is_static_member = if (extra_idx + 4 < p.extra_data.items.len)
+                (p.extra_data.items[extra_idx + 4] & ast.ModifierBit.@"static") != 0
+            else
+                false;
+            const bit: u32 = switch (m_tag) {
+                .getter_def => if (is_static_member) @as(u32, 4) else @as(u32, 1),
+                .setter_def => if (is_static_member) @as(u32, 8) else @as(u32, 2),
+                else => if (is_static_member) @as(u32, 32) else @as(u32, 16),
+            };
+            const gop = try seen.getOrPut(name_text);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = bit;
+                try p.private_decls.append(p.gpa, name_text);
+            } else {
+                const combined = gop.value_ptr.* | bit;
+                const allowed = combined == (1 | 2) or combined == (4 | 8);
+                if (!allowed and !p.is_ts) {
+                    try p.emitError("Duplicate private name in class body");
+                    return error.ParseError;
+                }
+                gop.value_ptr.* = combined;
+            }
+        }
+    }
+
+    // Duplicate constructor check for class expressions.
+    if (!p.is_ts) {
+        var ctor_count: u8 = 0;
+        for (members) |idx_int| {
+            const m = NodeIndex.fromInt(idx_int);
+            if (m == .none) continue;
+            if (p.node_tags_ptr[m.toInt()] != .method_def) continue;
+            const m_data = p.node_data_ptr[m.toInt()];
+            const key = m_data.lhs;
+            if (key == .none) continue;
+            const key_tag = p.node_tags_ptr[key.toInt()];
+            const key_tok = p.node_main_token_ptr[key.toInt()];
+            const is_ctor_name = (key_tag == .identifier and
+                std.mem.eql(u8, p.tokenText(key_tok), "constructor")) or
+                (key_tag == .string_literal and
+                std.mem.eql(u8, p.getStringContent(p.tokenStart(key_tok)), "constructor"));
+            if (!is_ctor_name) continue;
+            const extra_idx = m_data.rhs.toInt();
+            if (extra_idx + 4 < p.extra_data.items.len) {
+                const modifiers = p.extra_data.items[extra_idx + 4];
+                if ((modifiers & ast.ModifierBit.@"static") != 0) continue;
+            }
+            ctor_count += 1;
+            if (ctor_count > 1) {
+                try p.emitError("A class may only have one constructor");
+                return error.ParseError;
+            }
+        }
     }
 
     // Validate refs accumulated in this class expression body.
@@ -6625,7 +6738,15 @@ fn parseBlockBodyWithStrictChecks(p: *Parser, params: ?SubRange, name: NodeIndex
     const prev_fn_body = p.is_fn_body_block;
     p.is_fn_body_block = true;
     defer p.is_fn_body_block = prev_fn_body;
-    return p.parseBlock();
+    const body = try p.parseBlock();
+    // Check that no formal parameter name is lex-re-declared in the function body.
+    // Applies to: methods, generators, async functions, and strict-mode functions.
+    if (params) |pr| {
+        if (p.in_method or p.in_generator or p.in_async or p.in_strict) {
+            try p.checkParamBodyLexConflict(pr, body);
+        }
+    }
+    return body;
 }
 
 // =====================================================================
