@@ -190,6 +190,21 @@ fn collectBindingName(
     }
 }
 
+/// Returns true if `node` is an iteration statement or a labeled statement that
+/// transitively wraps an iteration statement (for `continue label` validation).
+fn isIterationOrLabeledIteration(p: *const Parser, node: NodeIndex) bool {
+    if (node == .none) return false;
+    const idx = node.toInt();
+    if (idx >= p.nodes.len) return false;
+    const tag = p.node_tags_ptr[idx];
+    return switch (tag) {
+        .while_stmt, .do_while_stmt, .for_stmt,
+        .for_in_stmt, .for_of_stmt, .for_await_of_stmt => true,
+        .labeled_stmt => isIterationOrLabeledIteration(p, p.node_data_ptr[idx].lhs),
+        else => false,
+    };
+}
+
 /// Returns true if `node` is a LabelledStatement whose innermost LabelledItem
 /// is a FunctionDeclaration (possibly through nested labels). Per spec 14.13.1,
 /// IsLabelledFunction is true for doubly-nested labels leading to a fn decl.
@@ -564,7 +579,7 @@ fn collectLexNamesInNode(
 const Language = @import("token.zig").Language;
 
 pub const Parser = struct {
-    const LabelEntry = struct { name: []const u8, fn_depth: u16 };
+    const LabelEntry = struct { name: []const u8, fn_depth: u16, is_loop: bool = false };
 
     source: []const u8,
     tokens: TokenList.Slice,
@@ -1345,6 +1360,30 @@ pub const Parser = struct {
             if (idx < self.parsed_len) return self.tags_ptr[idx];
         }
         return .eof;
+    }
+
+    /// Look ahead from the current position through any chained labeled statements
+    /// to determine if the ultimate statement is an iteration statement.
+    /// Used by parseLabeledStatement to compute is_loop correctly for nested labels.
+    fn peeksAtIterationStmt(self: *Parser) bool {
+        var offset: u32 = 0;
+        while (true) {
+            const tok = self.peekAt(offset);
+            switch (tok) {
+                .kw_while, .kw_for, .kw_do => return true,
+                // Identifier followed by colon = another label, peek through it.
+                .identifier, .kw_yield, .kw_await, .kw_let, .kw_static,
+                .kw_get, .kw_set, .kw_of, .kw_from, .kw_as,
+                => {
+                    if (self.peekAt(offset + 1) == .colon) {
+                        offset += 2; // skip identifier + colon
+                        continue;
+                    }
+                    return false;
+                },
+                else => return false,
+            }
+        }
     }
 
     /// Get the source text for the token at `index`.
@@ -4305,22 +4344,30 @@ pub const Parser = struct {
                 .data = .{ .lhs = .none, .rhs = .none },
             });
             const label_name = self.tokenText(label_tok);
-            // TS1107/TS1116: validate label target
-            if (self.is_ts) {
+            // Validate break label target.
+            {
                 var found = false;
                 if (self.ts_label_stack) |stack| {
                     var i: u8 = 0;
                     while (i < self.ts_label_count) : (i += 1) {
                         if (std.mem.eql(u8, stack[i].name, label_name)) {
                             if (self.ts_label_fn_depth > stack[i].fn_depth) {
-                                try self.emitDiagnosticAtToken(label_tok, "Jump target cannot cross function boundary", .{});
+                                if (self.is_ts) {
+                                    try self.emitDiagnosticAtToken(label_tok, "Jump target cannot cross function boundary", .{});
+                                } else {
+                                    try self.emitDiagnosticAtToken(label_tok, "'break' target label cannot be inside a function", .{});
+                                    return error.ParseError;
+                                }
                             }
                             found = true;
                             break;
                         }
                     }
                 }
-                if (!found) {
+                if (!found and !self.is_ts) {
+                    try self.emitDiagnosticAtToken(label_tok, "Undefined label '{s}'", .{label_name});
+                    return error.ParseError;
+                } else if (!found and self.is_ts) {
                     try self.emitDiagnosticAtToken(label_tok, "A 'break' statement can only jump to a label of an enclosing statement", .{});
                 }
             }
@@ -4366,23 +4413,36 @@ pub const Parser = struct {
                 .data = .{ .lhs = .none, .rhs = .none },
             });
             const label_name = self.tokenText(label_tok);
-            // TS1107/TS1115: validate label target
-            if (self.is_ts) {
+            // Validate continue label target.
+            {
                 var found = false;
+                var is_loop_target = false;
                 if (self.ts_label_stack) |stack| {
                     var i: u8 = 0;
                     while (i < self.ts_label_count) : (i += 1) {
                         if (std.mem.eql(u8, stack[i].name, label_name)) {
                             if (self.ts_label_fn_depth > stack[i].fn_depth) {
-                                try self.emitDiagnosticAtToken(label_tok, "Jump target cannot cross function boundary", .{});
+                                if (self.is_ts) {
+                                    try self.emitDiagnosticAtToken(label_tok, "Jump target cannot cross function boundary", .{});
+                                } else {
+                                    try self.emitDiagnosticAtToken(label_tok, "'continue' target label cannot be inside a function", .{});
+                                    return error.ParseError;
+                                }
                             }
                             found = true;
+                            is_loop_target = stack[i].is_loop;
                             break;
                         }
                     }
                 }
-                if (!found) {
+                if (!found and !self.is_ts) {
+                    try self.emitDiagnosticAtToken(label_tok, "Undefined label '{s}'", .{label_name});
+                    return error.ParseError;
+                } else if (!found and self.is_ts) {
                     try self.emitDiagnosticAtToken(label_tok, "A 'continue' statement can only jump to a label of an enclosing iteration statement", .{});
+                } else if (found and !is_loop_target and !self.is_ts) {
+                    try self.emitDiagnosticAtToken(label_tok, "'continue' must refer to an enclosing iteration statement", .{});
+                    return error.ParseError;
                 }
             }
             try self.expectSemicolon();
@@ -4467,12 +4527,19 @@ pub const Parser = struct {
             }
         }
 
-        // Push label onto stack for duplicate detection and cross-function-boundary detection.
+        // Push label onto stack for scope tracking (break/continue validation, dup detection).
         const prev_label_count = self.ts_label_count;
-        if ((self.is_ts or self.is_module or self.in_strict) and self.ts_label_count < 32) {
+        // Determine if the label transitively wraps an iteration statement by looking ahead
+        // through any chained labels (e.g. `a: b: c: while(...)` → a is a loop label).
+        const is_loop_label_for_push = self.peeksAtIterationStmt();
+        if (self.ts_label_count < 32) {
             if (self.ts_label_stack == null)
                 self.ts_label_stack = try self.gpa.create([32]LabelEntry);
-            self.ts_label_stack.?[self.ts_label_count] = .{ .name = label_name, .fn_depth = self.ts_label_fn_depth };
+            self.ts_label_stack.?[self.ts_label_count] = .{
+                .name = label_name,
+                .fn_depth = self.ts_label_fn_depth,
+                .is_loop = is_loop_label_for_push,
+            };
             self.ts_label_count += 1;
         }
         defer self.ts_label_count = prev_label_count;

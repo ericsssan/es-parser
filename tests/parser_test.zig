@@ -428,3 +428,14 @@ test "no false positive: var inside function does not conflict with block let" {
     defer tree.deinit(testing.allocator);
     try expectNoErrors(&tree);
 }
+
+test "mongolian vowel separator between var and name is SyntaxError" {
+    // var\u{180E}foo - U+180E is not whitespace in ES2016+
+    const source = "var\xe1\xa0\x8efoo;";
+    var lr = try Lexer.tokenize(testing.allocator, source);
+    defer lr.deinit(testing.allocator);
+    var tree = try Parser.parse(testing.allocator, source, lr.tokens.slice());
+    defer tree.deinit(testing.allocator);
+    try testing.expect(tree.errors.len > 0);
+}
+

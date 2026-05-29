@@ -6690,13 +6690,19 @@ fn parseBlockBodyWithStrictChecks(p: *Parser, params: ?SubRange, name: NodeIndex
     }
     defer p.in_strict = prev_strict;
 
-    // Function bodies isolate break/continue context — can't break out of a function
+    // Function bodies isolate break/continue/label context — can't break out of a function.
     const prev_in_loop = p.in_loop;
     const prev_in_switch = p.in_switch;
+    const prev_label_count_fn = p.ts_label_count;
+    const prev_label_fn_depth = p.ts_label_fn_depth;
     p.in_loop = false;
     p.in_switch = false;
+    p.ts_label_count = 0; // labels from outer scope not visible inside function body
+    if (p.ts_label_fn_depth < std.math.maxInt(u16)) p.ts_label_fn_depth += 1;
     defer p.in_loop = prev_in_loop;
     defer p.in_switch = prev_in_switch;
+    defer p.ts_label_count = prev_label_count_fn;
+    defer p.ts_label_fn_depth = prev_label_fn_depth;
 
     // "use strict" with non-simple parameters is ALWAYS a SyntaxError (even if already strict)
     if (has_use_strict) {

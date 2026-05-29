@@ -1794,9 +1794,19 @@ pub fn tokenizeWithBufAndBitmaps(
                                     skip_until = end;
                                     continue;
                                 }
+                                if (!@import("unicode_id.zig").isIdStart(@intCast(t_cp))) {
+                                    // Not ID_Start and not whitespace (e.g. U+180E Mongolian
+                                    // Vowel Separator) — emit the codepoint as invalid.
+                                    t_end = end + t_cl;
+                                    t_tag = .invalid;
+                                } else {
+                                    t_end = identEndFromBitmap(bm.ident, ew, eb, ew * 64, n);
+                                    t_tag = .identifier;
+                                }
+                            } else {
+                                t_end = identEndFromBitmap(bm.ident, ew, eb, ew * 64, n);
+                                t_tag = .identifier;
                             }
-                            t_end = identEndFromBitmap(bm.ident, ew, eb, ew * 64, n);
-                            t_tag = .identifier;
                         },
                         else => {
                             t_end = identEndFromBitmap(bm.ident, ew, eb, ew * 64, n);
