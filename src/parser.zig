@@ -5087,7 +5087,10 @@ pub const Parser = struct {
             break :blk try self.parseIdentifier();
         } else if (fn_name_tag == .kw_yield and !self.in_generator and !self.in_strict and !self.is_ts) blk: {
             break :blk try self.parseIdentifier();
-        } else if (fn_name_tag == .kw_await and !self.in_async and !self.is_module and !(self.in_static_block and !self.in_function)) blk: {
+        } else if (fn_name_tag == .kw_await and
+            !self.is_module and
+            !(self.in_static_block and !self.in_function) and
+            (!self.in_async or (self.is_ts and !self.in_function and !self.is_module))) blk: {
             break :blk try self.parseIdentifier();
         } else if ((fn_name_tag == .kw_let or fn_name_tag == .kw_static or
             fn_name_tag == .kw_implements or fn_name_tag == .kw_interface or
@@ -5446,10 +5449,13 @@ pub const Parser = struct {
     pub fn parseClassBody(self: *Parser) Error!SubRange {
         const prev_in_class = self.in_class;
         const prev_strict = self.in_strict;
+        const prev_in_static_block_cb = self.in_static_block;
         self.in_class = true;
         self.in_strict = true; // class bodies are always strict
+        self.in_static_block = false; // nested class resets static-block context
         self.syncYieldLex();
         defer self.in_class = prev_in_class;
+        defer self.in_static_block = prev_in_static_block_cb;
         defer { self.in_strict = prev_strict; self.syncYieldLex(); }
 
         // AllPrivateNamesValid: snapshot stack lengths to scope private decls
@@ -5921,9 +5927,12 @@ pub const Parser = struct {
         // the modifier is a field name, not a modifier.
         if (self.peek() == .kw_static) {
             const next = self.peekAt(1);
+            // `static` is a modifier unless the next token shows it's being used
+            // as a field/method name: `static(`, `static=`, `static;`, `static}`.
+            // Newlines between `static` and the next token do NOT trigger ASI in
+            // class bodies — `static\nconstructor(){}` is a valid static method.
             if (next != .l_paren and next != .equal and next != .semicolon and
-                next != .colon and next != .r_brace and
-                !self.hasNewLineBetween(self.tokIdx(), @intCast(self.tok_i + 1)))
+                next != .colon and next != .r_brace)
             {
                 is_static = true;
                 _ = self.advance(); // eat 'static'
@@ -8433,8 +8442,20 @@ pub const Parser = struct {
             },
             // await is reserved in async/module/static-block contexts.
             // In TypeScript: same rule, but allow in ambient declarations (declare namespace etc.).
+            // At the top level of a TS script file, `in_async` is set to enable
+            // top-level await expressions, but `await` is still valid as a binding name
+            // (TypeScript only reserves it inside async functions and in modules).
             .kw_await => {
-                if (!self.in_ts_ambient and (self.in_async or self.is_module or (self.in_static_block and !self.in_function))) {
+                // `await` is reserved inside async functions (body and params),
+                // everywhere in modules, and in static blocks. In TypeScript script
+                // mode the top-level `in_async` flag enables top-level await
+                // expressions but does NOT reserve `await` as a binding name —
+                // only entering an actual async function body or its params does.
+                const in_async_fn = self.in_async and (self.in_function or self.in_fn_params);
+                const await_reserved = in_async_fn or
+                    self.is_module or
+                    (self.in_static_block and !self.in_function);
+                if (!self.in_ts_ambient and await_reserved) {
                     try self.emitDiagnostic(self.currentSpan(), "'await' cannot be used as binding name in this context", .{});
                     return error.ParseError;
                 }
@@ -8453,11 +8474,16 @@ pub const Parser = struct {
                         return error.ParseError;
                     }
                     if (std.mem.eql(u8, resolved, "await") and
-                        !self.in_ts_ambient and
-                        (self.in_async or self.is_module or (self.in_static_block and !self.in_function)))
+                        !self.in_ts_ambient)
                     {
-                        try self.emitDiagnostic(self.currentSpan(), "'await' cannot be used as a binding name in this context", .{});
-                        return error.ParseError;
+                        const in_async_fn2 = self.in_async and (self.in_function or self.in_fn_params);
+                        const await_res2 = in_async_fn2 or
+                            self.is_module or
+                            (self.in_static_block and !self.in_function);
+                        if (await_res2) {
+                            try self.emitDiagnostic(self.currentSpan(), "'await' cannot be used as a binding name in this context", .{});
+                            return error.ParseError;
+                        }
                     }
                     if (self.in_strict and isStrictReservedStr(resolved)) {
                         try self.emitDiagnostic(self.currentSpan(), "escaped reserved word cannot be used as binding name in strict mode", .{});

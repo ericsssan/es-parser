@@ -555,7 +555,15 @@ fn parsePostfixUpdate(p: *Parser, operand: NodeIndex, postfix_tag: TokenTag) Err
 // ── Await ────────────────────────────────────────────────────────
 
 fn parseAwaitExpression(p: *Parser) Error!NodeIndex {
-    if (!p.in_async) {
+    // Determine if `await` is reserved here or can be treated as an identifier.
+    // In TypeScript script mode, `in_async` is set at top-level to allow top-level
+    // await expressions, but `await` is still a valid identifier in non-function
+    // scope (TypeScript only reserves it inside async functions and modules).
+    // In TS script mode, `in_async` is set at top-level for top-level await
+    // expressions, but `await` is still a valid identifier when not inside an
+    // actual async function body/params and not in a module.
+    const ts_script_toplevel = p.is_ts and !p.in_function and !p.in_fn_params and !p.is_module;
+    if (!p.in_async or ts_script_toplevel) {
         // In module mode, `await` is a reserved word
         if (p.is_module) {
             try p.emitError("'await' is not allowed as an identifier in module mode");
@@ -2337,8 +2345,13 @@ pub fn parsePrimaryExpression(p: *Parser) Error!NodeIndex {
             }
             return try parseIdentifierOrArrow(p);
         },
-        // await/yield as identifiers when not in their reserved contexts
-        .kw_await => if (!p.in_async and !p.is_module and !(p.in_static_block and !p.in_function)) try parseIdentifierOrArrow(p) else {
+        // await/yield as identifiers when not in their reserved contexts.
+        // In TypeScript, `in_async` is set at top level to allow top-level await
+        // expressions, but `await` is still a valid identifier in non-function,
+        // non-module TS script context (TypeScript only reserves it in async fns/modules).
+        .kw_await => if (!p.is_module and
+            !(p.in_static_block and !p.in_function) and
+            (!p.in_async or (p.is_ts and !p.in_function and !p.in_fn_params and !p.is_module))) try parseIdentifierOrArrow(p) else {
             try p.emitError("Expected expression");
             return p.makeErrorNode();
         },
@@ -4921,12 +4934,15 @@ fn parseClassExpression(p: *Parser) Error!NodeIndex {
     const prev_in_class = p.in_class;
     const prev_strict = p.in_strict;
     const prev_heritage = p.class_has_heritage;
+    const prev_in_static_block_ce = p.in_static_block;
     p.class_has_heritage = had_extends;
     defer p.class_has_heritage = prev_heritage;
     p.in_class = true;
     p.in_strict = true;
+    p.in_static_block = false; // nested class resets static-block context
     p.syncYieldLex();
     defer p.in_class = prev_in_class;
+    defer p.in_static_block = prev_in_static_block_ce;
     defer { p.in_strict = prev_strict; p.syncYieldLex(); }
 
     // AllPrivateNamesValid: snapshot stacks for this class expression body.
