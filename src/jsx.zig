@@ -33,6 +33,21 @@ pub fn parseJsxElement(p: *Parser) Error!NodeIndex {
         return parseJsxFragment(p);
     }
 
+    // Stray closing tag `</...>` in expression position (e.g. error recovery for
+    // `<div></div><div></div>` where the second closing tag ends up as a binary-expression RHS).
+    // Consume the entire closing tag silently and return an error node to allow recovery.
+    // parseJsxChildren never calls us with '/' as the first token (it breaks on '</' itself),
+    // so this branch only fires when we were called from primary-expression position.
+    if (p.peek() == .slash) {
+        _ = p.advance(); // consume '/'
+        // Consume the tag name (may be dotted like foo.Bar).
+        while (p.peek() == .identifier or p.peek().isKeyword() or p.peek() == .dot or p.peek() == .colon) {
+            _ = p.advance();
+        }
+        if (p.peek() == .greater_than) _ = p.advance(); // consume '>'
+        return p.makeErrorNode();
+    }
+
     // Regular element or self-closing element.
     const opening = try parseJsxOpeningElement(p);
 
