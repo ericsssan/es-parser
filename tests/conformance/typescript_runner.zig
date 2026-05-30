@@ -751,6 +751,15 @@ const semantic_only_codes = [_]u16{
     1062, // Type is referenced directly/indirectly in fulfillment callback of own 'then' (type-checker)
     1251, // Function decls not allowed in blocks in strict mode targeting ES5, class body (target-dependent; 1250 covers blocks generally)
     1294, // Syntax not allowed when 'erasableSyntaxOnly' is enabled (compiler config flag)
+    // More config/semantic codes found via must-reject failures:
+    1006, // File cannot have a reference to itself (compiler path resolution, not parser)
+    1147, // Import declarations in a namespace cannot reference a module (namespace semantic restriction)
+    1194, // Export declarations are not permitted in a namespace (namespace semantic restriction)
+    1254, // 'const' initializer in ambient context must be string/numeric literal (semantic type check)
+    1269, // Cannot use 'export import' on type/type-only namespace with isolatedModules (config)
+    1280, // Namespaces not allowed in global script files with isolatedModules (config)
+    1281, // Cannot access across files without qualification with isolatedModules (config)
+    1369, // 'Did you mean Number.isNaN()?' suggestion hint (related message, not parse error)
 };
 
 fn checkBaselineForSyntaxErrors(io: Io, allocator: std.mem.Allocator, path: []const u8) bool {
