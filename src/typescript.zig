@@ -581,7 +581,7 @@ fn parsePrimaryTypeInner(p: *Parser) Error!NodeIndex {
                     _ = p.advance();
                     if (p.peek() == .identifier or p.peek().isKeyword()) _ = p.advance();
                 }
-                if (p.peek() == .less_than) {
+                if (p.peek() == .less_than or p.peek() == .less_less) {
                     _ = try parseTypeArguments(p);
                 }
             }
