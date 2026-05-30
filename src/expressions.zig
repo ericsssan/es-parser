@@ -2175,6 +2175,10 @@ fn validateArrowParam(p: *Parser, node: NodeIndex) !void {
                             return p.emitError("Invalid destructuring in arrow function parameter");
                         }
                     }
+                } else if (prop_tag == .rest_element or prop_tag == .spread_element) {
+                    // Rest/spread in object pattern: validate the target
+                    const prop_data = p.node_data_ptr[prop.toInt()];
+                    try validateArrowParam(p, prop_data.lhs);
                 } else if (prop_tag == .getter_def or prop_tag == .setter_def or prop_tag == .method_def) {
                     return p.emitError("Invalid destructuring in arrow function parameter");
                 }
@@ -3191,7 +3195,8 @@ fn parseAsyncParenArrowOrCall(p: *Parser, async_tok: TokenIndex) Error!NodeIndex
             // Deep validate (rejects parens around bindings, member expr, etc).
             if (!p.is_ts and (pt == .array_pattern or pt == .object_pattern or
                 pt == .array_literal or pt == .object_literal or
-                pt == .assign or pt == .assignment_pattern))
+                pt == .assign or pt == .assignment_pattern or
+                pt == .grouping_expr))
             {
                 validateArrowParam(p, param_node) catch {
                     return error.ParseError;
