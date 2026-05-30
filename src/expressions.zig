@@ -6292,6 +6292,24 @@ fn parseComputedMember(p: *Parser, object: NodeIndex) Error!NodeIndex {
 fn parseOptionalChain(p: *Parser, object: NodeIndex) Error!NodeIndex {
     const q_dot_tok = p.advance(); // consume `?.`
 
+    // obj?.<T>(args) — TypeScript optional generic call
+    if (p.is_ts and p.peek() == .less_than) {
+        if (tryParseTsTypeArguments(p)) |_| {
+            if (p.peek() == .l_paren) {
+                const args_range = try parseArgumentList(p);
+                const range_extra = try p.addExtra(SubRange, .{
+                    .start = args_range.start,
+                    .end = args_range.end,
+                });
+                return p.addNode(.{
+                    .tag = .optional_call_expr,
+                    .main_token = q_dot_tok,
+                    .data = .{ .lhs = object, .rhs = NodeIndex.fromInt(range_extra) },
+                });
+            }
+        }
+    }
+
     switch (p.peek()) {
         // obj?.(args)
         .l_paren => {
