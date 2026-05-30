@@ -306,12 +306,16 @@ pub fn main(init: std.process.Init) !void {
             const seg_is_ts = seg_lang == .ts or seg_lang == .tsx;
             if (seg_is_ts) saw_ts_segment = true;
             const seg_ok = parse_blk: {
-                var toks = (Lexer.tokenizeWithOptions(file_alloc, segment.text, seg_lang, is_module) catch {
+                // Strip test-harness directive lines (// @key: ...) and BOM so that a
+                // shebang (#!/...) following the directives lands at position 0 in the
+                // source the lexer sees — matching what TypeScript's test harness does.
+                const parse_text = stripTestHarnessDirectives(segment.text);
+                var toks = (Lexer.tokenizeWithOptions(file_alloc, parse_text, seg_lang, is_module) catch {
                     if (first_error.len == 0) first_error = "tokenize failed";
                     break :parse_blk false;
                 }).tokens;
                 defer toks.deinit(file_alloc);
-                var tree = Parser.parseWithOptions(file_alloc, segment.text, toks.slice(), .{
+                var tree = Parser.parseWithOptions(file_alloc, parse_text, toks.slice(), .{
                     .language = seg_lang,
                     .is_module = is_module,
                     .is_strict = force_strict,
@@ -795,6 +799,48 @@ fn checkBaselineForSyntaxErrors(io: Io, allocator: std.mem.Allocator, path: []co
 
 fn isDigit(c: u8) bool {
     return c >= '0' and c <= '9';
+}
+
+/// Strip UTF-8 BOM and leading `// @key: value` test-harness directive lines from a
+/// source segment so that a shebang (`#!/...`) that follows directives is at position 0
+/// when the lexer sees it. Also strips blank lines between directives and the shebang.
+/// This mirrors what the TypeScript test harness does before invoking the compiler.
+fn stripTestHarnessDirectives(source: []const u8) []const u8 {
+    var i: usize = 0;
+    // Strip UTF-8 BOM (EF BB BF).
+    if (source.len >= 3 and source[0] == 0xEF and source[1] == 0xBB and source[2] == 0xBF) {
+        i = 3;
+    }
+    // Repeatedly strip `// @...` directive lines and blank lines until neither matches.
+    var changed = true;
+    while (changed) {
+        changed = false;
+        // Strip `// @...` lines.
+        if (i < source.len) {
+            var j = i;
+            while (j < source.len and (source[j] == ' ' or source[j] == '\t')) j += 1;
+            if (j + 2 < source.len and source[j] == '/' and source[j + 1] == '/') {
+                var k = j + 2;
+                while (k < source.len and (source[k] == ' ' or source[k] == '\t')) k += 1;
+                if (k < source.len and source[k] == '@') {
+                    while (i < source.len and source[i] != '\n') i += 1;
+                    if (i < source.len) i += 1;
+                    changed = true;
+                    continue;
+                }
+            }
+        }
+        // Strip blank lines (whitespace-only).
+        if (i < source.len) {
+            var j = i;
+            while (j < source.len and (source[j] == ' ' or source[j] == '\t' or source[j] == '\r')) j += 1;
+            if (j < source.len and source[j] == '\n') {
+                i = j + 1;
+                changed = true;
+            }
+        }
+    }
+    return source[i..];
 }
 
 fn getBasename(path: []const u8) []const u8 {
