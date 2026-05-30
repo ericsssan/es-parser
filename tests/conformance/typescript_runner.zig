@@ -624,6 +624,7 @@ const semantic_only_codes = [_]u16{
     // These all depend on tsconfig (`module`, `target`, `verbatimModuleSyntax`,
     // `esModuleInterop`, `useDefineForClassFields`, etc.) the parser doesn't see.
     1192, // Module '%0' has no default export (import alias config)
+    1195, // 'export *' does not re-export a default (related diagnostic for TS1192)
     1203, // Export assignment cannot be used when targeting ECMAScript modules
     1216, // Identifier expected. '%0' is a reserved word in module mode
     1259, // Module '%0' can only be default-imported using esModuleInterop

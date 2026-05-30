@@ -1695,8 +1695,27 @@ pub fn parseInterfaceDeclaration(p: *Parser) Error!NodeIndex {
 pub fn parseTypeAliasDeclaration(p: *Parser) Error!NodeIndex {
     const type_tok = p.advance(); // consume `type`
 
-    // Type alias name — contextual keywords (e.g. `module`, `from`, `of`) are valid names
+    // Type alias name — contextual keywords (e.g. `module`, `from`, `of`) are valid names,
+    // but always-reserved words (void, null, true, false, etc.) are not valid type names.
     const name_tok = try p.expectIdentifierOrKeyword();
+    {
+        const name_tag = p.tokenTag(name_tok);
+        const is_reserved_type_name = switch (name_tag) {
+            .kw_void, .kw_null, .kw_true, .kw_false, .kw_this,
+            .kw_break, .kw_case, .kw_catch, .kw_continue, .kw_debugger,
+            .kw_default, .kw_delete, .kw_do, .kw_else, .kw_extends,
+            .kw_finally, .kw_for, .kw_function, .kw_if, .kw_in,
+            .kw_instanceof, .kw_new, .kw_return, .kw_super, .kw_switch,
+            .kw_throw, .kw_try, .kw_typeof, .kw_var, .kw_while, .kw_with,
+            .kw_class, .kw_const, .kw_export, .kw_import,
+            => true,
+            else => false,
+        };
+        if (is_reserved_type_name) {
+            try p.emitDiagnostic(p.currentSpan(), "'{s}' is not a valid type name", .{p.tokenText(name_tok)});
+            return error.ParseError;
+        }
+    }
 
     // Build the name Identifier IMMEDIATELY so end_tok matches name_tok.
     // Declare as TypeVariable so circular-reference rules can resolve it.
@@ -1759,8 +1778,26 @@ pub fn parseTypeAliasDeclaration(p: *Parser) Error!NodeIndex {
 pub fn parseEnumDeclaration(p: *Parser) Error!NodeIndex {
     const enum_tok = p.advance(); // consume `enum`
 
-    // Enum name — contextual keywords are valid enum names
+    // Enum name — contextual keywords are valid enum names but always-reserved words are not.
     const name_tok = try p.expectIdentifierOrKeyword();
+    {
+        const name_tag = p.tokenTag(name_tok);
+        const is_reserved = switch (name_tag) {
+            .kw_break, .kw_case, .kw_catch, .kw_continue, .kw_debugger,
+            .kw_default, .kw_delete, .kw_do, .kw_else, .kw_extends,
+            .kw_finally, .kw_for, .kw_function, .kw_if, .kw_in,
+            .kw_instanceof, .kw_new, .kw_return, .kw_super, .kw_switch,
+            .kw_this, .kw_throw, .kw_try, .kw_typeof, .kw_var, .kw_void,
+            .kw_while, .kw_with, .kw_class, .kw_const, .kw_export,
+            .kw_import, .kw_null, .kw_true, .kw_false,
+            => true,
+            else => false,
+        };
+        if (is_reserved) {
+            try p.emitDiagnostic(p.currentSpan(), "'{s}' is not a valid identifier", .{p.tokenText(name_tok)});
+            return error.ParseError;
+        }
+    }
 
     // Enum body: `{ members }`
     _ = try p.expect(.l_brace);
