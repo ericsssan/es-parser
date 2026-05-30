@@ -760,6 +760,10 @@ const semantic_only_codes = [_]u16{
     1280, // Namespaces not allowed in global script files with isolatedModules (config)
     1281, // Cannot access across files without qualification with isolatedModules (config)
     1369, // 'Did you mean Number.isNaN()?' suggestion hint (related message, not parse error)
+    1148, // Cannot compile modules unless '--module' flag is provided (config-dependent)
+    1218, // Expressions are not allowed in an ambient context (TypeScript-specific semantic)
+    1235, // Namespace declaration only allowed at top level of namespace or module (semantic scope check)
+    1503, // Named capturing groups only available when targeting ES2018 or later (target-dependent)
 };
 
 fn checkBaselineForSyntaxErrors(io: Io, allocator: std.mem.Allocator, path: []const u8) bool {
