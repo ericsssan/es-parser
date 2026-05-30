@@ -4734,21 +4734,23 @@ pub const Parser = struct {
         defer self.ts_label_count = prev_label_count;
 
         // Labeled declarations are mostly forbidden
+        // In TS mode, TypeScript allows labeled declarations (TS1344 is a semantic warning).
         switch (self.peek()) {
             .kw_class => {
-                try self.emitDiagnostic(self.currentSpan(), "class declaration not allowed after label", .{});
-                return error.ParseError;
-            },
-            .kw_const => {
-                try self.emitDiagnostic(self.currentSpan(), "lexical declaration not allowed after label", .{});
-                return error.ParseError;
-            },
-            .kw_var => {
-                // TS1344: label on var declaration is not allowed in TypeScript.
-                if (self.is_ts) {
-                    try self.emitDiagnostic(self.currentSpan(), "A label is not allowed here", .{});
+                if (!self.is_ts) {
+                    try self.emitDiagnostic(self.currentSpan(), "class declaration not allowed after label", .{});
                     return error.ParseError;
                 }
+            },
+            .kw_const => {
+                if (!self.is_ts) {
+                    try self.emitDiagnostic(self.currentSpan(), "lexical declaration not allowed after label", .{});
+                    return error.ParseError;
+                }
+            },
+            .kw_var => {
+                // TS1344: TypeScript considers label on var/lex declaration a semantic error.
+                // We allow it at parse time (TypeScript parses it successfully).
             },
             .kw_let => {
                 const next = self.peekAt(1);
@@ -4763,25 +4765,29 @@ pub const Parser = struct {
                     const could_be_binding = (next == .identifier or next == .l_brace or next.isKeyword());
                     break :blk could_be_binding and !self.hasNewLineBetween(self.tokIdx(), @intCast(self.tok_i + 1));
                 };
-                if (is_decl) {
+                if (is_decl and !self.is_ts) {
                     try self.emitDiagnostic(self.currentSpan(), "lexical declaration not allowed after label", .{});
                     return error.ParseError;
                 }
                 // `let` is an identifier expression — fall through to parseStatement
             },
             .kw_function => {
-                if (self.peekAt(1) == .asterisk) {
-                    try self.emitDiagnostic(self.currentSpan(), "generator declaration not allowed after label", .{});
-                    return error.ParseError;
+                if (!self.is_ts) {
+                    if (self.peekAt(1) == .asterisk) {
+                        try self.emitDiagnostic(self.currentSpan(), "generator declaration not allowed after label", .{});
+                        return error.ParseError;
+                    }
+                    if (self.in_strict or !self.annex_b) {
+                        try self.emitDiagnostic(self.currentSpan(), "In non-strict mode code, functions can only be declared at top level or inside a block", .{});
+                        return error.ParseError;
+                    }
                 }
-                if (self.in_strict or !self.annex_b) {
-                    try self.emitDiagnostic(self.currentSpan(), "In non-strict mode code, functions can only be declared at top level or inside a block", .{});
-                    return error.ParseError;
-                }
+                // In TS mode: TypeScript allows labeled function/generator declarations
+                // (emits TS1344 as a semantic warning, not a parse error).
             },
             .kw_async => {
                 // `async function` and `async function*` are not allowed in labeled position.
-                if (self.peekAt(1) == .kw_function and
+                if (!self.is_ts and self.peekAt(1) == .kw_function and
                     !self.hasNewLineBetween(self.tokIdx(), @intCast(self.tok_i + 1)))
                 {
                     try self.emitDiagnostic(self.currentSpan(), "async function declaration not allowed after label", .{});
