@@ -116,9 +116,11 @@ fn parseJsxOpeningElement(p: *Parser) Error!NodeIndex {
             _ = typescript.parseTypeArguments(p) catch break :blk false;
             break :blk true;
         };
-        // After type args, the next token should be `>` (open) or `/` (self-close)
-        // or whitespace+attribute. If we land on something unexpected, backtrack.
+        // After type args, the next token should be `>` (open), `/` (self-close),
+        // an attribute name (identifier/keyword), or `{` (spread attribute, e.g.
+        // `<Foo<T> {...props} />`). If we land on something unexpected, backtrack.
         if (!ok or (p.peek() != .greater_than and p.peek() != .slash and
+                    p.peek() != .l_brace and
                     p.peek() != .identifier and !p.peek().isKeyword()))
         {
             p.tok_i = saved_tok;
@@ -135,8 +137,13 @@ fn parseJsxOpeningElement(p: *Parser) Error!NodeIndex {
         p.peek() != .slash and
         p.peek() != .eof)
     {
+        const before = p.tok_i;
         const attr = try parseJsxAttribute(p);
         try p.scratchPush(attr);
+        // Progress guard: if attribute parsing consumed no tokens (e.g. it hit a
+        // token it can't handle and only emitted an error node), force-advance so
+        // the loop terminates instead of spinning and exhausting memory.
+        if (p.tok_i == before) _ = p.advance();
     }
 
     const attrs = p.scratchSlice(scratch_top);
