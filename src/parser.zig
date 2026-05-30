@@ -3305,8 +3305,8 @@ pub const Parser = struct {
                 return error.ParseError;
             },
             .kw_function => {
-                if (self.in_strict) {
-                    try self.emitDiagnostic(self.currentSpan(), "In strict mode, function declarations are not allowed in single-statement context", .{});
+                if (self.in_strict or !self.annex_b) {
+                    try self.emitDiagnostic(self.currentSpan(), "In non-strict mode code, functions can only be declared at top level or inside a block", .{});
                     return error.ParseError;
                 }
                 // Generator declarations (function*) are never allowed in if-body (even non-strict)
@@ -4049,7 +4049,7 @@ pub const Parser = struct {
         if (init_tag == .var_decl or init_tag == .let_decl or init_tag == .const_decl) {
             // Annex B: `for (var x = expr in y)` is allowed in non-strict for-in ONLY for
             // simple (identifier) bindings. Destructuring patterns are always rejected.
-            if (is_for_in and init_tag == .var_decl and !self.in_strict and !self.is_ts) {
+            if (is_for_in and init_tag == .var_decl and !self.in_strict and !self.is_ts and self.annex_b) {
                 // Check that the binding is a simple identifier (not a pattern).
                 const init_data = self.node_data_ptr[init.toInt()];
                 if (init_data.lhs.toInt() + 1 == init_data.rhs.toInt()) {
@@ -4226,8 +4226,8 @@ pub const Parser = struct {
                         }
                     }
                     if (is_dup) {
-                        // AnnexB: allow if not strict and all occurrences are fn_decl
-                        if (!self.in_strict and fn_decl_names_n > 0) {
+                        // AnnexB: allow if not strict, annex_b enabled, and all occurrences are fn_decl
+                        if (!self.in_strict and self.annex_b and fn_decl_names_n > 0) {
                             var total: usize = 0;
                             var fn_count: usize = 0;
                             for (lex_names_buf[0..lex_names_n]) |n| {
@@ -4716,8 +4716,8 @@ pub const Parser = struct {
                     try self.emitDiagnostic(self.currentSpan(), "generator declaration not allowed after label", .{});
                     return error.ParseError;
                 }
-                if (self.in_strict) {
-                    try self.emitDiagnostic(self.currentSpan(), "In strict mode, function declarations are not allowed after a label", .{});
+                if (self.in_strict or !self.annex_b) {
+                    try self.emitDiagnostic(self.currentSpan(), "In non-strict mode code, functions can only be declared at top level or inside a block", .{});
                     return error.ParseError;
                 }
             },
