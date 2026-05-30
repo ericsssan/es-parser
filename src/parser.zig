@@ -6245,6 +6245,12 @@ pub const Parser = struct {
                 });
             }
 
+            // TS1206: Decorators are not valid on computed class fields with experimental decorators.
+            // (Computed methods and 'declare' computed fields are allowed decorators even in experimental mode.)
+            if (self.is_ts and had_member_decorator and self.experimental_decorators and !ts_mod_flags.has_declare) {
+                try self.emitDiagnostic(self.currentSpan(), "Decorators are not valid here", .{});
+            }
+
             // TS optional marker and type annotation on computed field
             if (self.is_ts) {
                 _ = self.eat(.question);
