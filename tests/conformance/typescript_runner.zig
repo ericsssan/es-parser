@@ -713,6 +713,7 @@ const semantic_only_codes = [_]u16{
     1287, // A re-export cannot have type-only annotations (verbatimModuleSyntax)
     1295, // Type assertions in JavaScript files (allowJs)
     1306, // 'this' implicitly has type 'any' (semantic)
+    1039, // Initializers not allowed in ambient contexts (semantic — tsconfig-dependent)
     1103, // 'for await' only allowed in async functions (TS emits as semantic in non-async TS functions)
     1308, // 'await' expression only allowed in async (target-dependent)
     1309, // The current file is a CommonJS module (target-dependent top-level await)
