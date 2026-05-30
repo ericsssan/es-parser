@@ -6842,8 +6842,10 @@ fn parseBlockBodyWithStrictChecks(p: *Parser, params: ?SubRange, name: NodeIndex
     defer p.ts_label_count = prev_label_count_fn;
     defer p.ts_label_fn_depth = prev_label_fn_depth;
 
-    // "use strict" with non-simple parameters is ALWAYS a SyntaxError (even if already strict)
-    if (has_use_strict) {
+    // "use strict" with non-simple parameters is a SyntaxError in plain JS.
+    // In TypeScript, this is TS1346/TS1347 (target-dependent, semantic-only),
+    // so TypeScript's parser accepts it; we skip the restriction in TS mode.
+    if (has_use_strict and !p.is_ts) {
         if (params) |pr| {
             if (p.hasNonSimpleParams(pr)) {
                 try p.emitError("\"use strict\" directive not allowed in function with non-simple parameters");

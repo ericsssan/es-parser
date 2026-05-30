@@ -5241,8 +5241,9 @@ pub const Parser = struct {
             }
             try self.checkParamsStrictMode(params);
             // ES2016+: 'use strict' directive forbidden when params are non-simple
-            // (destructuring / default values / rest).
-            if (hasNonSimpleParam(self, params)) {
+            // (destructuring / default values / rest). In TypeScript, this is
+            // TS1346/TS1347 (target-dependent, semantic-only), so skip in TS mode.
+            if (!self.is_ts and hasNonSimpleParam(self, params)) {
                 try self.emitError("Illegal 'use strict' directive in function with non-simple parameter list");
             }
         }
@@ -6555,15 +6556,18 @@ pub const Parser = struct {
                 return no_body_node;
             }
 
-            // 'use strict' directive in method body with non-simple params is SyntaxError.
             if (self.peek() == .l_brace) {
-                const peek_pos: u32 = @intCast(self.tok_i + 1);
-                if (peek_pos < self.tokens.len and self.tokenTagAt(peek_pos) == .string_literal) {
-                    const ts_pos = self.tok_starts_ptr[peek_pos];
-                    const text = self.getStringContent(ts_pos);
-                    if (std.mem.eql(u8, text, "use strict") and hasNonSimpleParam(self, params)) {
-                        try self.emitError("Illegal 'use strict' directive in method with non-simple parameter list");
-                        return error.ParseError;
+                // 'use strict' directive in method body with non-simple params is SyntaxError in JS.
+                // In TypeScript (TS1346/TS1347), this is target-dependent and semantic-only.
+                if (!self.is_ts) {
+                    const peek_pos: u32 = @intCast(self.tok_i + 1);
+                    if (peek_pos < self.tokens.len and self.tokenTagAt(peek_pos) == .string_literal) {
+                        const ts_pos = self.tok_starts_ptr[peek_pos];
+                        const text = self.getStringContent(ts_pos);
+                        if (std.mem.eql(u8, text, "use strict") and hasNonSimpleParam(self, params)) {
+                            try self.emitError("Illegal 'use strict' directive in method with non-simple parameter list");
+                            return error.ParseError;
+                        }
                     }
                 }
                 // TS1183: An implementation cannot be declared in ambient contexts.
@@ -9189,8 +9193,9 @@ pub const Parser = struct {
     }
 
     /// Check if the next block body contains "use strict" and params are non-simple.
-    /// This is always a SyntaxError, even if we're already in strict mode.
+    /// This is always a SyntaxError in plain JS, but not in TypeScript (TS1346/TS1347 are semantic).
     pub fn checkUseStrictNonSimpleParams(self: *Parser, params: SubRange) !void {
+        if (self.is_ts) return;
         if (self.peek() == .l_brace) {
             var pos = self.tok_i + 1;
             while (pos < self.parsed_len) {
