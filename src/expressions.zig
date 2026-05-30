@@ -563,7 +563,12 @@ fn parseAwaitExpression(p: *Parser) Error!NodeIndex {
     // expressions, but `await` is still a valid identifier when not inside an
     // actual async function body/params and not in a module.
     const ts_script_toplevel = p.is_ts and !p.in_function and !p.in_fn_params and !p.is_module;
-    if (!p.in_async or ts_script_toplevel) {
+    // In TypeScript, `await` inside a non-async function body is parsed as an await
+    // expression (TypeScript emits TS1308 as a semantic error, not a parse error).
+    // Exclude class field initializers (in_class_field) — those use in_function=true
+    // from the outer function scope but await is not valid there.
+    const ts_non_async_fn = p.is_ts and p.in_function and !p.in_async and !p.in_fn_params and !p.in_class_field;
+    if ((!p.in_async or ts_script_toplevel) and !ts_non_async_fn) {
         // In module mode, `await` is a reserved word
         if (p.is_module) {
             try p.emitError("'await' is not allowed as an identifier in module mode");
