@@ -1825,9 +1825,15 @@ pub fn parseEnumDeclaration(p: *Parser) Error!NodeIndex {
             });
         } else if (p.peek() == .l_bracket) {
             // Computed member name: [expr]
-            // TS1164: Computed property names are not allowed in enums.
-            try p.emitDiagnostic(p.currentSpan(), "Computed property names are not allowed in enums", .{});
-            _ = p.advance();
+            // TS1164: emit only when the expr is dynamic (identifier/complex expression).
+            // Constant literals like [1], ["str"], [+1] are allowed by TypeScript (TS2452 only).
+            _ = p.advance(); // consume '['
+            const p1 = p.peek();
+            const is_literal_computed = p1 == .number_literal or p1 == .string_literal or
+                ((p1 == .plus or p1 == .minus) and p.peekAt(1) == .number_literal);
+            if (!is_literal_computed) {
+                try p.emitDiagnostic(p.currentSpan(), "Computed property names are not allowed in enums", .{});
+            }
             member_name = try p.parseExpression();
             _ = try p.expect(.r_bracket);
         } else if (p.peek() == .number_literal or p.peek() == .bigint_literal) {

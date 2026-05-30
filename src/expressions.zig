@@ -6578,7 +6578,11 @@ fn parseBindingPattern(p: *Parser) Error!NodeIndex {
         },
         // Contextual keywords that can be binding names in non-strict
         .kw_let, .kw_static, .kw_of, .kw_from, .kw_as, .kw_get, .kw_set => {
-            if (p.in_strict and (p.peek() == .kw_let or p.peek() == .kw_static)) {
+            // TypeScript ambient declarations allow keywords like `static` as binding names
+            // (e.g., `declare var static: any`). Skip the strict-mode check in that context.
+            if (p.in_strict and (p.peek() == .kw_let or p.peek() == .kw_static) and
+                !(p.is_ts and p.in_ts_ambient))
+            {
                 try p.emitError("Cannot use reserved word as binding in strict mode");
                 return p.makeErrorNode();
             }
