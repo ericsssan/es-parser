@@ -1024,6 +1024,10 @@ fn parseFunctionTypeParam(p: *Parser) Error!NodeIndex {
 
         // Optional marker `?`; encode as lhs=root (0) vs lhs=none for adapter.
         const is_optional = p.eat(.question) != null;
+        // TS1047: A rest parameter cannot be optional.
+        if (is_optional and is_rest) {
+            try p.emitDiagnostic(p.currentSpan(), "A rest parameter cannot be optional", .{});
+        }
         const opt_flag: @import("ast.zig").NodeIndex = if (is_optional) .root else .none;
 
         // Expect `:` for type annotation
