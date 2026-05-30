@@ -1966,11 +1966,16 @@ pub fn parseEnumDeclaration(p: *Parser) Error!NodeIndex {
         .members_end = members_range.end,
     });
 
-    return p.addNode(.{
+    const enum_node = try p.addNode(.{
         .tag = .ts_enum_decl,
         .main_token = enum_tok,
         .data = .{ .lhs = NodeIndex.fromInt(extra), .rhs = .none },
     });
+    // Declare the enum name in the enclosing scope so forward references resolve.
+    // The event_resolver extracts the name from EnumData.name (not main_token which
+    // is the `enum` keyword) when kind == .enum_decl.
+    try p.emitDeclare(.enum_decl, enum_node);
+    return enum_node;
 }
 
 // =====================================================================
@@ -2016,6 +2021,9 @@ fn parseNamespaceOrModule(p: *Parser, node_tag: Node.Tag) Error!NodeIndex {
                 .{p.tokenText(p.tokIdx())});
         }
         name_node = try p.parseIdentifier();
+        // Declare the namespace name in the enclosing scope so forward references
+        // (e.g. `export { Foo }; namespace Foo {}`) resolve correctly.
+        try p.emitDeclare(.namespace_decl, name_node);
         // Support dotted names: `namespace A.B.C { }`
         while (p.peek() == .dot) {
             _ = p.advance(); // consume `.`

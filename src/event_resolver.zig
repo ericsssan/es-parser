@@ -871,7 +871,13 @@ fn resolveFullImpl(
                 break :blk sp - 1;
             };
             const scope_id = stack[target_depth];
-            const main_tok = node_main_tokens[e.node];
+            // For enum declarations the main_token of the ts_enum_decl node is the
+            // `enum` keyword, not the name.  The name token lives in EnumData.name
+            // (first u32 of extra_data starting at node_datas[e.node].lhs).
+            const main_tok = if (kind == .enum_decl) blk: {
+                const extra_idx = @intFromEnum(node_datas[e.node].lhs);
+                break :blk ast.extra_data[extra_idx];
+            } else node_main_tokens[e.node];
             const start = tok_starts[main_tok];
             const len = tok_lens[main_tok];
             const name = source[start .. start + len];
