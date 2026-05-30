@@ -449,7 +449,16 @@ fn parseJsxChildren(p: *Parser) Error!SubRange {
             }
 
             // `{expr}` inside children.
+            // Track the first token to detect whether the expression is parenthesized.
+            const expr_first_tok = p.tok_i;
             const expr = try p.parseExpression();
+            // Sequence expressions are not allowed directly in JSX containers:
+            // `{a, b}` is invalid, but `{(a, b)}` (parenthesized) is allowed.
+            if (p.node_tags_ptr[expr.toInt()] == .sequence_expr and
+                p.tags_ptr[expr_first_tok] != .l_paren)
+            {
+                try p.emitDiagnostic(p.currentSpan(), "Sequence expressions cannot be directly nested inside JSX. Did you mean to wrap it in parentheses (...)?", .{});
+            }
             _ = try p.expect(.r_brace);
 
             const container = try p.addNode(.{
