@@ -608,6 +608,7 @@ const semantic_only_codes = [_]u16{
     1362, // 'export type' used as value (semantic)
     1376, // Modifier conflict (semantic — modifier-modifier interaction)
     1377, // Modifier conflict (semantic)
+    1378, // Top-level 'await' with wrong target/module config (target-dependent)
     1432, // 'await' top-level requires module setting (target-dependent)
     1464, // 'import' attribute requires `with` (config-dependent)
     1473, // Import attributes are only supported when '--module' is es2026 or later
@@ -626,8 +627,13 @@ const semantic_only_codes = [_]u16{
     1192, // Module '%0' has no default export (import alias config)
     1195, // 'export *' does not re-export a default (related diagnostic for TS1192)
     1203, // Export assignment cannot be used when targeting ECMAScript modules
+    1205, // Re-exporting a type when 'verbatimModuleSyntax' is enabled (config)
     1216, // Identifier expected. '%0' is a reserved word in module mode
     1259, // Module '%0' can only be default-imported using esModuleInterop
+    1282, // 'export =' with verbatimModuleSyntax — value/type mismatch (config)
+    1283, // 'export =' with verbatimModuleSyntax — type-only (config)
+    1284, // 'export default' must reference a value when verbatimModuleSyntax (config)
+    1285, // 'export default' type-only with verbatimModuleSyntax (config)
     1273, // '%0' modifier can only be used in TypeScript files (decorators-legacy)
     1274, // 'decorators' option is required (decorators)
     1287, // A re-export cannot have type-only annotations (verbatimModuleSyntax)
