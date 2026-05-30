@@ -7297,6 +7297,12 @@ pub const Parser = struct {
                     return error.ParseError;
                 }
             }
+            // In module mode, `await` is reserved and cannot be used as a local import binding.
+            if (self.is_module and self.tokenTagAt(local_tok) == .kw_await) {
+                try self.emitDiagnostic(self.currentSpan(),
+                    "'await' is a reserved word at the top-level of a module", .{});
+                return error.ParseError;
+            }
 
             // local binding: if no alias and imported was an identifier, reuse imported as local.
             // Otherwise, create a fresh identifier node for the local binding.
