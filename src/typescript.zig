@@ -1603,6 +1603,8 @@ pub fn parseInterfaceDeclaration(p: *Parser) Error!NodeIndex {
         p.advance()
     else
         try p.expect(.identifier);
+    // TS1212: strict reserved words cannot be used as interface names in strict mode.
+    try p.checkStrictBinding(name_tok);
 
     // Build the name Identifier IMMEDIATELY so its end_tok matches name_tok
     // (addNode records end_tok = tok_i - 1 at the time of call). Declare it
@@ -1805,6 +1807,8 @@ pub fn parseEnumDeclaration(p: *Parser) Error!NodeIndex {
 
     // Enum name — contextual keywords are valid enum names but always-reserved words are not.
     const name_tok = try p.expectIdentifierOrKeyword();
+    // TS1212: strict reserved words cannot be used as enum names in strict mode.
+    try p.checkStrictBinding(name_tok);
     {
         const name_tag = p.tokenTag(name_tok);
         const is_reserved = switch (name_tag) {
