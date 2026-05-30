@@ -190,11 +190,21 @@ pub fn parseNonConditionalType(p: *Parser) Error!NodeIndex {
     // Collect union members.
     const scratch_top = p.scratchLen();
     defer p.scratchPop(scratch_top);
+    // TS1385: function type in union must be parenthesized.
+    const first_tag = p.node_tags_ptr[first.toInt()];
+    if (first_tag == .ts_function_type or first_tag == .ts_constructor_type) {
+        try p.emitDiagnosticAtToken(p.node_main_token_ptr[first.toInt()], "Function type notation must be parenthesized when used in a union type", .{});
+    }
     try p.scratchPush(first);
 
     while (p.peek() == .pipe) {
         _ = p.advance(); // consume `|`
         const member = try parseIntersectionType(p);
+        // TS1385: function type in union must be parenthesized.
+        const member_tag = p.node_tags_ptr[member.toInt()];
+        if (member_tag == .ts_function_type or member_tag == .ts_constructor_type) {
+            try p.emitDiagnosticAtToken(p.node_main_token_ptr[member.toInt()], "Function type notation must be parenthesized when used in a union type", .{});
+        }
         try p.scratchPush(member);
     }
 
@@ -233,11 +243,21 @@ pub fn parseIntersectionType(p: *Parser) Error!NodeIndex {
     // Collect intersection members.
     const scratch_top = p.scratchLen();
     defer p.scratchPop(scratch_top);
+    // TS1387: function type in intersection must be parenthesized.
+    const first_itag = p.node_tags_ptr[first.toInt()];
+    if (first_itag == .ts_function_type or first_itag == .ts_constructor_type) {
+        try p.emitDiagnosticAtToken(p.node_main_token_ptr[first.toInt()], "Function type notation must be parenthesized when used in an intersection type", .{});
+    }
     try p.scratchPush(first);
 
     while (p.peek() == .ampersand) {
         _ = p.advance(); // consume `&`
         const member = try parsePrimaryType(p);
+        // TS1387: function type in intersection must be parenthesized.
+        const member_itag = p.node_tags_ptr[member.toInt()];
+        if (member_itag == .ts_function_type or member_itag == .ts_constructor_type) {
+            try p.emitDiagnosticAtToken(p.node_main_token_ptr[member.toInt()], "Function type notation must be parenthesized when used in an intersection type", .{});
+        }
         try p.scratchPush(member);
     }
 
