@@ -175,9 +175,16 @@ pub fn main(init: std.process.Init) !void {
     // baselines = .../typescript/tests/baselines/reference
     var baselines_buf: [4096]u8 = undefined;
     const baselines_dir = blk: {
-        // Walk up from conformance dir to find tests/baselines/reference
-        if (std.mem.indexOf(u8, cases_dir, "/tests/cases/")) |idx| {
+        // Walk up from cases dir to find tests/baselines/reference.
+        // Support both .../tests/cases/... (with trailing subdir) and .../tests/cases (terminal).
+        const needle_slash = "/tests/cases/";
+        const needle_end   = "/tests/cases";
+        if (std.mem.indexOf(u8, cases_dir, needle_slash)) |idx| {
             const prefix = cases_dir[0..idx];
+            break :blk std.fmt.bufPrint(&baselines_buf, "{s}/tests/baselines/reference", .{prefix}) catch "";
+        }
+        if (std.mem.endsWith(u8, cases_dir, needle_end)) {
+            const prefix = cases_dir[0 .. cases_dir.len - needle_end.len];
             break :blk std.fmt.bufPrint(&baselines_buf, "{s}/tests/baselines/reference", .{prefix}) catch "";
         }
         break :blk "";
