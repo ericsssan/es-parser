@@ -6985,10 +6985,12 @@ pub const Parser = struct {
                     next == .equal or next == .question)
                     break;
                 if (first_mod_tok == null) first_mod_tok = self.tokIdx();
-                // TS1029: check modifier ordering
+                // TS1029: check modifier ordering; TS1028: check duplicate access modifiers
                 const phase: u8 = if (is_access) 1 else if (is_override) 2 else 3;
                 if (phase < param_mod_last_phase) {
                     try self.emitDiagnostic(self.currentSpan(), "Modifier order is incorrect", .{});
+                } else if (phase == param_mod_last_phase and is_access) {
+                    try self.emitDiagnostic(self.currentSpan(), "Accessibility modifier already seen", .{});
                 }
                 if (phase > param_mod_last_phase) param_mod_last_phase = phase;
                 _ = self.advance();
