@@ -7415,8 +7415,9 @@ fn looksLikeTsArrowParams(p: *Parser) bool {
         // Check for TS modifier followed by another identifier
         const text = if (tag == .identifier) p.tokenText(p.tokIdx()) else "";
         if ((std.mem.eql(u8, text, "public") or std.mem.eql(u8, text, "private") or
-            std.mem.eql(u8, text, "protected") or std.mem.eql(u8, text, "readonly")) and
-            (next == .identifier or next == .l_brace or next == .l_bracket))
+            std.mem.eql(u8, text, "protected") or std.mem.eql(u8, text, "readonly") or
+            tag == .kw_readonly or tag == .kw_override) and
+            (next == .identifier or next == .l_brace or next == .l_bracket or next.isTsContextualKeyword()))
             return true;
     }
     // Scan ahead for ident: pattern in later params with bracket-depth tracking.
