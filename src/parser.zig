@@ -7164,6 +7164,16 @@ pub const Parser = struct {
                     try self.emitDiagnostic(self.currentSpan(), "A string literal is expected", .{});
                     return error.ParseError;
                 }
+                // TS1003/TS1359: import alias value must be a qualified identifier or require().
+                // Check that the current token is an identifier (or keyword usable as namespace).
+                const cur = self.peek();
+                if (cur == .kw_null or cur == .kw_true or cur == .kw_false or
+                    cur == .kw_this or cur == .kw_super)
+                {
+                    try self.emitDiagnostic(self.currentSpan(), "Identifier expected. '{s}' is a reserved word that cannot be used here", .{self.tokenText(self.tokIdx())});
+                } else if (cur != .identifier and !cur.isKeyword() and cur != .kw_from and cur != .kw_of) {
+                    try self.emitDiagnostic(self.currentSpan(), "Identifier expected", .{});
+                }
                 // `require('...')` or qualified name `A.B.C`
                 const module_ref = try self.parseAssignmentExpression();
                 _ = self.eat(.semicolon);
