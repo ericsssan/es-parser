@@ -2542,6 +2542,17 @@ pub fn parsePrimaryExpression(p: *Parser) Error!NodeIndex {
                 try validateRegexNamedGroups(p, p.source[ts + 1 .. close - 1], has_u or has_v);
                 // Lookbehind cannot be quantified in any mode.
                 try validateRegexLookbehindQuant(p, p.source[ts + 1 .. close - 1]);
+                // TS1538: \u{...} escape sequences require the u or v flag.
+                if (!has_u and !has_v) {
+                    const body = p.source[ts + 1 .. close - 1];
+                    var bi: usize = 0;
+                    while (bi + 3 < body.len) : (bi += 1) {
+                        if (body[bi] == '\\' and body[bi + 1] == 'u' and body[bi + 2] == '{') {
+                            try p.emitError("Unicode escape sequences are only available when the Unicode (u) flag or the Unicode Sets (v) flag is set");
+                            break;
+                        }
+                    }
+                }
                 // With u or v flag, validate body for u-mode requirements.
                 if (has_u or has_v) {
                     try validateRegexBodyUnicode(p, p.source[ts + 1 .. close - 1], has_v);
