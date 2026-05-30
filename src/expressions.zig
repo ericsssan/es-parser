@@ -7180,7 +7180,9 @@ fn parseTsTypeAssertion(p: *Parser) Error!NodeIndex {
                 };
                 p.suppress_param_declares = saved_suppress;
                 params_range = pr;
-                generic_arrow_return_type = p.parseOptionalTypeAnnotation() catch break :blk false;
+                p.in_return_type = true;
+                generic_arrow_return_type = p.parseOptionalTypeAnnotation() catch { p.in_return_type = false; break :blk false; };
+                p.in_return_type = false;
                 if (p.peek() == .arrow and !p.isOnNewLine()) break :blk true;
                 break :blk false;
             };
