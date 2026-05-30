@@ -748,6 +748,9 @@ const semantic_only_codes = [_]u16{
     1448, // Must be re-exported using type-only re-export when isolatedModules enabled (config)
     1541, // Type-only import of ECMAScript module from CommonJS module needs resolution-mode (config)
     1542, // Type import of ECMAScript module from CommonJS module needs resolution-mode (config)
+    1062, // Type is referenced directly/indirectly in fulfillment callback of own 'then' (type-checker)
+    1251, // Function decls not allowed in blocks in strict mode targeting ES5, class body (target-dependent; 1250 covers blocks generally)
+    1294, // Syntax not allowed when 'erasableSyntaxOnly' is enabled (compiler config flag)
 };
 
 fn checkBaselineForSyntaxErrors(io: Io, allocator: std.mem.Allocator, path: []const u8) bool {
