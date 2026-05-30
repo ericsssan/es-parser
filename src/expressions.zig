@@ -579,7 +579,8 @@ fn parseAwaitExpression(p: *Parser) Error!NodeIndex {
         return parseIdentifierRef(p);
     }
     // await expressions are forbidden inside async parameter lists.
-    if (p.in_fn_params) {
+    // TypeScript emits TS2524 (semantic) — skip parse-time fatal error in TS mode.
+    if (p.in_fn_params and !p.is_ts) {
         try p.emitError("'await' is not allowed in async parameter list");
         return error.ParseError;
     }
@@ -5348,7 +5349,8 @@ fn parseNewExpression(p: *Parser) Error!NodeIndex {
     }
 
     // `new super()` is invalid but `new super.prop()` is valid
-    if (is_bare_super and p.node_tags_ptr[callee.toInt()] == .super_expr) {
+    // TypeScript emits TS2351/TS17011 (semantic) — skip parse-time error in TS mode.
+    if (is_bare_super and p.node_tags_ptr[callee.toInt()] == .super_expr and !p.is_ts) {
         try p.emitError("'super' is not valid as a new expression target");
     }
 
