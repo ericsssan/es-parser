@@ -787,7 +787,10 @@ pub fn validatePattern(p: *Parser, node: NodeIndex) Error!void {
                 // But parenthesized patterns are not: [([a])] = 1
                 if (child_tag == .grouping_expr) {
                     const inner_tag = unwrapGroupingTag(p, NodeIndex.fromInt(p.extra_data.items[i]));
-                    if (inner_tag != .identifier and inner_tag != .member_expr and inner_tag != .computed_member_expr) {
+                    // TypeScript: (a satisfies T) and (a as T) are valid as destructuring targets
+                    // (TypeScript allows them with semantic errors).
+                    const ts_ok = p.is_ts and (inner_tag == .ts_satisfies_expr or inner_tag == .ts_as_expr);
+                    if (!ts_ok and inner_tag != .identifier and inner_tag != .member_expr and inner_tag != .computed_member_expr) {
                         try p.emitError("Invalid destructuring target");
                         return error.ParseError;
                     }
@@ -920,7 +923,9 @@ pub fn validatePattern(p: *Parser, node: NodeIndex) Error!void {
                     // Parenthesized simple targets valid: ({a:(b)} = 1)
                     if (val_tag == .grouping_expr) {
                         const inner_val_tag = unwrapGroupingTag(p, prop_data.rhs);
-                        if (inner_val_tag != .identifier and inner_val_tag != .member_expr and inner_val_tag != .computed_member_expr) {
+                        // TypeScript: (e satisfies T) and (e as T) are valid property pattern targets.
+                        const ts_val_ok = p.is_ts and (inner_val_tag == .ts_satisfies_expr or inner_val_tag == .ts_as_expr);
+                        if (!ts_val_ok and inner_val_tag != .identifier and inner_val_tag != .member_expr and inner_val_tag != .computed_member_expr) {
                             try p.emitError("Invalid destructuring target");
                             return error.ParseError;
                         }
