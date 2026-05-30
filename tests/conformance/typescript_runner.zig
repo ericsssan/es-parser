@@ -812,27 +812,28 @@ fn checkBaselineForSyntaxErrors(io: Io, allocator: std.mem.Allocator, path: []co
         var j: usize = i + 2;
         while (j < content.len and isDigit(content[j])) j += 1;
         const ndigits = j - (i + 2);
-        if (ndigits == 4) {
-            // 4-digit TS1xxx code.
-            if (content[i + 2] != '1') { i = j; continue; }
-            const d2 = content[i + 3] - '0';
-            const d3 = content[i + 4] - '0';
-            const d4 = content[i + 5] - '0';
-            const code: u16 = 1000 + @as(u16, d2) * 100 + @as(u16, d3) * 10 + d4;
-            var is_semantic = false;
-            for (semantic_only_codes) |sc| {
-                if (sc == code) { is_semantic = true; break; }
+        const is_syntactic: bool = blk: {
+            if (ndigits == 4) {
+                if (content[i + 2] != '1') break :blk false;
+                const d2 = content[i + 3] - '0';
+                const d3 = content[i + 4] - '0';
+                const d4 = content[i + 5] - '0';
+                const code: u16 = 1000 + @as(u16, d2) * 100 + @as(u16, d3) * 10 + d4;
+                for (semantic_only_codes) |sc| {
+                    if (sc == code) break :blk false;
+                }
+                break :blk true;
+            } else if (ndigits == 5) {
+                var code5: u32 = 0;
+                var k: usize = i + 2;
+                while (k < j) : (k += 1) code5 = code5 * 10 + (content[k] - '0');
+                for (syntactic_5digit) |sc| {
+                    if (sc == code5) break :blk true;
+                }
             }
-            if (!is_semantic) return true;
-        } else if (ndigits == 5) {
-            // 5-digit code — check the allowlist.
-            var code5: u32 = 0;
-            var k: usize = i + 2;
-            while (k < j) : (k += 1) code5 = code5 * 10 + (content[k] - '0');
-            for (syntactic_5digit) |sc| {
-                if (sc == code5) return true;
-            }
-        }
+            break :blk false;
+        };
+        if (is_syntactic) return true;
         i = j;
     }
     return false;

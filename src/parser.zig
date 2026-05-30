@@ -9623,7 +9623,13 @@ pub const Parser = struct {
     pub fn parseOptionalTypeAnnotation(self: *Parser) Error!NodeIndex {
         if (!self.is_ts) return .none;
         // TS definite assignment assertion: `x!: Type` — only eat `!` if followed by `:`
-        if (self.peek() == .bang and self.peekAt(1) == .colon) _ = self.advance();
+        // Not valid on function parameters (TS1005), only on class fields and variable declarations.
+        if (self.peek() == .bang and self.peekAt(1) == .colon) {
+            if (self.in_fn_params) {
+                try self.emitDiagnostic(self.currentSpan(), "A definite assignment assertion '!' is not allowed in this context", .{});
+            }
+            _ = self.advance();
+        }
         if (self.peek() != .colon) return .none;
         const colon_tok = self.advance(); // eat ':'
         const type_node = try typescript.parseType(self);

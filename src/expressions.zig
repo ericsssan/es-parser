@@ -3986,14 +3986,30 @@ fn parseObjectLiteral(p: *Parser) Error!NodeIndex {
                         break :blk p.getStringContent(start);
                     } else if (ktag == .number_literal) {
                         const text = p.tokenText(ktok);
-                        const val = std.fmt.parseFloat(f64, text) catch break :blk null;
-                        if (std.math.isNan(val) or std.math.isInf(val)) break :blk null;
                         if (seen_count >= seen_buf.len) break :blk null;
-                        // Normalize: if the value is a non-negative integer, use integer form.
-                        const canonical = if (val >= 0 and val == @trunc(val) and val < 1e15)
-                            std.fmt.bufPrint(&seen_num_bufs[seen_count], "{d}", .{@as(u64, @intFromFloat(val))}) catch break :blk null
-                        else
-                            std.fmt.bufPrint(&seen_num_bufs[seen_count], "{d}", .{val}) catch break :blk null;
+                        // Parse hex/binary/octal literals as integers; fall back to float.
+                        const int_val: ?u64 = blk2: {
+                            if (text.len > 2 and text[0] == '0') {
+                                switch (text[1]) {
+                                    'x', 'X' => break :blk2 std.fmt.parseInt(u64, text[2..], 16) catch null,
+                                    'b', 'B' => break :blk2 std.fmt.parseInt(u64, text[2..], 2) catch null,
+                                    'o', 'O' => break :blk2 std.fmt.parseInt(u64, text[2..], 8) catch null,
+                                    else => {},
+                                }
+                            }
+                            break :blk2 null;
+                        };
+                        const canonical = if (int_val) |iv|
+                            std.fmt.bufPrint(&seen_num_bufs[seen_count], "{d}", .{iv}) catch break :blk null
+                        else blk2: {
+                            const val = std.fmt.parseFloat(f64, text) catch break :blk null;
+                            if (std.math.isNan(val) or std.math.isInf(val)) break :blk null;
+                            // Normalize: if the value is a non-negative integer, use integer form.
+                            break :blk2 if (val >= 0 and val == @trunc(val) and val < 1e15)
+                                std.fmt.bufPrint(&seen_num_bufs[seen_count], "{d}", .{@as(u64, @intFromFloat(val))}) catch break :blk null
+                            else
+                                std.fmt.bufPrint(&seen_num_bufs[seen_count], "{d}", .{val}) catch break :blk null;
+                        };
                         break :blk canonical;
                     } else break :blk null;
                 };
