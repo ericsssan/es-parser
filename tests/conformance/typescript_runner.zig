@@ -449,15 +449,52 @@ fn detectNonEsModuleKind(source: []const u8) bool {
 }
 
 fn detectModuleMode(source: []const u8) bool {
-    // Scan for export/import at start of any line (after optional whitespace).
+    // Scan for export/import at top-level (brace depth == 0) after optional whitespace.
     // Note: @module: directives are compiler OUTPUT options, not module declarations.
     // A file is an ES module only if it has top-level import/export syntax.
+    // Track brace depth to ignore `export` inside namespace/class bodies.
     var i: usize = 0;
+    var depth: i32 = 0;
     while (i < source.len) {
-        // Skip whitespace at start of line
-        while (i < source.len and (source[i] == ' ' or source[i] == '\t')) i += 1;
-        // Check for export/import keyword followed by whitespace or '{'
-        if (i + 6 < source.len) {
+        const c = source[i];
+        // Track brace depth (skip string literals to avoid counting braces in strings)
+        if (c == '"' or c == '\'') {
+            const q = c;
+            i += 1;
+            while (i < source.len and source[i] != q and source[i] != '\n') {
+                if (source[i] == '\\') i += 1; // skip escape
+                i += 1;
+            }
+            if (i < source.len) i += 1;
+            continue;
+        }
+        if (c == '`') {
+            i += 1;
+            while (i < source.len and source[i] != '`') {
+                if (source[i] == '\\') i += 1;
+                i += 1;
+            }
+            if (i < source.len) i += 1;
+            continue;
+        }
+        if (c == '/' and i + 1 < source.len and source[i + 1] == '/') {
+            // Line comment: skip to end of line
+            while (i < source.len and source[i] != '\n') i += 1;
+            continue;
+        }
+        if (c == '/' and i + 1 < source.len and source[i + 1] == '*') {
+            // Block comment: skip to */
+            i += 2;
+            while (i + 1 < source.len and !(source[i] == '*' and source[i + 1] == '/')) i += 1;
+            if (i + 1 < source.len) i += 2;
+            continue;
+        }
+        if (c == '{') { depth += 1; i += 1; continue; }
+        if (c == '}') { if (depth > 0) depth -= 1; i += 1; continue; }
+        // Skip whitespace
+        if (c == ' ' or c == '\t' or c == '\r' or c == '\n') { i += 1; continue; }
+        // At top level (depth 0): check for export/import keyword
+        if (depth == 0 and i + 6 < source.len) {
             if (std.mem.eql(u8, source[i..][0..6], "export") or
                 std.mem.eql(u8, source[i..][0..6], "import"))
             {
@@ -465,9 +502,8 @@ fn detectModuleMode(source: []const u8) bool {
                 if (next == ' ' or next == '\t' or next == '{' or next == '\n' or next == '*') return true;
             }
         }
-        // Skip to next line
-        while (i < source.len and source[i] != '\n') i += 1;
-        if (i < source.len) i += 1;
+        // Skip to next interesting character (skip identifiers, numbers, etc.)
+        i += 1;
     }
     return false;
 }
