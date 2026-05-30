@@ -3403,6 +3403,10 @@ pub const Parser = struct {
         if (!self.in_strict and isLabelledFunction(self, consequent)) {
             try self.emitDiagnostic(self.currentSpan(), "Labeled function declarations are not allowed in loop or if-statement bodies", .{});
         }
+        // TS1313: The body of an 'if' statement cannot be the empty statement.
+        if (self.is_ts and self.nodeTag(consequent.toInt()) == .empty_stmt) {
+            try self.emitDiagnostic(self.currentSpan(), "The body of an 'if' statement cannot be the empty statement.", .{});
+        }
 
         if (self.eat(.kw_else)) |_| {
             if (self.emit_scope_events) self.ev_ptr[if_ev].aux = 1;
