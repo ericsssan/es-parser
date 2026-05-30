@@ -366,6 +366,8 @@ fn parsePrimaryTypeInner(p: *Parser) Error!NodeIndex {
                     _ = p.advance();
                     if (p.peek() == .identifier or p.peek().isKeyword()) _ = p.advance();
                 }
+                // Optional `<T>` instantiation type args (e.g. typeof import(...).fn<T>)
+                if (p.peek() == .less_than) _ = parseTypeArguments(p) catch {};
                 return p.addNode(.{
                     .tag = .ts_typeof_type,
                     .main_token = tok,
