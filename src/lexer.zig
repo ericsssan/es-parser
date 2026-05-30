@@ -1248,6 +1248,15 @@ pub fn tokenizeWithBufAndBitmaps(
 
     // ── Phase 2: walk visit bitmap = newline | structural | ident_starts ──
     var prev_kind: Tag  = .eof;
+    // JSX opening-tag tracking (JSX languages only). `jsx_tag_depth` counts how many
+    // JSX opening-tag headers (`<Foo ...`) we are currently inside; `jsx_brace_nest`
+    // counts `{...}` nesting within a tag header so a `>` inside an attribute
+    // expression (`<a b={x > y}>`) doesn't prematurely close the header. Lets the
+    // string scanner distinguish a JSX attribute `=` (no-escape) from an assignment
+    // `=` (standard JS escapes) — `prev_kind == .equal` alone cannot, since both look
+    // like `identifier = string`.
+    var jsx_tag_depth: u32 = 0;
+    var jsx_brace_nest: u32 = 0;
     var saw_nl:   bool  = false;
     // Tracks whether we are at the logical start of a line (for Annex B --> comment).
     // True at start of file; set true after any newline; cleared when a real token is emitted.
@@ -2105,7 +2114,11 @@ pub fn tokenizeWithBufAndBitmaps(
                     //    is unambiguously JSX text content.
                     // 3. JS expression inside `{}`: `{"<test>"}` — prev is `{` etc.
                     //    Must NOT terminate at `<`; standard JS string semantics.
-                    const jsx_attr = language.isJsx() and prev_kind == .equal;
+                    // A string after `=` is a JSX attribute value (no escapes) ONLY when
+                    // we are actually inside a JSX opening-tag header. Otherwise the `=` is
+                    // an ordinary assignment (`const s = 'it\'s'` in a .tsx file) and the
+                    // string must use standard JS escape semantics.
+                    const jsx_attr = language.isJsx() and prev_kind == .equal and jsx_tag_depth > 0;
                     const jsx_text = language.isJsx() and (prev_kind == .greater_than or prev_kind == .identifier);
                     end = stringEndBMOptFull(src, bm.structural, bm.newline, p, n, jsx_attr or jsx_text, jsx_attr);
                     tag = .string_literal;
@@ -2343,6 +2356,38 @@ pub fn tokenizeWithBufAndBitmaps(
             tok_n += 1;
             saw_nl = false;
             at_line_start = false;
+
+            // Maintain JSX opening-tag depth (used by the string scanner above). Only
+            // `<` `>` `{` `}` tokens matter, and all of them reach this common emit
+            // point. `prev_kind` here is still the token BEFORE `tag`, which is exactly
+            // what the `<`-opens-a-JSX-element test needs.
+            if (language.isJsx()) {
+                switch (tag) {
+                    .less_than => {
+                        // `<` begins a JSX element when it is in expression/child position
+                        // (regexAllowed) and is immediately followed by a tag-name start or
+                        // `>` (fragment). This is the same disambiguation that separates JSX
+                        // from generics (`foo<T>`, where prev_kind is an identifier) and from
+                        // the less-than operator (`a < b`).
+                        if (Lex.regexAllowed(prev_kind)) {
+                            const nb: u8 = if (end < n) src[end] else 0;
+                            const opens = nb == '>' or nb == '_' or nb == '$' or
+                                (nb >= 'a' and nb <= 'z') or (nb >= 'A' and nb <= 'Z') or nb >= 0x80;
+                            if (opens) jsx_tag_depth += 1;
+                        }
+                    },
+                    .l_brace => if (jsx_tag_depth > 0) {
+                        jsx_brace_nest += 1;
+                    },
+                    .r_brace => if (jsx_brace_nest > 0) {
+                        jsx_brace_nest -= 1;
+                    },
+                    .greater_than => if (jsx_tag_depth > 0 and jsx_brace_nest == 0) {
+                        jsx_tag_depth -= 1;
+                    },
+                    else => {},
+                }
+            }
 
             prev_kind = if (isPropertyAccess(prev_kind) and tag.isKeyword()) .identifier else tag;
             if (opts.publish_to) |pp| {
