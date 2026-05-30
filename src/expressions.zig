@@ -4036,9 +4036,12 @@ fn parseObjectLiteral(p: *Parser) Error!NodeIndex {
                     const key_looks_like_literal = key_text[0] == '"' or key_text[0] == '\'' or
                         key_text[0] == '`' or (key_text[0] >= '0' and key_text[0] <= '9') or
                         key_text[0] == '+' or key_text[0] == '-';
+                    // Skip computed-vs-computed comparison when the source text contains binary
+                    // operators (e.g., 'foo'+'' is a compound expression TypeScript doesn't track).
+                    const key_has_binary_ops = std.mem.indexOfAny(u8, key_text, "+*|&^") != null;
                     for (seen_buf[0..seen_count]) |seen| {
                         const match = if (seen.is_computed)
-                            std.mem.eql(u8, seen.key, key_text)
+                            !key_has_binary_ops and std.mem.eql(u8, seen.key, key_text)
                         else
                             key_looks_like_literal and std.mem.eql(u8, seen.key, key_text);
                         if (match) {
