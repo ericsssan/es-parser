@@ -1966,6 +1966,12 @@ fn parseNamespaceOrModule(p: *Parser, node_tag: Node.Tag) Error!NodeIndex {
             .data = .{ .lhs = .none, .rhs = .none },
         });
     } else {
+        // TS1212: strict reserved words not allowed as namespace names in strict mode.
+        if (p.in_strict and p.isStrictReservedWord(p.tokIdx())) {
+            try p.emitDiagnostic(p.currentSpan(),
+                "Identifier expected. '{s}' is a reserved word in strict mode.",
+                .{p.tokenText(p.tokIdx())});
+        }
         name_node = try p.parseIdentifier();
         // Support dotted names: `namespace A.B.C { }`
         while (p.peek() == .dot) {
