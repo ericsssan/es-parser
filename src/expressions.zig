@@ -2779,7 +2779,8 @@ fn identRefsArguments(p: *const Parser, tok: u32) bool {
 fn parseIdentifierRef(p: *Parser) Error!NodeIndex {
     const tok = p.advance();
     // Class field initializers cannot reference 'arguments'.
-    if (p.in_class_field and identRefsArguments(p, tok)) {
+    // TypeScript emits TS2815 (semantic), so skip the parse-time error in TS mode.
+    if (!p.is_ts and p.in_class_field and identRefsArguments(p, tok)) {
         try p.emitError("'arguments' is not allowed in class field initializer");
         return error.ParseError;
     }
@@ -2799,7 +2800,8 @@ fn parseIdentifierOrArrow(p: *Parser) Error!NodeIndex {
         return parseArrowFunctionBody(p, tok, false);
     }
     // Class field initializers cannot reference 'arguments'.
-    if (p.in_class_field and identRefsArguments(p, tok)) {
+    // TypeScript emits TS2815 (semantic), so skip the parse-time error in TS mode.
+    if (!p.is_ts and p.in_class_field and identRefsArguments(p, tok)) {
         try p.emitError("'arguments' is not allowed in class field initializer");
         return error.ParseError;
     }
@@ -3923,7 +3925,8 @@ fn parseObjectLiteral(p: *Parser) Error!NodeIndex {
 
     // TS1117: track property names to detect duplicates.
     // Getter+setter pair with same name is allowed; all other duplicates are errors.
-    const SeenProp = struct { key: []const u8, is_getter: bool, is_setter: bool };
+    // is_computed=true for [expr] keys; only compare computed vs computed (not computed vs literal).
+    const SeenProp = struct { key: []const u8, is_getter: bool, is_setter: bool, is_computed: bool };
     var seen_buf: [64]SeenProp = undefined;
     // Per-slot buffers to hold formatted numeric canonical keys (e.g. "1" for 1.0).
     var seen_num_bufs: [64][32]u8 = undefined;
@@ -3972,12 +3975,21 @@ fn parseObjectLiteral(p: *Parser) Error!NodeIndex {
                 if (key_canonical) |name| {
                     for (seen_buf[0..seen_count]) |seen| {
                         if (std.mem.eql(u8, seen.key, name)) {
+                            // Computed key `[x]` where x is an identifier shouldn't
+                            // duplicate literal key `x:` — they represent different values.
+                            // Computed keys with literal text (number/string) CAN duplicate.
+                            if (seen.is_computed) {
+                                const key_is_literal = name.len > 0 and
+                                    ((name[0] >= '0' and name[0] <= '9') or
+                                    name[0] == '"' or name[0] == '\'' or name[0] == '`');
+                                if (!key_is_literal) continue;
+                            }
                             try p.emitDiagnostic(p.currentSpan(), "An object literal cannot have multiple properties with the same name", .{});
                             break;
                         }
                     }
                     if (seen_count < seen_buf.len) {
-                        seen_buf[seen_count] = .{ .key = name, .is_getter = false, .is_setter = false };
+                        seen_buf[seen_count] = .{ .key = name, .is_getter = false, .is_setter = false, .is_computed = false };
                         seen_count += 1;
                     }
                 }
@@ -4006,14 +4018,25 @@ fn parseObjectLiteral(p: *Parser) Error!NodeIndex {
             if (open_pos + 1 <= r_pos) {
                 const key_text = std.mem.trim(u8, p.source[open_pos + 1 .. r_pos], " \t\r\n");
                 if (key_text.len > 0) {
+                    // Only compare against literal (non-computed) keys if the computed key
+                    // source text represents a literal value (number/string), not an identifier
+                    // or complex expression. `[num]` with source "num" is an identifier whose
+                    // runtime value differs from literal key "num".
+                    const key_looks_like_literal = key_text[0] == '"' or key_text[0] == '\'' or
+                        key_text[0] == '`' or (key_text[0] >= '0' and key_text[0] <= '9') or
+                        key_text[0] == '+' or key_text[0] == '-';
                     for (seen_buf[0..seen_count]) |seen| {
-                        if (std.mem.eql(u8, seen.key, key_text)) {
+                        const match = if (seen.is_computed)
+                            std.mem.eql(u8, seen.key, key_text)
+                        else
+                            key_looks_like_literal and std.mem.eql(u8, seen.key, key_text);
+                        if (match) {
                             try p.emitDiagnostic(p.currentSpan(), "An object literal cannot have multiple properties with the same name", .{});
                             break;
                         }
                     }
                     if (seen_count < seen_buf.len) {
-                        seen_buf[seen_count] = .{ .key = key_text, .is_getter = false, .is_setter = false };
+                        seen_buf[seen_count] = .{ .key = key_text, .is_getter = false, .is_setter = false, .is_computed = true };
                         seen_count += 1;
                     }
                 }
@@ -4041,7 +4064,7 @@ fn parseObjectLiteral(p: *Parser) Error!NodeIndex {
                         }
                     }
                     if (!gsfound and seen_count < seen_buf.len) {
-                        seen_buf[seen_count] = .{ .key = name, .is_getter = is_getter, .is_setter = !is_getter };
+                        seen_buf[seen_count] = .{ .key = name, .is_getter = is_getter, .is_setter = !is_getter, .is_computed = false };
                         seen_count += 1;
                     }
                 }

@@ -2685,6 +2685,24 @@ pub const Parser = struct {
                     return self.parseUsingDeclaration(false);
                 }
             }
+            // TypeScript `global { ... }` — global augmentation block
+            if (self.is_ts and self.tok_lens_ptr[self.tok_i] == 6 and self.peekAt(1) == .l_brace) {
+                const text = self.tokenText(@intCast(self.tok_i));
+                if (std.mem.eql(u8, text, "global")) {
+                    _ = self.advance(); // eat 'global'
+                    const prev_is_module = self.is_module;
+                    const prev_in_block = self.in_block;
+                    const prev_ts_ns = self.in_ts_namespace;
+                    self.is_module = true;
+                    self.in_block = false;
+                    self.in_ts_namespace = true;
+                    const body = try self.parseBlockStatement();
+                    self.is_module = prev_is_module;
+                    self.in_block = prev_in_block;
+                    self.in_ts_namespace = prev_ts_ns;
+                    return body;
+                }
+            }
             return self.parseExprOrLabeledStatement();
         }
 
@@ -6033,14 +6051,16 @@ pub const Parser = struct {
         if (gs_cur == .kw_get and gs_p1 != .l_paren and
             gs_p1 != .equal and gs_p1 != .semicolon and
             gs_p1 != .r_brace and gs_p1 != .asterisk and
-            !(self.is_ts and gs_p1 == .less_than))
+            !(self.is_ts and gs_p1 == .less_than) and
+            !(self.is_ts and gs_p1 == .colon))
         {
             is_getter = true;
             _ = self.advance(); // eat 'get'
         } else if (gs_cur == .kw_set and gs_p1 != .l_paren and
             gs_p1 != .equal and gs_p1 != .semicolon and
             gs_p1 != .r_brace and gs_p1 != .asterisk and
-            !(self.is_ts and gs_p1 == .less_than))
+            !(self.is_ts and gs_p1 == .less_than) and
+            !(self.is_ts and gs_p1 == .colon))
         {
             is_setter = true;
             _ = self.advance(); // eat 'set'
@@ -7740,6 +7760,18 @@ pub const Parser = struct {
                             .data = .{ .lhs = decl, .rhs = .none },
                         });
                     }
+                    // `export default abstract class` — TS abstract class as default export.
+                    if (self.peek() == .kw_abstract and self.peekAt(1) == .kw_class) {
+                        _ = self.advance(); // skip 'abstract'
+                        self.in_export_default = true;
+                        const decl = try self.parseClassDeclaration();
+                        self.in_export_default = false;
+                        return self.addNode(.{
+                            .tag = .export_default_class,
+                            .main_token = export_tok,
+                            .data = .{ .lhs = decl, .rhs = .none },
+                        });
+                    }
                 }
                 const expr = try self.parseAssignmentExpression();
                 try self.expectSemicolon();
@@ -9083,6 +9115,9 @@ pub const Parser = struct {
     /// and no future reserved words as binding names.
     pub inline fn checkStrictBinding(self: *Parser, tok: TokenIndex) !void {
         if (!self.in_strict) return;
+        // In TypeScript ambient declaration contexts, keywords like `static` are
+        // allowed as binding names (TypeScript permits `declare var static: any`).
+        if (self.is_ts and self.in_ts_ambient) return;
         // Future reserved words are invalid as binding names in strict mode.
         // TypeScript still enforces this (TS1212) for public/private/protected/etc.
         if (self.isStrictReservedWord(tok)) {

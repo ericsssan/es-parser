@@ -1542,6 +1542,10 @@ fn parseTypeParameterListImpl(p: *Parser, allow_const: bool) Error!SubRange {
         }
     }
 
+    if (p.scratchLen() == scratch_top) {
+        try p.emitError("Type parameter list cannot be empty");
+    }
+
     try expectClosingAngleBracket(p);
 
     const params = p.scratchSlice(scratch_top);
@@ -1826,8 +1830,8 @@ pub fn parseEnumDeclaration(p: *Parser) Error!NodeIndex {
             _ = p.advance();
             member_name = try p.parseExpression();
             _ = try p.expect(.r_bracket);
-        } else if (p.peek() == .number_literal) {
-            // Numeric member name (semantic error, but parseable)
+        } else if (p.peek() == .number_literal or p.peek() == .bigint_literal) {
+            // Numeric/BigInt member name (semantic error TS2452, but parseable)
             const num_tok = p.advance();
             member_name = try p.addNode(.{
                 .tag = .number_literal,
