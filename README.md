@@ -95,7 +95,8 @@ defer tree.deinit(allocator);
 ### Semantic analysis
 
 ```zig
-// analyze() defaults to module mode; use analyzeModule() to be explicit.
+// analyze() always uses module mode (strict, import/export allowed).
+// For script mode use analyzeModule(allocator, &tree, false).
 var sem = try es.semantic.SemanticAnalyzer.analyze(allocator, &tree);
 defer sem.deinit(allocator);
 
@@ -114,25 +115,26 @@ zig build test    # unit + lexer + parser + semantic tests + tc39/test262-parser
 ### Conformance suites
 
 `conformance-parser-tests` runs against the bundled submodule automatically.
-The other suites require large external repos and an explicit path argument:
+The other three suites are large external repos registered as submodules but
+not checked out by default — initialize them first, then pass the path:
 
 ```sh
 # Bundled — no argument needed
 zig build conformance-parser-tests
 
 # Full tc39/test262
-git submodule add https://github.com/tc39/test262.git tests/conformance/test262
+git submodule update --init tests/conformance/test262
 zig build conformance-test262 -- tests/conformance/test262/test
 
 # Babel parser fixtures
-git submodule add https://github.com/babel/babel.git tests/conformance/babel
+git submodule update --init tests/conformance/babel
 zig build conformance-babel -- tests/conformance/babel/packages/babel-parser/test/fixtures
 
 # TypeScript compiler tests
-git submodule add https://github.com/microsoft/TypeScript.git tests/conformance/typescript
+git submodule update --init tests/conformance/typescript
 zig build conformance-typescript -- tests/conformance/typescript/tests/cases
 
-# Semantic analysis fixtures
+# Semantic analysis fixtures (bundled)
 zig build conformance-semantic -- tests/fixtures/semantic
 ```
 
