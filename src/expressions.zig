@@ -4742,6 +4742,10 @@ fn isContextualKeyword(tag: TokenTag) bool {
     return switch (tag) {
         .kw_get, .kw_set, .kw_async, .kw_static, .kw_let, .kw_of,
         .kw_from, .kw_as, .kw_target, .kw_meta, .kw_yield, .kw_await,
+        // TypeScript-specific contextual keywords (valid as identifiers/property names)
+        .kw_type, .kw_interface, .kw_declare, .kw_namespace, .kw_module,
+        .kw_abstract, .kw_readonly, .kw_override, .kw_keyof, .kw_infer,
+        .kw_is, .kw_asserts, .kw_satisfies, .kw_unique,
         => true,
         else => false,
     };
@@ -6645,6 +6649,12 @@ fn parseObjectBindingPattern(p: *Parser) Error!NodeIndex {
         if (p.peek() == .ellipsis) {
             const tok = p.advance();
             const arg = try parseBindingPattern(p);
+            // TypeScript TS2566: `{ ...a: b }` — rest element with property name.
+            // Parse (and ignore) the `: binding` part; emit as rest_element.
+            if (p.is_ts and p.peek() == .colon) {
+                _ = p.advance(); // eat ':'
+                _ = try parseBindingPattern(p); // discard the rename binding
+            }
             const rest = try p.addNode(.{
                 .tag = .rest_element,
                 .main_token = tok,
