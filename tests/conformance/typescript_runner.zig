@@ -492,10 +492,33 @@ fn classifyTest(io: Io, allocator: std.mem.Allocator, path: []const u8, source: 
     return .must_parse;
 }
 
-/// True if source contains a `"use strict";` or `'use strict';` directive.
+/// True if source contains an actual `"use strict"` directive (not inside a // comment).
 fn hasUseStrictDirective(source: []const u8) bool {
-    return std.mem.indexOf(u8, source, "\"use strict\"") != null or
-        std.mem.indexOf(u8, source, "'use strict'") != null;
+    // Scan line by line to avoid matching "use strict" inside // comments.
+    var i: usize = 0;
+    while (i < source.len) {
+        // Find end of line.
+        var line_end: usize = i;
+        while (line_end < source.len and source[line_end] != '\n') line_end += 1;
+        const line = source[i..line_end];
+        // Check if this line contains "use strict" or 'use strict'.
+        const dq = std.mem.indexOf(u8, line, "\"use strict\"");
+        const sq = std.mem.indexOf(u8, line, "'use strict'");
+        const match_pos = if (dq != null and sq != null) @min(dq.?, sq.?) else dq orelse sq;
+        if (match_pos) |pos| {
+            // Check whether the match is preceded by // on the same line.
+            const is_in_line_comment = blk: {
+                var j: usize = 0;
+                while (j + 1 < pos) : (j += 1) {
+                    if (line[j] == '/' and line[j + 1] == '/') break :blk true;
+                }
+                break :blk false;
+            };
+            if (!is_in_line_comment) return true;
+        }
+        i = line_end + 1;
+    }
+    return false;
 }
 
 /// True if the test's error baseline contains a specific TS code (e.g. "TS1100").
