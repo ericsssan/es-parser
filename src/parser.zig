@@ -4538,6 +4538,24 @@ pub const Parser = struct {
         return node;
     }
 
+    /// Compare two label names for identity, decoding `\uXXXX` / `\u{X}` escapes on
+    /// both sides first. A label declared `label2:` and referenced as `label2`
+    /// (or vice-versa) denote the same label per spec, so a raw byte comparison would
+    /// wrongly miss the target. Mirrors the escaped-identifier comparison used for
+    /// variable references (see decodeIdentForCompare callers).
+    fn labelNamesEqual(a: []const u8, b: []const u8) bool {
+        // Fast path: no escapes on either side → raw compare.
+        if (std.mem.indexOfScalar(u8, a, '\\') == null and
+            std.mem.indexOfScalar(u8, b, '\\') == null)
+            return std.mem.eql(u8, a, b);
+        var abuf: [256]u8 = undefined;
+        var bbuf: [256]u8 = undefined;
+        if (a.len > abuf.len or b.len > bbuf.len) return std.mem.eql(u8, a, b);
+        const al = decodeIdentForCompare(a, &abuf);
+        const bl = decodeIdentForCompare(b, &bbuf);
+        return std.mem.eql(u8, abuf[0..al], bbuf[0..bl]);
+    }
+
     /// Parse `break [label];`.
     pub fn parseBreakStatement(self: *Parser) Error!NodeIndex {
         const break_tok = self.advance(); // eat 'break'
@@ -4567,7 +4585,7 @@ pub const Parser = struct {
                 if (self.ts_label_stack) |stack| {
                     var i: u8 = 0;
                     while (i < self.ts_label_count) : (i += 1) {
-                        if (std.mem.eql(u8, stack[i].name, label_name)) {
+                        if (labelNamesEqual(stack[i].name, label_name)) {
                             if (self.ts_label_fn_depth > stack[i].fn_depth) {
                                 if (self.is_ts) {
                                     try self.emitDiagnosticAtToken(label_tok, "Jump target cannot cross function boundary", .{});
@@ -4637,7 +4655,7 @@ pub const Parser = struct {
                 if (self.ts_label_stack) |stack| {
                     var i: u8 = 0;
                     while (i < self.ts_label_count) : (i += 1) {
-                        if (std.mem.eql(u8, stack[i].name, label_name)) {
+                        if (labelNamesEqual(stack[i].name, label_name)) {
                             if (self.ts_label_fn_depth > stack[i].fn_depth) {
                                 if (self.is_ts) {
                                     try self.emitDiagnosticAtToken(label_tok, "Jump target cannot cross function boundary", .{});

@@ -804,6 +804,12 @@ const semantic_only_codes = [_]u16{
     1331, // Parameter property declaration only in constructor implementation (semantic)
     1340, // Module reference (config-dependent)
     1356, // Did you mean to use 'as const' (semantic)
+    1540, // 'module X {}' should use 'namespace' — suggestion, not a parse error.
+          // The parser emits it at `.warning` severity (filtered out of must-parse
+          // failure above), so a baseline whose ONLY code is 1540
+          // (moduleKeywordDeprecated) classifies must-parse. Baselines with 1540 PLUS
+          // a real syntactic code (escapedIdentifiers also has TS2564) still classify
+          // must-reject on that other code.
     1363, // Type-only export-equals (verbatimModuleSyntax)
     1380, // 'import =' / 'export =' (verbatimModuleSyntax)
     1392, // Import attribute resolution-mode (config)
