@@ -330,10 +330,6 @@ pub fn main(init: std.process.Init) !void {
                 if (seg_is_ts) all_ts_segments_ok = false;
             }
         }
-        // For multi-file tests with at least one TS/TSX segment, we only require
-        // those to succeed (a sibling `.js` file may be intentionally invalid to
-        // show a TS-only feature). For single-file or all-JS tests, fall back to
-        // requiring every segment to parse.
         const has_error = if (saw_ts_segment) !all_ts_segments_ok else !all_segments_ok;
 
         switch (kind) {
@@ -659,6 +655,15 @@ const semantic_only_codes = [_]u16{
     1486, // Decorators not allowed (config)
     1543, // 'using' / 'await using' (target-dependent)
     1544, // 'using' / 'await using' (target-dependent)
+    // Additional config/type-checker-dependent codes identified from failing tests.
+    1069, // Unexpected token in jsdoc type parameter (jsdoc-parse-only — ignored by our non-jsdoc parser)
+    1223, // 'satisfies' tag already specified (jsdoc-parse-only)
+    1065, // Return type of async function or method must be global Promise<T> (type-checker)
+    1202, // Import assignment cannot be used when targeting ECMAScript modules (config: module=esnext)
+    1289, // Resolves to type-only declaration, mark type-only when isolatedModules enabled (config)
+    1448, // Must be re-exported using type-only re-export when isolatedModules enabled (config)
+    1541, // Type-only import of ECMAScript module from CommonJS module needs resolution-mode (config)
+    1542, // Type import of ECMAScript module from CommonJS module needs resolution-mode (config)
 };
 
 fn checkBaselineForSyntaxErrors(io: Io, allocator: std.mem.Allocator, path: []const u8) bool {

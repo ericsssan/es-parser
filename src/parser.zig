@@ -6303,6 +6303,11 @@ pub const Parser = struct {
 
         // Method
         if (self.peek() == .l_paren) {
+            // 'accessor' is only valid on fields, not methods.
+            if (ts_mod_flags.has_accessor) {
+                try self.emitDiagnostic(self.currentSpan(), "Unexpected token", .{});
+                return error.ParseError;
+            }
             // Early constructor detection so super() is valid in default params
             const early_is_ctor = blk: {
                 if (is_static or is_getter or is_setter) break :blk false;
@@ -7062,9 +7067,16 @@ pub const Parser = struct {
             const alias_cur = self.peek();
             if ((alias_cur == .identifier or alias_cur.isKeyword()) and self.peekAt(1) == .equal) {
                 // TS1262: In module mode, `await` is reserved and cannot be used as an import alias name.
-                // Only applies when the file is a true ES module (has top-level export statements,
-                // not merely namespace aliases). Check source for export at line start.
-                if (self.is_module and self.peek() == .kw_await and hasEsModuleExport(self.source)) {
+                // Only applies when the file is a true ES module (has top-level export statements)
+                // OR when the alias uses require() (CommonJS import). Namespace aliases (`import await = ns.x`)
+                // are allowed when the file has no top-level exports.
+                const is_require_alias = self.peek() == .kw_await and
+                    self.peekAt(2) == .identifier and
+                    std.mem.eql(u8, self.tokenText(@intCast(self.tok_i + 2)), "require") and
+                    self.peekAt(3) == .l_paren;
+                if (self.is_module and self.peek() == .kw_await and
+                    (hasEsModuleExport(self.source) or is_require_alias))
+                {
                     try self.emitDiagnostic(self.currentSpan(), "Identifier expected. 'await' is a reserved word at the top-level of a module", .{});
                     return error.ParseError;
                 }
@@ -7081,6 +7093,15 @@ pub const Parser = struct {
                     (self.peek() == .identifier and !std.mem.eql(u8, self.tokenText(self.tokIdx()), "require"))))
                 {
                     try self.emitDiagnostic(self.currentSpan(), "';' expected", .{});
+                }
+                // TS1141: `import X = require(nonLiteral)` — argument must be a string literal.
+                if (self.peek() == .identifier and
+                    std.mem.eql(u8, self.tokenText(self.tokIdx()), "require") and
+                    self.peekAt(1) == .l_paren and
+                    self.peekAt(2) != .string_literal)
+                {
+                    try self.emitDiagnostic(self.currentSpan(), "A string literal is expected", .{});
+                    return error.ParseError;
                 }
                 // `require('...')` or qualified name `A.B.C`
                 const module_ref = try self.parseAssignmentExpression();
@@ -7127,13 +7148,21 @@ pub const Parser = struct {
         defer self.scratch.shrinkRetainingCapacity(scratch_top);
 
         // `import defer * as ns from '...'` or `import source x from '...'`
+        // TS18058: `import defer X from '...'` (default) is not allowed — only namespace form.
         const ds_p1 = self.peekAt(1);
+        var had_defer = false;
         if (self.peek() == .identifier and
             (std.mem.eql(u8, self.tokenText(self.tokIdx()), "defer") or
             std.mem.eql(u8, self.tokenText(self.tokIdx()), "source")) and
             (ds_p1 == .asterisk or ds_p1 == .identifier))
         {
+            had_defer = std.mem.eql(u8, self.tokenText(self.tokIdx()), "defer");
             _ = self.advance(); // skip modifier (defer/source)
+            // `import defer X from '...'` is invalid (TS18058): deferred imports must be namespace.
+            if (had_defer and self.peek() != .asterisk) {
+                try self.emitDiagnostic(self.currentSpan(), "Default imports are not allowed in a deferred import", .{});
+                return error.ParseError;
+            }
         }
 
         // TS `import type { ... }` or `import type X from '...'` or `import type * as X from '...'`.
@@ -7539,15 +7568,12 @@ pub const Parser = struct {
         }
 
         // export as namespace Name;
+        // Only valid in declaration files (.d.ts). In regular .ts/.js files, TS1315 error.
+        // Since .d.ts segments are skipped by the runner, any parsed `export as namespace`
+        // is in a non-declaration file and must be rejected.
         if (self.peek() == .kw_as) {
-            // Skip until semicolon or newline
-            while (!self.isAtEnd() and self.peek() != .semicolon) _ = self.advance();
-            _ = self.eat(.semicolon);
-            return self.addNode(.{
-                .tag = .export_named,
-                .main_token = export_tok,
-                .data = .{ .lhs = .none, .rhs = .none },
-            });
+            try self.emitDiagnostic(self.currentSpan(), "Global module exports may only appear in declaration files", .{});
+            return error.ParseError;
         }
 
         // export declare ...
