@@ -2589,11 +2589,16 @@ pub fn parsePrimaryExpression(p: *Parser) Error!NodeIndex {
         .kw_class => try parseClassExpression(p),
         .at_sign => blk: {
             // Decorator(s) before class expression: @expr class { }
+            // TS1206: In experimental-decorators mode, decorators on class expressions are invalid.
+            const had_at = p.peek() == .at_sign;
             while (p.peek() == .at_sign) {
                 _ = p.advance(); // eat @
                 _ = try parseAssignmentExpression(p);
             }
             if (p.peek() == .kw_class) {
+                if (had_at and p.is_ts and p.experimental_decorators) {
+                    try p.emitDiagnostic(p.currentSpan(), "Decorators are not valid here", .{});
+                }
                 break :blk try parseClassExpression(p);
             }
             try p.emitError("Expected class after decorator");
