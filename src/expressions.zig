@@ -228,7 +228,8 @@ fn parseExpressionPrec(p: *Parser, min_prec: Precedence) Error!NodeIndex {
             const lt_tok: TokenIndex = @intCast(p.tok_i);
             if (tryParseTsTypeArguments(p)) |type_args_range| {
                 // TS1477: An instantiation expression cannot be followed by a property access.
-                if (p.peek() == .dot or p.peek() == .question_dot) {
+                // Only applies to regular member access (.prop), not to optional calls (?.()/?.[]()).
+                if (p.peek() == .dot) {
                     try p.emitError("An instantiation expression cannot be followed by a property access");
                     return error.ParseError;
                 }
@@ -7389,7 +7390,7 @@ fn tryParseTsTypeArguments(p: *Parser) ?ast.SubRange {
     // Check what follows — if it's a valid continuation for type arguments, accept
     const next = p.peek();
     if (next == .l_paren or next == .r_paren or next == .r_bracket or
-        next == .dot or next == .comma or next == .semicolon or
+        next == .dot or next == .question_dot or next == .comma or next == .semicolon or
         next == .question or next == .colon or next == .arrow or
         next == .equal_equal or next == .equal_equal_equal or
         next == .bang_equal or next == .bang_equal_equal or
