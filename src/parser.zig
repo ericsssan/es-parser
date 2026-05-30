@@ -7427,12 +7427,15 @@ pub const Parser = struct {
             },
             .kw_function => {
                 const decl = try self.parseFunctionDeclaration();
-                // Function declaration: data.lhs is the function-name identifier node.
+                // fn_decl.data.lhs = extra index to FnData; FnData.name is the first field.
                 if (decl != .none) {
-                    const fn_data = self.node_data_ptr[decl.toInt()];
-                    if (fn_data.lhs != .none and self.node_tags_ptr[fn_data.lhs.toInt()] == .identifier) {
-                        const ntok = self.node_main_token_ptr[fn_data.lhs.toInt()];
-                        try self.addExportedName(self.tokenText(ntok));
+                    const fd_idx = self.node_data_ptr[decl.toInt()].lhs.toInt();
+                    if (fd_idx < self.extra_data.items.len) {
+                        const name_node = NodeIndex.fromInt(self.extra_data.items[fd_idx]);
+                        if (name_node != .none and self.node_tags_ptr[name_node.toInt()] == .identifier) {
+                            const ntok = self.node_main_token_ptr[name_node.toInt()];
+                            try self.addExportedName(self.tokenText(ntok));
+                        }
                     }
                 }
                 return self.addNode(.{
@@ -7446,11 +7449,15 @@ pub const Parser = struct {
             },
             .kw_class => {
                 const decl = try self.parseClassDeclaration();
+                // class_decl.data.lhs = extra index to ClassData; ClassData.name is the first field.
                 if (decl != .none) {
-                    const cls_data = self.node_data_ptr[decl.toInt()];
-                    if (cls_data.lhs != .none and self.node_tags_ptr[cls_data.lhs.toInt()] == .identifier) {
-                        const ntok = self.node_main_token_ptr[cls_data.lhs.toInt()];
-                        try self.addExportedName(self.tokenText(ntok));
+                    const cd_idx = self.node_data_ptr[decl.toInt()].lhs.toInt();
+                    if (cd_idx < self.extra_data.items.len) {
+                        const name_node = NodeIndex.fromInt(self.extra_data.items[cd_idx]);
+                        if (name_node != .none and self.node_tags_ptr[name_node.toInt()] == .identifier) {
+                            const ntok = self.node_main_token_ptr[name_node.toInt()];
+                            try self.addExportedName(self.tokenText(ntok));
+                        }
                     }
                 }
                 return self.addNode(.{
