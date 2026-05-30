@@ -7702,8 +7702,24 @@ pub const Parser = struct {
             return self.addNode(.{ .tag = .export_named, .main_token = export_tok, .data = .{ .lhs = decl, .rhs = .none } });
         }
 
-        // `export import X = Y` — re-export alias
+        // `export import X = Y` — re-export alias (TS).
+        // `export import A from 'mod'` is invalid (TS1191: import decl cannot have modifiers).
         if (self.peek() == .kw_import) {
+            // Detect whether this is an ES import statement (not an import alias).
+            // An import alias looks like: `import name =` or `import type name =`.
+            // An ES import looks like: `import {`, `import *`, `import 'mod'`, `import name from`.
+            const is_ts_import_alias = self.is_ts and blk: {
+                var k: u32 = 1; // skip 'import'
+                // skip optional 'type'
+                if (self.peekAt(k) == .kw_type) k += 1;
+                const cur = self.peekAt(k);
+                const next = self.peekAt(k + 1);
+                break :blk (cur == .identifier or cur.isKeyword()) and next == .equal;
+            };
+            if (!is_ts_import_alias) {
+                // ES import with export modifier → TS1191
+                try self.emitDiagnostic(self.currentSpan(), "An import declaration cannot have modifiers", .{});
+            }
             const decl = try self.parseImportDeclaration();
             return self.addNode(.{ .tag = .export_named, .main_token = export_tok, .data = .{ .lhs = decl, .rhs = .none } });
         }
