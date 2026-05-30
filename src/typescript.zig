@@ -823,6 +823,9 @@ fn looksLikeFunctionTypeParams(p: *Parser) bool {
 
     _ = p.advance(); // skip `(`
 
+    // `((` — inner `(` as first token means this is a parenthesized type, not fn params.
+    if (p.peek() == .l_paren) return false;
+
     // `(...` — rest parameter, definitely function type
     if (p.peek() == .ellipsis) return true;
 
