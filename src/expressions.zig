@@ -5668,9 +5668,15 @@ fn parseImportExpression(p: *Parser) Error!NodeIndex {
     // Optional second argument (import attributes)
     var options: NodeIndex = .none;
     if (p.eat(.comma) != null) {
-        if (p.peek() != .r_paren) {
+        if (p.peek() == .r_paren) {
+            // TS1009: trailing comma in import() is not allowed in TypeScript.
+            if (p.is_ts) try p.emitError("Trailing comma not allowed");
+        } else {
             options = try parseAssignmentExpression(p);
-            _ = p.eat(.comma); // trailing comma
+            if (p.eat(.comma) != null) {
+                // TS1009: trailing comma after second argument.
+                if (p.is_ts) try p.emitError("Trailing comma not allowed");
+            }
         }
     }
     _ = try p.expect(.r_paren);
