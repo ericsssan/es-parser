@@ -624,6 +624,27 @@ fn parseJsxAttribute(p: *Parser) Error!NodeIndex {
         });
     } else if (p.peek() == .l_brace) blk: {
         const brace_tok = p.advance(); // consume `{`
+        // Empty expression container: `{}` — in non-TS mode emit a diagnostic (Babel rejects this);
+        // in TS mode allow it silently (TypeScript emits TS17000 as a semantic check, not parse error).
+        if (p.peek() == .r_brace) {
+            if (!p.is_ts) try p.emitDiagnostic(p.currentSpan(), "JSX attributes must only be assigned a non-empty expression", .{});
+            const l_brace_end = p.tok_starts_ptr[brace_tok] + p.tok_lens_ptr[brace_tok];
+            const r_brace_start = p.tok_starts_ptr[p.tok_i];
+            _ = p.advance(); // consume `}`
+            const empty_expr = try p.addNode(.{
+                .tag = .jsx_empty_expr,
+                .main_token = brace_tok,
+                .data = .{
+                    .lhs = NodeIndex.fromInt(l_brace_end),
+                    .rhs = NodeIndex.fromInt(r_brace_start),
+                },
+            });
+            break :blk try p.addNode(.{
+                .tag = .jsx_expression_container,
+                .main_token = brace_tok,
+                .data = .{ .lhs = empty_expr, .rhs = .none },
+            });
+        }
         const expr = try p.parseAssignmentExpression();
         _ = try p.expect(.r_brace);
         break :blk try p.addNode(.{

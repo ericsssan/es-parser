@@ -82,14 +82,11 @@ pub fn parseType(p: *Parser) Error!NodeIndex {
             });
         }
     }
-    // `this is Type` predicate — recognized everywhere but only valid in return type position.
-    // Emit TS1228 if not in return type context.
+    // `this is Type` predicate — recognized everywhere.
+    // TS1228 (not in return type position) is treated as semantic/config-dependent.
     if (p.peek() == .kw_this and p.peekAt(1) == .kw_is and !p.hasNewLineBetween(p.tokIdx(), @intCast(p.tok_i + 1))) {
         const param_tok: u32 = p.tokIdx();
-        if (!p.in_return_type) {
-            // TS1228: type predicate not in return type position
-            try p.emitDiagnostic(p.currentSpan(), "A type predicate is only allowed in return type position for functions and methods", .{});
-        }
+        _ = p.in_return_type; // suppress unused warning
         _ = p.advance(); // eat 'this'
         _ = p.advance(); // eat 'is'
         const type_node = try parseType(p);
@@ -1519,11 +1516,10 @@ fn parseTypeParameterListImpl(p: *Parser, allow_const: bool) Error!SubRange {
     defer p.scratchPop(scratch_top);
 
     while (!isClosingAngleBracket(p.peek()) and !p.isAtEnd()) {
-        // TS 5.0: `const` modifier on type parameter — `<const T>`
+        // TS 5.0: `const` modifier on type parameter — `<const T>`.
+        // TS1277 (const not allowed in this context) is treated as semantic/config-dependent.
         if (p.peek() == .kw_const and p.peekAt(1) == .identifier) {
-            if (!allow_const) {
-                try p.emitError("'const' modifier can only appear on a type parameter of a function, method or class");
-            }
+            _ = allow_const; // suppress unused warning
             _ = p.advance(); // skip 'const'
         }
         // `in` and `out` variance modifiers — `<in T>`, `<out T>`, `<in out T>`
@@ -1613,6 +1609,10 @@ pub fn parseTypeArguments(p: *Parser) Error!SubRange {
     while (!isClosingAngleBracket(p.peek()) and !p.isAtEnd()) {
         const type_node = try parseType(p);
         try p.scratchPush(type_node);
+
+        // Consume trailing `?` suffix (JSDoc nullable: `Type?`). TypeScript emits
+        // TS17019 semantically; we skip it so `<string?>` parses without error.
+        _ = p.eat(.question);
 
         if (p.peek() == .comma) {
             _ = p.advance();

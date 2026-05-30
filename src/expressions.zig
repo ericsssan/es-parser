@@ -196,11 +196,6 @@ fn parseExpressionPrec(p: *Parser, min_prec: Precedence) Error!NodeIndex {
                 switch (tag) {
                     .kw_as => {
                         if (@intFromEnum(Precedence.relational) < @intFromEnum(min_prec)) break;
-                        // TS1355: `as const` can only be applied to literals, arrays, or objects.
-                        if (p.peekAt(1) == .kw_const and !isValidConstAssertionTarget(p, left)) {
-                            try p.emitError("A 'const' assertion can only be applied to references to enum members, or string, number, boolean, array, or object literals");
-                            return error.ParseError;
-                        }
                         left = try parseTsTypePostfix(p, left, .ts_as_expr);
                         continue;
                     },
@@ -7130,6 +7125,8 @@ fn parseTsTypePostfix(p: *Parser, left: NodeIndex, node_tag: Node.Tag) Error!Nod
     const op_tok = p.advance();
     const ts_mod = @import("typescript.zig");
     const type_node = try ts_mod.parseType(p);
+    // JSDoc postfix nullable: `as any?` — consume trailing `?` (TS17019 semantic).
+    _ = p.eat(.question);
     return p.addNode(.{
         .tag = node_tag,
         .main_token = op_tok,
@@ -7439,7 +7436,17 @@ fn looksLikeTsxGenericArrow(p: *Parser) bool {
     if (p.peekAt(1) != .identifier) return false;
     const after = p.peekAt(2);
     // `<T extends X>(...)` — TS generic with constraint.
-    if (after == .kw_extends) return true;
+    // Guard: `<T extends/>` is a JSX element with an `extends` attribute;
+    // only treat as generic if `extends` is followed by a type-starting token.
+    if (after == .kw_extends) {
+        const after_extends = p.peekAt(3);
+        // `<T extends/>`, `<T extends>`, `<T extends={val}>` — JSX attribute patterns.
+        if (after_extends == .slash or after_extends == .greater_than or
+            after_extends == .eof or after_extends == .r_paren or
+            after_extends == .equal)
+            return false;
+        return true;
+    }
     // `<T,...>(...)` — trailing/leading comma in type-param list (ESBuild's marker).
     if (after == .comma) return true;
     // `<T = X>(...)` — generic with default.

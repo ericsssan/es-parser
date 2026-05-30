@@ -1174,6 +1174,7 @@ fn isIdentStartAtPos(src: []const u8, pos: u32) bool {
 /// U+205F, U+3000), and ZWNBSP (U+FEFF — already handled as BOM).
 inline fn isUnicodeWhitespace(cp: u32) bool {
     return switch (cp) {
+        0x0085 => true, // NEL (NEXT LINE) — TypeScript treats as whitespace/line-terminator
         0x00A0 => true, // NO-BREAK SPACE
         0x1680 => true, // OGHAM SPACE MARK
         0x2000...0x200A => true, // EN QUAD .. HAIR SPACE

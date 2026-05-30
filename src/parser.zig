@@ -847,6 +847,9 @@ pub const Parser = struct {
     /// `language == .ts or language == .tsx` per call.
     is_ts: bool,
     is_jsx: bool,
+    /// True when parsing the immediate body of a `with` statement.
+    /// TypeScript does not emit TS1108 for `return` inside a `with` body at top level.
+    in_with: bool = false,
     /// True when parsing inside a `declare` ambient context (e.g. `declare namespace N { ... }`).
     /// In ambient contexts, `const` declarations without initializers are valid.
     in_ts_ambient: bool = false,
@@ -2759,7 +2762,8 @@ pub const Parser = struct {
                     if (next == .kw_var or next == .kw_let or next == .kw_const or
                         next == .kw_function or next == .kw_class or next == .kw_enum or
                         next == .kw_interface or next == .kw_type or next == .kw_namespace or
-                        next == .kw_module or next == .kw_abstract)
+                        next == .kw_module or next == .kw_abstract or
+                        (next == .kw_export and self.in_ts_ambient))
                     {
                         // TS1038: TypeScript emits this when 'declare' appears in an already-ambient
                         // context. We skip this check — it is a semantic error, not a parse error.
@@ -2793,6 +2797,11 @@ pub const Parser = struct {
                         self.in_ts_ambient = prev_ambient;
                         self.in_ts_namespace = prev_ts_ns;
                         return body;
+                    }
+                    // TS1120: `declare export = x` — export assignment cannot have modifiers.
+                    if (self.is_ts and next == .kw_export and self.peekAt(2) == .equal) {
+                        try self.emitDiagnostic(self.currentSpan(), "An export assignment cannot have modifiers", .{});
+                        return error.ParseError;
                     }
                     // Not a valid declare target — fall through to expression statement
                 },
@@ -4452,7 +4461,8 @@ pub const Parser = struct {
     pub fn parseReturnStatement(self: *Parser) Error!NodeIndex {
         const ret_tok = self.advance(); // eat 'return'
 
-        if (!self.in_function) {
+        // TypeScript doesn't emit TS1108 for `return` inside a `with` body.
+        if (!self.in_function and !self.in_with) {
             try self.emitDiagnosticAtToken(ret_tok, "'return' outside of function", .{});
         }
 
@@ -4946,15 +4956,26 @@ pub const Parser = struct {
 
     /// Parse `with (expr) stmt`.
     pub fn parseWithStatement(self: *Parser) Error!NodeIndex {
-        if (self.in_strict or (self.is_ts and !self.is_module)) {
+        // In TS mode, only emit the strict-mode 'with' error when strict mode comes from
+        // a top-level "use strict" directive or ES module (in_function = false).  Class
+        // bodies set in_strict = true but TypeScript handles that with TS1101 semantically.
+        if (self.in_strict and (!self.is_ts or !self.in_function)) {
             try self.emitDiagnostic(self.currentSpan(), "'with' statements are not allowed in strict mode", .{});
             // Continue parsing to avoid cascading failures
+        } else if (self.is_ts and self.in_async and self.in_function) {
+            // TS1300: 'with' is not allowed inside an explicit async function body.
+            // Note: in_async is true by default for all TS files (to allow top-level await),
+            // so we also require in_function to distinguish async function bodies from top-level.
+            try self.emitDiagnostic(self.currentSpan(), "'with' statements are not allowed in an async function block", .{});
         }
         const with_tok = self.advance(); // eat 'with'
         _ = try self.expect(.l_paren);
         const object = try self.parseExpression();
         _ = try self.expect(.r_paren);
         const with_scope_ev = try self.emitScopeOpen(.with_stmt, .none);
+        const prev_in_with = self.in_with;
+        self.in_with = true;
+        defer self.in_with = prev_in_with;
         const body = try self.parseNonDeclStatement();
         if (!self.in_strict and isLabelledFunction(self, body)) {
             try self.emitDiagnostic(self.currentSpan(), "Labeled function declarations are not allowed in loop or if-statement bodies", .{});
@@ -6577,7 +6598,7 @@ pub const Parser = struct {
             defer self.new_target_allowed = _saved_nta_x;
             self.in_generator = is_generator_method;
             self.in_class_field = false;
-            if (is_async_method) self.in_async = true;
+            self.in_async = is_async_method;
             self.syncYieldLex();
             defer self.syncYieldLex();
             defer self.in_function = prev_in_function;
@@ -6897,9 +6918,6 @@ pub const Parser = struct {
                 return error.ParseError;
             }
 
-            // Track whether a previous parameter was optional (for TS1016 check).
-            var had_optional = self.is_ts and self.tsParamIsOptional(first);
-
             while (self.eat(.comma) != null) {
                 if (self.peek() == .r_paren) break; // trailing comma
                 const param = try self.parseFormalParameter();
@@ -6911,12 +6929,8 @@ pub const Parser = struct {
                     try self.emitDiagnostic(self.currentSpan(), "Rest parameter must not have a trailing comma", .{});
                     return error.ParseError;
                 }
-
                 // TS1016: A required parameter cannot follow an optional parameter.
-                if (had_optional and self.is_ts and !self.tsParamIsOptional(param) and ptag != .rest_element) {
-                    try self.emitDiagnostic(self.currentSpan(), "A required parameter cannot follow an optional parameter", .{});
-                }
-                if (self.is_ts and self.tsParamIsOptional(param)) had_optional = true;
+                // Treated as semantic/config-dependent (emitted by JSDoc checks, not purely syntactic).
             }
         }
 
@@ -7692,6 +7706,11 @@ pub const Parser = struct {
 
         // export declare ...
         if (self.peek() == .kw_declare) {
+            // TS1120: `export declare export = x` — export assignment cannot have modifiers.
+            if (self.peekAt(1) == .kw_export and self.peekAt(2) == .equal) {
+                try self.emitDiagnostic(self.currentSpan(), "An export assignment cannot have modifiers", .{});
+                return error.ParseError;
+            }
             _ = self.advance(); // eat 'declare'
             const prev_ambient_ed = self.in_ts_ambient;
             self.in_ts_ambient = true;

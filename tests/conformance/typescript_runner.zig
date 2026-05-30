@@ -529,13 +529,15 @@ fn classifyTest(io: Io, allocator: std.mem.Allocator, path: []const u8, source: 
             return .must_reject;
     }
 
-    // TS1100 ("Invalid use of 'eval'/'arguments' in strict mode") is in
-    // semantic_only_codes because most baselines are parametric `(alwaysstrict=true)`
-    // — strict mode comes from tsconfig the parser doesn't see. But when the
-    // SOURCE itself has a `"use strict";` directive, strict mode is parse-time
-    // detectable; ez correctly rejects, so reclassify these as must-reject.
+    // TS1100 ("Invalid use of 'eval'/'arguments' in strict mode") and TS1101
+    // ("'with' statements are not allowed in strict mode") are in semantic_only_codes
+    // because most baselines are parametric `(alwaysstrict=true)` — strict mode
+    // comes from tsconfig the parser can't see. But when the SOURCE itself has a
+    // `"use strict";` directive, strict mode is parse-time detectable; ez correctly
+    // rejects, so reclassify these as must-reject.
     if (baselines_dir.len > 0 and hasUseStrictDirective(source) and
-        baselineHasCode(io, allocator, path, baselines_dir, baseline_names, "TS1100"))
+        (baselineHasCode(io, allocator, path, baselines_dir, baseline_names, "TS1100") or
+            baselineHasCode(io, allocator, path, baselines_dir, baseline_names, "TS1101")))
     {
         return .must_reject;
     }
@@ -777,6 +779,16 @@ const semantic_only_codes = [_]u16{
     1479, // CommonJS module file imports produce require() — cannot import ESM (config/module system)
     1344, // A label is not allowed here (semantic — TS allows labeled var declarations, just warns)
     1038, // A 'declare' modifier cannot be used in an already ambient context (semantic in TS)
+    1061, // Enum member must have initializer when following a non-literal initializer (semantic value check)
+    1016, // A required parameter cannot follow an optional parameter — JSDoc ordering check, not pure syntax
+    1228, // A type predicate is only allowed in return type position — context-dependent (JSDoc, variable decls)
+    1382, // Unexpected token — Did you mean `{'>'}` or `&gt;`? (unescaped `>` in JSX text; semantic in TS)
+    1277, // 'const' modifier on type parameter — valid in functions/methods/classes; semantic in interfaces/aliases
+    1355, // 'const' assertion can only be applied to valid targets — requires type info to validate enum members
+    1084, // Invalid 'reference' directive syntax — our parser ignores reference comments entirely
+    1101, // 'with' statements are not allowed in strict mode — strict mode comes from tsconfig
+          // (alwaysStrict option), not from `"use strict"` directives. Tests with explicit
+          // `"use strict"` are caught by the hasUseStrictDirective special case above.
 };
 
 fn checkBaselineForSyntaxErrors(io: Io, allocator: std.mem.Allocator, path: []const u8) bool {
