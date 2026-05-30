@@ -768,10 +768,12 @@ const semantic_only_codes = [_]u16{
     1066, // Ambient enum member initializer must be constant expression (semantic value check)
     1264, // Declarations with definite assignment assertions must also have type annotations (semantic)
     1271, // Decorator function return type mismatch (type-checker for decorators)
+    1272, // Type in decorated signature must be imported with 'import type' (isolatedModules)
     1292, // Re-exported type must be type-only with isolatedModules (config)
     1327, // String literal with double quotes expected (JSON file parsing error, not TS parser)
     1329, // Decorator accepts too few arguments (semantic decorator validation)
     1340, // Module does not refer to a type, but is used as a type here (type-checker)
+    1376, // 'x' was imported here — related message, not a primary parse error
     1479, // CommonJS module file imports produce require() — cannot import ESM (config/module system)
 };
 
