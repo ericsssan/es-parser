@@ -4822,6 +4822,23 @@ pub const Parser = struct {
             var catch_param: NodeIndex = .none;
             if (self.eat(.l_paren)) |_| {
                 catch_param = try self.parseBindingPattern();
+                // TypeScript: catch clause can have a type annotation: `catch (e: unknown)`
+                // TS1196: only `any` and `unknown` are allowed.
+                if (self.is_ts and self.peek() == .colon) {
+                    _ = self.advance(); // eat ':'
+                    const type_tok = self.tokIdx();
+                    const type_ann = try @import("typescript.zig").parseType(self);
+                    _ = type_ann;
+                    // Check if the type is `any` or `unknown` — only those are valid.
+                    const tok_tag = self.tokenTagAt(type_tok);
+                    const tok_text = if (tok_tag == .identifier) self.tokenText(type_tok) else "";
+                    const is_any = tok_tag == .identifier and std.mem.eql(u8, tok_text, "any");
+                    const is_unknown = tok_tag == .identifier and std.mem.eql(u8, tok_text, "unknown");
+                    if (!is_any and !is_unknown) {
+                        try self.emitDiagnosticAtToken(type_tok,
+                            "Catch clause variable type annotation must be 'any' or 'unknown' if specified", .{});
+                    }
+                }
                 try self.emitDeclaresFromPattern(catch_param, .catch_param);
                 _ = try self.expect(.r_paren);
             }
@@ -6618,7 +6635,7 @@ pub const Parser = struct {
                     const tok_start = self.tok_starts_ptr[key_tok];
                     name_text = self.getStringContent(tok_start);
                 }
-                if (std.mem.eql(u8, name_text, "prototype")) {
+                if (std.mem.eql(u8, name_text, "prototype") and !self.is_ts) {
                     try self.emitError("Static class method cannot be named 'prototype'");
                     return error.ParseError;
                 }
@@ -8854,7 +8871,7 @@ pub const Parser = struct {
                 return error.ParseError;
             },
             .kw_static => {
-                if (self.in_strict or self.is_ts) {
+                if ((self.in_strict or self.is_ts) and !(self.is_ts and self.in_ts_ambient)) {
                     try self.emitDiagnostic(self.currentSpan(), "'static' is not allowed as a binding name in strict mode", .{});
                     return error.ParseError;
                 }
