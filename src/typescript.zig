@@ -1715,6 +1715,11 @@ pub fn parseInterfaceDeclaration(p: *Parser) Error!NodeIndex {
 pub fn parseTypeAliasDeclaration(p: *Parser) Error!NodeIndex {
     const type_tok = p.advance(); // consume `type`
 
+    // TS1142: Line break not permitted between `type` and the type alias name.
+    if (p.newlines_ptr[p.tok_i]) {
+        try p.emitDiagnosticAtToken(type_tok, "Line break not permitted here", .{});
+    }
+
     // Type alias name — contextual keywords (e.g. `module`, `from`, `of`) are valid names,
     // but always-reserved words (void, null, true, false, etc.) are not valid type names.
     const name_tok = try p.expectIdentifierOrKeyword();

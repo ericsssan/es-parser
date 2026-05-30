@@ -2727,7 +2727,13 @@ pub const Parser = struct {
                 },
                 .kw_type => {
                     const type_p1 = self.peekAt(1);
-                    if (type_p1 == .identifier or type_p1.isKeyword()) {
+                    // Only parse as type alias if NO newline between `type` and the name,
+                    // OR if we're in an ambient/declare context (where TS1142 will be emitted).
+                    // ASI: `type\nFoo` in script context is an expression statement.
+                    const no_nl_before_name = !self.newlines_ptr[self.tok_i + 1];
+                    if ((type_p1 == .identifier or type_p1.isKeyword()) and
+                        (no_nl_before_name or self.in_ts_ambient))
+                    {
                         return typescript.parseTypeAliasDeclaration(self);
                     }
                 },

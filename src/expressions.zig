@@ -5372,8 +5372,10 @@ fn parseNewExpression(p: *Parser) Error!NodeIndex {
     }
 
     // Optional chains in new target are SyntaxError: `new foo?.bar()` etc.
-    if (callee != .none and !p.is_ts and containsOptionalChain(p, callee)) {
+    // TypeScript emits TS1209 (non-fatal) for this case.
+    if (callee != .none and containsOptionalChain(p, callee)) {
         try p.emitError("Optional chain not allowed as new expression target");
+        if (!p.is_ts) return error.ParseError;
     }
 
     // Optional argument list.
