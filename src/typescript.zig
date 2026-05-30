@@ -2356,8 +2356,7 @@ pub fn parseIndexSignature(p: *Parser) Error!NodeIndex {
             const name = p.tokenText(key_type_tok);
             break :blk std.mem.eql(u8, name, "string") or
                 std.mem.eql(u8, name, "number") or
-                std.mem.eql(u8, name, "symbol") or
-                std.mem.eql(u8, name, "bigint");
+                std.mem.eql(u8, name, "symbol");
         },
         .kw_unique => true, // `unique symbol`
         .template_head, .template_no_sub => true, // template literal type
