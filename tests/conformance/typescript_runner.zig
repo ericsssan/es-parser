@@ -764,6 +764,12 @@ const semantic_only_codes = [_]u16{
     1218, // Expressions are not allowed in an ambient context (TypeScript-specific semantic)
     1235, // Namespace declaration only allowed at top level of namespace or module (semantic scope check)
     1503, // Named capturing groups only available when targeting ES2018 or later (target-dependent)
+    1066, // Ambient enum member initializer must be constant expression (semantic value check)
+    1264, // Declarations with definite assignment assertions must also have type annotations (semantic)
+    1327, // String literal with double quotes expected (JSON file parsing error, not TS parser)
+    1329, // Decorator accepts too few arguments (semantic decorator validation)
+    1340, // Module does not refer to a type, but is used as a type here (type-checker)
+    1479, // CommonJS module file imports produce require() — cannot import ESM (config/module system)
 };
 
 fn checkBaselineForSyntaxErrors(io: Io, allocator: std.mem.Allocator, path: []const u8) bool {
