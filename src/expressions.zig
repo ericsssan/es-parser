@@ -7394,8 +7394,9 @@ fn looksLikeTsxGenericArrow(p: *Parser) bool {
 
 fn looksLikeTsArrowParams(p: *Parser) bool {
     const tag = p.peek();
-    // (identifier : — typed param
-    if (tag == .identifier) {
+    // (identifier : or (tsKeyword : — typed param
+    const is_ident_like = tag == .identifier or tag.isTsContextualKeyword();
+    if (is_ident_like) {
         const next = p.peekAt(1);
         if (next == .colon) return true;
         // (identifier ?: — optional typed param (but NOT ternary like `(x ? y : z)`)
@@ -7404,7 +7405,7 @@ fn looksLikeTsArrowParams(p: *Parser) bool {
             if (after_q == .colon or after_q == .r_paren or after_q == .comma) return true;
         }
         // Check for TS modifier followed by another identifier
-        const text = p.tokenText(p.tokIdx());
+        const text = if (tag == .identifier) p.tokenText(p.tokIdx()) else "";
         if ((std.mem.eql(u8, text, "public") or std.mem.eql(u8, text, "private") or
             std.mem.eql(u8, text, "protected") or std.mem.eql(u8, text, "readonly")) and
             (next == .identifier or next == .l_brace or next == .l_bracket))
