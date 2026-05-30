@@ -7139,6 +7139,8 @@ pub const Parser = struct {
                     try self.emitDiagnostic(self.currentSpan(), "Identifier expected. 'await' is a reserved word at the top-level of a module", .{});
                     return error.ParseError;
                 }
+                // TS1214: strict reserved words cannot be used as import alias names in strict mode.
+                try self.checkStrictBinding(self.tokIdx());
                 _ = self.advance(); // eat name
                 _ = self.advance(); // eat '='
                 // TS1202 (`import X = require("mod")` requires module: commonjs) is a
@@ -7251,6 +7253,8 @@ pub const Parser = struct {
                 self.peekAt(1) == .kw_from);
         if (def_import_starts) {
             const local_tok: u32 = self.tokIdx();
+            // TS1214: strict reserved words cannot be used as default import binding names.
+            try self.checkStrictBinding(local_tok);
             _ = self.advance();
 
             // Create a real identifier node for the local binding.
@@ -7464,6 +7468,9 @@ pub const Parser = struct {
             _ = try self.expect(.identifier); // produces the standard error
             unreachable;
         };
+
+        // TS1214: Strict reserved words cannot be used as namespace import binding names.
+        try self.checkStrictBinding(local_tok);
 
         const local_node = try self.addNode(.{
             .tag = .identifier,
