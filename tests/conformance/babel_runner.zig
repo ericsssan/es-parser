@@ -193,6 +193,12 @@ fn shouldSkip(path: []const u8) bool {
         // Babel-parser experimental subdirs that need plugin flags.
         "/babel-parser/test/expressions/is-expression-babel-parser/",
         "/babel-parser/test/fixtures/experimental/_no-plugin/",
+        // Flow generics in arrow functions: `<T>() => {}` parsed as Flow, not JSX.
+        "_no-plugin-ts-type-param/",
+        // Babel-specific strictures that TypeScript treats as semantic (not parse) errors.
+        // Adding parse-time rejection would cause TypeScript conformance regressions.
+        "class-private-properties/invalid-ts-type-literal/", // TS18016: private name in interface
+        "object-rest-spread/no-pattern-in-rest-with-ts/",    // rest pattern in assignment
         "/babel-parser/test/fixtures/experimental/optional-chaining-assign/",
         // Categorized startline/startcolumn tests are about parse-options metadata.
         "/babel-parser/test/fixtures/core/categorized/",
@@ -280,6 +286,11 @@ fn readOptionsHierarchy(io: std.Io, allocator: std.mem.Allocator, input_path: []
                     if (std.mem.indexOf(u8, pa, "\"jsx\"") != null) result.is_jsx = true;
                     if (std.mem.indexOf(u8, pa, "\"typescript\"") != null) result.is_typescript = true;
                     if (std.mem.indexOf(u8, pa, "\"flow\"") != null) result.is_flow = true;
+                    // Unsupported plugins — skip rather than fail.
+                    if (std.mem.indexOf(u8, pa, "\"moduleBlocks\"") != null) {
+                        result.has_unsupported = true;
+                        return result;
+                    }
                     // We don't support Flow's type syntax. If a fixture is
                     // pure-Flow (no jsx/typescript escape hatch), skip it.
                     // Many Babel JSX fixtures inherit `["jsx", "flow"]` from
