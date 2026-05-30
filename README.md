@@ -85,7 +85,7 @@ var lr = try es.Lexer.tokenizeWithLanguage(allocator, source, .ts);
 defer lr.deinit(allocator);
 
 var tree = try es.Parser.parseWithOptions(allocator, source, lr.tokens.slice(), .{
-    .language = .ts,          // .js, .jsx, .ts, or .tsx
+    .language = .ts,          // .js, .jsx, .ts, .tsx, or .dts
     .is_module = true,        // enable import/export + strict-mode semantics
     .emit_events = true,      // required for semantic analysis
 });
@@ -124,7 +124,7 @@ zig build conformance-parser-tests
 
 # Full tc39/test262
 git submodule update --init tests/conformance/test262
-zig build conformance-test262 -- tests/conformance/test262/test
+zig build conformance-test262 -- tests/conformance/test262
 
 # Babel parser fixtures
 git submodule update --init tests/conformance/babel

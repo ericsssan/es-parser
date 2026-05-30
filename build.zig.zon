@@ -8,5 +8,9 @@
         "build.zig",
         "build.zig.zon",
         "src",
+        "tests/conformance/parser_tests_runner.zig",
+        "tests/conformance/semantic_runner.zig",
+        "tests/conformance/test262-parser-tests",
+        "tests/fixtures",
     },
 }
