@@ -6554,6 +6554,10 @@ fn parseBindingElement(p: *Parser) Error!NodeIndex {
                 p.node_data_ptr[node.toInt()].lhs = .root;
             }
         }
+        // TS1015: Parameter cannot have both '?' (optional) and '=' (initializer).
+        if (is_optional_ts and p.peek() == .equal) {
+            try p.emitDiagnostic(p.currentSpan(), "Parameter cannot have question mark and initializer", .{});
+        }
     }
 
     // Default initializer
