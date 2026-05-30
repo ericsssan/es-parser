@@ -113,6 +113,15 @@ git submodule add https://github.com/microsoft/TypeScript.git tests/conformance/
 zig build conformance-typescript -- tests/conformance/typescript/tests/cases/conformance
 ```
 
+## Support
+
+If you find es-parser useful, please consider:
+
+- **Starring the repo** — it helps others discover the project and motivates continued development
+- **Sponsoring** — if this parser saves you time or powers your tooling, a donation helps me maintain and improve it full time: [GitHub Sponsors](https://github.com/sponsors/ericsssan)
+
+Your support means a lot and directly enables better conformance, performance, and new features. Thank you!
+
 ## License
 
 MIT
