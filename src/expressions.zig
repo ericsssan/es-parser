@@ -5394,8 +5394,10 @@ fn parseNewExpression(p: *Parser) Error!NodeIndex {
 
     // `new Foo` (without parens). Optional chain immediately after new
     // (`new X?.y` or `new X?.()`) is a SyntaxError per spec.
-    if (!p.is_ts and p.peek() == .question_dot) {
+    // TypeScript also rejects this with TS1209 (non-fatal).
+    if (p.peek() == .question_dot) {
         try p.emitError("Optional chain is not allowed immediately after 'new' expression");
+        if (!p.is_ts) return error.ParseError;
     }
     return p.addNode(.{
         .tag = .new_expr,
