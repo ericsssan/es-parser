@@ -224,7 +224,8 @@ fn parseExpressionPrec(p: *Parser, min_prec: Precedence) Error!NodeIndex {
         // Standard operator (prec_entry > 0, != call).
         // TS: `<` has relational prec in the table but may open a generic
         // type-argument list — check before treating it as a binary operator.
-        if (is_ts and tag == .less_than) {
+        // Also handle `<<` — e.g. foo<<T>(x: T) => R> where '<<' is '<' + '<T>...'.
+        if (is_ts and (tag == .less_than or tag == .less_less)) {
             const lt_tok: TokenIndex = @intCast(p.tok_i);
             if (tryParseTsTypeArguments(p)) |type_args_range| {
                 // TS1477: An instantiation expression cannot be followed by a property access.

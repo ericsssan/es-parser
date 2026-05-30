@@ -728,8 +728,10 @@ fn parseTypeReference(p: *Parser) Error!NodeIndex {
     }
 
     // Type arguments: `<T, U>` — do NOT consume `<` on a new line (ASI applies in type position).
+    // Also handle '<<' (e.g. Foo<<T>(x:T)=>R>) where the first '<' opens type args and
+    // the second '<' starts a generic function type argument.
     var type_args_rhs: NodeIndex = .none;
-    if (p.peek() == .less_than and !p.isOnNewLine()) {
+    if ((p.peek() == .less_than or p.peek() == .less_less) and !p.isOnNewLine()) {
         const args_range = try parseTypeArguments(p);
         const range_extra = try p.addExtra(SubRange, .{
             .start = args_range.start,
@@ -1590,7 +1592,15 @@ fn parseTypeParameterListImpl(p: *Parser, allow_const: bool) Error!SubRange {
 /// Parse type arguments in type argument position: `<Type, Type>`.
 /// Returns a SubRange of type nodes.
 pub fn parseTypeArguments(p: *Parser) Error!SubRange {
-    _ = try p.expect(.less_than);
+    // Handle '<<' — e.g. foo<<T>() => R> where '<T>() => R' is a generic function type arg.
+    // Split the first '<' as the opening bracket; leave the second '<' for the inner type.
+    if (p.peek() == .less_less) {
+        p.tags_ptr[p.tok_i] = .less_than;
+        p.tok_starts_ptr[p.tok_i] += 1;
+        // tok_i unchanged — the second '<' is now the current token for inner parsing.
+    } else {
+        _ = try p.expect(.less_than);
+    }
 
     // TS1099: Type argument list cannot be empty.
     if (isClosingAngleBracket(p.peek())) {
