@@ -8807,6 +8807,13 @@ pub const Parser = struct {
                                 return error.ParseError;
                             }
                         }
+                        // TS accepts `...a: b` (rest with property name) syntactically — TS2566
+                        // is the semantic error. Consume `: binding` so we don't error.
+                        const rest_value: NodeIndex = if (self.is_ts and self.eat(.colon) != null)
+                            try self.parseBindingElement()
+                        else
+                            .none;
+                        _ = rest_value;
                         const rest = try self.addNode(.{
                             .tag = .rest_element,
                             .main_token = rest_tok,
