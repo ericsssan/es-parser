@@ -3800,7 +3800,12 @@ fn parseArrowFunctionBody(p: *Parser, param_tok: TokenIndex, is_async: bool) Err
     p.in_async = is_async;
     defer p.in_function = saved_fn;
     defer p.in_async = saved_async;
-    const body = try parseArrowBody(p);
+    // Use parseBlockBodyWithStrictChecks for block bodies to retroactively validate
+    // the parameter against any "use strict" directive in the body (e.g. `eval => {"use strict"}`).
+    const body = if (p.peek() == .l_brace)
+        try parseBlockBodyWithStrictChecks(p, params, .none)
+    else
+        try parseArrowBody(p);
     try p.emitScopeClose(.none);
 
     const extra = try p.addExtra(ast.ArrowData, .{
