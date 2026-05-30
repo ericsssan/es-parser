@@ -3278,11 +3278,26 @@ pub const Parser = struct {
                 return self.parseStatement();
             },
             .identifier => {
-                if (std.mem.eql(u8, self.tokenText(self.tokIdx()), "using")) {
+                const id_text_nds = self.tokenText(self.tokIdx());
+                if (std.mem.eql(u8, id_text_nds, "using")) {
                     const next = self.peekAt(1);
                     if (next == .identifier or next == .kw_of or next == .kw_let or next == .kw_await) {
                         try self.emitDiagnostic(self.currentSpan(), "'using' declarations can only be declared inside a block", .{});
                         return error.ParseError;
+                    }
+                }
+                return self.parseStatement();
+            },
+            .kw_type => {
+                // TS1156: 'type' declarations cannot appear directly as a single-statement body.
+                if (self.is_ts) {
+                    const type_p1 = self.peekAt(1);
+                    if ((type_p1 == .identifier or type_p1.isKeyword()) and !self.newlines_ptr[self.tok_i + 1]) {
+                        const stmt = try self.parseStatement();
+                        if (self.nodeTag(stmt.toInt()) == .ts_type_alias_decl) {
+                            try self.emitDiagnosticAtToken(self.node_main_token_ptr[stmt.toInt()], "'type' declarations can only be declared inside a block", .{});
+                        }
+                        return stmt;
                     }
                 }
                 return self.parseStatement();
@@ -3367,11 +3382,26 @@ pub const Parser = struct {
                 return error.ParseError;
             },
             .identifier => {
-                if (std.mem.eql(u8, self.tokenText(self.tokIdx()), "using")) {
+                const id_text_ifb = self.tokenText(self.tokIdx());
+                if (std.mem.eql(u8, id_text_ifb, "using")) {
                     const next = self.peekAt(1);
                     if (next == .identifier or next == .kw_of or next == .kw_let or next == .kw_await) {
                         try self.emitDiagnostic(self.currentSpan(), "'using' declarations can only be declared inside a block", .{});
                         return error.ParseError;
+                    }
+                }
+                return self.parseStatement();
+            },
+            .kw_type => {
+                // TS1156: 'type' declarations cannot appear directly as a single-statement if body.
+                if (self.is_ts) {
+                    const type_p1 = self.peekAt(1);
+                    if ((type_p1 == .identifier or type_p1.isKeyword()) and !self.newlines_ptr[self.tok_i + 1]) {
+                        const stmt = try self.parseStatement();
+                        if (self.nodeTag(stmt.toInt()) == .ts_type_alias_decl) {
+                            try self.emitDiagnosticAtToken(self.node_main_token_ptr[stmt.toInt()], "'type' declarations can only be declared inside a block", .{});
+                        }
+                        return stmt;
                     }
                 }
                 return self.parseStatement();
