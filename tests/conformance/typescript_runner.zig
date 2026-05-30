@@ -379,10 +379,18 @@ pub fn main(init: std.process.Init) !void {
                     if (first_error.len == 0) first_error = "parse OOM";
                     break :parse_blk false;
                 };
-                if (tree.errors.len > 0) {
-                    if (first_error.len == 0) first_error = tree.errors[0].message;
-                    break :parse_blk false;
+                // Only `.@"error"`-severity diagnostics make a source unparseable.
+                // `.warning` diagnostics (e.g. TS1540 — `module X {}` should use
+                // `namespace`) are suggestions on a valid AST and must not count as
+                // a parse failure.
+                var had_error = false;
+                for (tree.errors) |d| {
+                    if (d.severity == .@"error") {
+                        if (first_error.len == 0) first_error = d.message;
+                        had_error = true;
+                    }
                 }
+                if (had_error) break :parse_blk false;
                 // Semantic analysis (must-reject only — TS allows redeclarations JS doesn't).
                 if (kind == .must_reject) {
                     var sem = es_parser.semantic.SemanticAnalyzer.analyze(file_alloc, &tree) catch break :parse_blk true;

@@ -2000,6 +2000,13 @@ pub fn parseModuleDeclaration(p: *Parser) Error!NodeIndex {
 fn parseNamespaceOrModule(p: *Parser, node_tag: Node.Tag) Error!NodeIndex {
     const main_tok = p.advance(); // consume `namespace` or `module`
 
+    // TS1540: an identifier-named declaration written with the `module` keyword
+    // should use `namespace` instead. This is a suggestion, NOT a parse error — the
+    // declaration is valid — so it is emitted at `.warning` severity (fires per name
+    // segment: root + each dotted part). The string-literal form (`declare module
+    // "foo"`) is the one legitimate use of `module` and is exempt.
+    const is_module_kw = node_tag == .ts_module_decl;
+
     // Name (identifier or string literal for ambient modules)
     var name_node: NodeIndex = undefined;
     if (p.peek() == .string_literal) {
@@ -2021,6 +2028,7 @@ fn parseNamespaceOrModule(p: *Parser, node_tag: Node.Tag) Error!NodeIndex {
                 .{p.tokenText(p.tokIdx())});
         }
         name_node = try p.parseIdentifier();
+        if (is_module_kw) try p.emitWarningAtToken(p.node_main_token_ptr[name_node.toInt()], "A 'namespace' declaration should not be declared using the 'module' keyword. Please use the 'namespace' keyword instead.", .{});
         // Declare the namespace name in the enclosing scope so forward references
         // (e.g. `export { Foo }; namespace Foo {}`) resolve correctly.
         try p.emitDeclare(.namespace_decl, name_node);
@@ -2030,6 +2038,7 @@ fn parseNamespaceOrModule(p: *Parser, node_tag: Node.Tag) Error!NodeIndex {
             // Parts after the first are property names, not references.
             if (p.peek() != .identifier and !p.peek().isKeyword()) break;
             const prop_tok = p.advance();
+            if (is_module_kw) try p.emitWarningAtToken(prop_tok, "A 'namespace' declaration should not be declared using the 'module' keyword. Please use the 'namespace' keyword instead.", .{});
             const sub = try p.addNode(.{
                 .tag = .property_ident,
                 .main_token = prop_tok,

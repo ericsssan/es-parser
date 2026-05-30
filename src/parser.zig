@@ -2384,6 +2384,25 @@ pub const Parser = struct {
         try self.emitDiagnostic(.{ .start = s, .end = s }, fmt, args);
     }
 
+    /// Emit a `.warning`-severity diagnostic at a token. Unlike `emitDiagnostic`
+    /// (which records `.@"error"`), this represents a suggestion that does NOT make
+    /// the source unparseable — e.g. TS1540 (`module X {}` should use `namespace`).
+    /// Consumers that gate on parse success must filter by severity; the AST is valid.
+    pub fn emitWarningAtToken(
+        self: *Parser,
+        token: TokenIndex,
+        comptime fmt: []const u8,
+        args: anytype,
+    ) !void {
+        const s = self.tokenStart(token);
+        const msg = try std.fmt.allocPrint(self.gpa, fmt, args);
+        try self.diagnostics.append(self.gpa, .{
+            .message = msg,
+            .span = .{ .start = s, .end = s },
+            .severity = .warning,
+        });
+    }
+
     // ────────────────────────────────────────────────────────────
     // Program / Top-level
     // ────────────────────────────────────────────────────────────
