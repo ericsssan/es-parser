@@ -3307,6 +3307,8 @@ fn parseParenthesized(p: *Parser) Error!NodeIndex {
             defer p.in_function = saved_fn2;
             defer p.in_async = saved_async2;
             const empty_arrow_ev = try p.emitScopeOpen(.arrow_function, .none);
+            // ConciseBody[?In]: restore outer allow_in before parsing body.
+            p.allow_in = saved_allow_in_paren;
             const body = try parseArrowBody(p);
             try p.emitScopeClose(.none);
             const params_range = try p.addSlice(&[_]u32{});
@@ -3349,6 +3351,8 @@ fn parseParenthesized(p: *Parser) Error!NodeIndex {
             defer p.in_async = saved_async_ts;
             const typed_arrow_ev = try p.emitScopeOpen(.arrow_function, .none);
             try p.emitParamDeclaresFromRange(params_range);
+            // ConciseBody[?In]: restore outer allow_in before parsing body.
+            p.allow_in = saved_allow_in_paren;
             const body = try parseArrowBody(p);
             try p.emitScopeClose(.none);
             const extra = try p.addExtra(ast.ArrowData, .{
@@ -3654,11 +3658,18 @@ fn parseParenthesized(p: *Parser) Error!NodeIndex {
         // Arrow params: spec rejects duplicate parameter names always.
         try p.checkUniqueParams(params_range);
 
-        // Arrow body: block { } with strict checks, or concise expression
+        // Arrow body: block { } with strict checks, or concise expression.
+        // ConciseBody[?In]: the spec propagates [?In] to the concise body, so
+        // `for (() => x in y;;)` must see `allow_in=false` inside the concise body —
+        // otherwise `x in y` would be parsed as a binary expression instead of
+        // stopping at `in` and making the outer for-loop look like a for-in.
+        // Block bodies always allow `in` (FunctionBody is always [In]).
         const body = if (p.peek() == .l_brace)
             try parseBlockBodyWithStrictChecks(p, params_range, .none)
-        else
-            try parseAssignmentExpression(p);
+        else blk: {
+            p.allow_in = saved_allow_in_paren;
+            break :blk try parseAssignmentExpression(p);
+        };
 
         try p.emitScopeClose(.none);
 
