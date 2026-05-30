@@ -1995,14 +1995,19 @@ pub fn tokenizeWithBufAndBitmaps(
                     if (next1 == '/') {
                         const ce = lineCommentEndBM(bm.newline, p + 2, src, bm.has_high);
                         // In JSX mode: if the line comment body contains `</` (closing tag
-                        // pattern), this `//` is inside JSX text content, not JS code.
-                        // Skip both slash chars without treating them as a comment so the
-                        // parser still sees the closing `</tag>` on the same line.
+                        // pattern) AND the `//` is not preceded by another `/` (which would
+                        // indicate `////` comments in fourslash test files), this `//` is
+                        // inside JSX text content, not JS code. Skip both slash chars without
+                        // treating them as a comment so the parser still sees `</tag>`.
                         if (language.isJsx()) {
+                            // Don't apply to `////...` sequences (preceded by `/`)
+                            const preceded_by_slash = p > 0 and src[p - 1] == '/';
                             var k: u32 = p + 2;
                             var jsx_text_comment = false;
-                            while (k + 1 < ce) : (k += 1) {
-                                if (src[k] == '<' and src[k + 1] == '/') { jsx_text_comment = true; break; }
+                            if (!preceded_by_slash) {
+                                while (k + 1 < ce) : (k += 1) {
+                                    if (src[k] == '<' and src[k + 1] == '/') { jsx_text_comment = true; break; }
+                                }
                             }
                             if (jsx_text_comment) {
                                 // Clear the bit for the second `/` so the visit loop skips it.
