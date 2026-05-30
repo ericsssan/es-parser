@@ -330,7 +330,15 @@ pub fn main(init: std.process.Init) !void {
                 if (seg_is_ts) all_ts_segments_ok = false;
             }
         }
-        const has_error = if (saw_ts_segment) !all_ts_segments_ok else !all_segments_ok;
+        // For must-reject: any segment failing counts (JS strict-mode errors in .js segments,
+        // etc.). For must-parse: TS-segment-based logic avoids false failures from unsupported
+        // TS syntax in .js segments (e.g. `satisfies` in a .js allowJs file).
+        const has_error = if (kind == .must_reject)
+            !all_segments_ok
+        else if (saw_ts_segment)
+            !all_ts_segments_ok
+        else
+            !all_segments_ok;
 
         switch (kind) {
             .must_parse => {

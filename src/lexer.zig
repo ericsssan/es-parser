@@ -2094,10 +2094,13 @@ pub fn tokenizeWithBufAndBitmaps(
                     //    Needs terminate-at-`<` (so the scan stops before `</`)
                     //    but `'` in text is not a true string delimiter — the
                     //    terminate-at-`<` just prevents it from consuming the tag.
+                    //    Also covers contractions like `I'm` in `<>Hi, I'm!</>` where
+                    //    prev_kind is `identifier` — `identifier'` is invalid JS so this
+                    //    is unambiguously JSX text content.
                     // 3. JS expression inside `{}`: `{"<test>"}` — prev is `{` etc.
                     //    Must NOT terminate at `<`; standard JS string semantics.
                     const jsx_attr = language.isJsx() and prev_kind == .equal;
-                    const jsx_text = language.isJsx() and prev_kind == .greater_than;
+                    const jsx_text = language.isJsx() and (prev_kind == .greater_than or prev_kind == .identifier);
                     end = stringEndBMOptFull(src, bm.structural, bm.newline, p, n, jsx_attr or jsx_text, jsx_attr);
                     tag = .string_literal;
                     // Strings with line continuations (`\<newline>`) span
