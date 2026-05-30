@@ -310,6 +310,25 @@ fn checkCatchBindingConflicts(self: *Parser, catch_param: NodeIndex, catch_body:
             }
         }
     }
+    // For destructuring catch patterns (array/object), var declarations inside the
+    // catch block also conflict. AnnexB B.3.5 exemption only applies to simple
+    // identifier catch bindings, not patterns.
+    const cp_tag = self.node_tags_ptr[catch_param.toInt()];
+    const is_pattern = cp_tag == .array_pattern or cp_tag == .object_pattern;
+    if (is_pattern) {
+        var var_buf: [64][]const u8 = undefined;
+        var var_n: usize = 0;
+        collectVarNamesInRange(self, body_data.lhs.toInt(), body_data.rhs.toInt(), &var_buf, &var_n);
+        for (param_buf[0..param_n]) |pname| {
+            for (var_buf[0..var_n]) |vname| {
+                if (std.mem.eql(u8, pname, vname)) {
+                    try self.emitDiagnostic(self.currentSpan(),
+                        "Identifier '{s}' has already been declared", .{pname});
+                    return error.ParseError;
+                }
+            }
+        }
+    }
 }
 
 /// Collect names from var_decl nodes in extra_data[start..end].
