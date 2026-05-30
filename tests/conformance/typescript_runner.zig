@@ -235,8 +235,62 @@ pub fn main(init: std.process.Init) !void {
             continue;
         }
 
-        const source = Io.Dir.cwd().readFileAlloc(io, path, allocator, Io.Limit.limited(2 * 1024 * 1024)) catch continue;
-        defer allocator.free(source);
+        const raw_source = Io.Dir.cwd().readFileAlloc(io, path, allocator, Io.Limit.limited(2 * 1024 * 1024)) catch continue;
+        defer allocator.free(raw_source);
+        // Transcode UTF-16 files to UTF-8 so the parser (which is UTF-8 only) can handle them.
+        const source = blk: {
+            if (raw_source.len >= 2 and raw_source[0] == 0xFF and raw_source[1] == 0xFE) {
+                // UTF-16 LE: strip BOM and decode each 16-bit code unit.
+                const utf16_bytes = raw_source[2..];
+                if (utf16_bytes.len % 2 != 0) break :blk raw_source;
+                var buf = allocator.alloc(u8, utf16_bytes.len * 3 / 2 + 4) catch break :blk raw_source;
+                var out: usize = 0;
+                var k: usize = 0;
+                while (k + 1 < utf16_bytes.len) : (k += 2) {
+                    const cu: u16 = @as(u16, utf16_bytes[k]) | (@as(u16, utf16_bytes[k + 1]) << 8);
+                    if (cu < 0x80) {
+                        if (out + 1 > buf.len) { allocator.free(buf); break :blk raw_source; }
+                        buf[out] = @intCast(cu); out += 1;
+                    } else if (cu < 0x800) {
+                        if (out + 2 > buf.len) { allocator.free(buf); break :blk raw_source; }
+                        buf[out] = @intCast(0xC0 | (cu >> 6)); out += 1;
+                        buf[out] = @intCast(0x80 | (cu & 0x3F)); out += 1;
+                    } else {
+                        if (out + 3 > buf.len) { allocator.free(buf); break :blk raw_source; }
+                        buf[out] = @intCast(0xE0 | (cu >> 12)); out += 1;
+                        buf[out] = @intCast(0x80 | ((cu >> 6) & 0x3F)); out += 1;
+                        buf[out] = @intCast(0x80 | (cu & 0x3F)); out += 1;
+                    }
+                }
+                break :blk buf[0..out];
+            } else if (raw_source.len >= 2 and raw_source[0] == 0xFE and raw_source[1] == 0xFF) {
+                // UTF-16 BE: strip BOM and decode each 16-bit code unit.
+                const utf16_bytes = raw_source[2..];
+                if (utf16_bytes.len % 2 != 0) break :blk raw_source;
+                var buf = allocator.alloc(u8, utf16_bytes.len * 3 / 2 + 4) catch break :blk raw_source;
+                var out: usize = 0;
+                var k: usize = 0;
+                while (k + 1 < utf16_bytes.len) : (k += 2) {
+                    const cu: u16 = (@as(u16, utf16_bytes[k]) << 8) | @as(u16, utf16_bytes[k + 1]);
+                    if (cu < 0x80) {
+                        if (out + 1 > buf.len) { allocator.free(buf); break :blk raw_source; }
+                        buf[out] = @intCast(cu); out += 1;
+                    } else if (cu < 0x800) {
+                        if (out + 2 > buf.len) { allocator.free(buf); break :blk raw_source; }
+                        buf[out] = @intCast(0xC0 | (cu >> 6)); out += 1;
+                        buf[out] = @intCast(0x80 | (cu & 0x3F)); out += 1;
+                    } else {
+                        if (out + 3 > buf.len) { allocator.free(buf); break :blk raw_source; }
+                        buf[out] = @intCast(0xE0 | (cu >> 12)); out += 1;
+                        buf[out] = @intCast(0x80 | ((cu >> 6) & 0x3F)); out += 1;
+                        buf[out] = @intCast(0x80 | (cu & 0x3F)); out += 1;
+                    }
+                }
+                break :blk buf[0..out];
+            }
+            break :blk raw_source;
+        };
+        defer if (source.ptr != raw_source.ptr) allocator.free(source);
 
         // Multi-file tests are split by the TS test harness on `//@filename:`.
         // Walk the source once to find the segment boundaries; if any are present,
@@ -795,6 +849,16 @@ fn checkBaselineForSyntaxErrors(io: Io, allocator: std.mem.Allocator, path: []co
     const content = Io.Dir.cwd().readFileAlloc(io, path, allocator, Io.Limit.limited(256 * 1024)) catch return false;
     defer allocator.free(content);
 
+    // Baseline format: primary error list (filename(line,col): error TSxxx) comes first,
+    // then `====` section dividers with annotated source. Only scan the primary summary —
+    // `!!! error` context lines in sections are duplicates and may come from .js files
+    // whose JSDoc content TypeScript parses but a single-file parser cannot replicate.
+    const primary_end: usize = blk: {
+        // Handle both LF and CRLF line endings.
+        if (std.mem.indexOf(u8, content, "\n====")) |p| break :blk p;
+        break :blk content.len;
+    };
+
     // Check for syntax error codes: TS1xxx (1000-1999, exactly 4 digits after TS).
     // Must NOT match TS1xxxx (5+ digit codes like TS18050 which are semantic errors).
     // Skip codes that are semantic/type-checker/target-dependent (not implementable at parse time).
@@ -806,7 +870,7 @@ fn checkBaselineForSyntaxErrors(io: Io, allocator: std.mem.Allocator, path: []co
     //   TS18059 — Named imports not allowed in a deferred import
     const syntactic_5digit = [_]u32{ 17012, 17021, 18007, 18058, 18059 };
     var i: usize = 0;
-    while (i + 6 < content.len) : (i += 1) {
+    while (i + 6 < primary_end) : (i += 1) {
         if (content[i] != 'T' or content[i + 1] != 'S') continue;
         // Walk forward grabbing digits.
         var j: usize = i + 2;
@@ -833,7 +897,21 @@ fn checkBaselineForSyntaxErrors(io: Io, allocator: std.mem.Allocator, path: []co
             }
             break :blk false;
         };
-        if (is_syntactic) return true;
+        if (is_syntactic) {
+            // Skip errors from .js/.jsx files — those come from TypeScript's JSDoc-in-JS
+            // analysis, which a single-file parser cannot replicate.
+            // Primary error lines have format: `filename.ext(line,col): error TSxxx`
+            var ls: usize = i;
+            while (ls > 0 and content[ls - 1] != '\n' and content[ls - 1] != '\r') ls -= 1;
+            const line_pre = content[ls..i];
+            if (std.mem.indexOf(u8, line_pre, ".js(") != null or
+                std.mem.indexOf(u8, line_pre, ".jsx(") != null)
+            {
+                i = j;
+                continue;
+            }
+            return true;
+        }
         i = j;
     }
     return false;
