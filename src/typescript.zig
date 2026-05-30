@@ -1637,13 +1637,29 @@ pub fn parseInterfaceDeclaration(p: *Parser) Error!NodeIndex {
         const scratch_top = p.scratchLen();
         defer p.scratchPop(scratch_top);
 
-        // Parse comma-separated list of type references
+        // Parse comma-separated list of type references.
+        // TypeScript TS2499: `extends X()` is allowed syntactically (call args are discarded).
         const first_type = try parseType(p);
+        if (p.peek() == .l_paren) {
+            // Skip invalid call args: `extends SomeType()` — TS parses, emits TS2499.
+            _ = p.advance();
+            while (p.peek() != .r_paren and p.peek() != .eof and p.peek() != .l_brace) {
+                _ = p.advance();
+            }
+            if (p.peek() == .r_paren) _ = p.advance();
+        }
         try p.scratchPush(first_type);
 
         while (p.peek() == .comma) {
             _ = p.advance();
             const ext_type = try parseType(p);
+            if (p.peek() == .l_paren) {
+                _ = p.advance();
+                while (p.peek() != .r_paren and p.peek() != .eof and p.peek() != .l_brace) {
+                    _ = p.advance();
+                }
+                if (p.peek() == .r_paren) _ = p.advance();
+            }
             try p.scratchPush(ext_type);
         }
 
