@@ -270,8 +270,12 @@ pub fn main(init: std.process.Init) !void {
 
         var first_error: []const u8 = "";
 
-        // Prepend "use strict"; if the test directives enable strict mode
-        const parse_source = if (is_strict and !is_module) blk: {
+        // Prepend "use strict"; if the test directives enable strict mode.
+        // Skip prepending for TypeScript files: strict mode from tsconfig (@alwaysStrict,
+        // @strict) is a semantic concern in TypeScript; the parser does not need to see
+        // "use strict" in source to enforce eval/arguments restrictions (TS1100) since
+        // TypeScript handles those as semantic (type-checker) errors, not parse errors.
+        const parse_source = if (is_strict and !is_module and lang == .js) blk: {
             const prefix = "\"use strict\";\n";
             const buf = file_alloc.alloc(u8, prefix.len + source.len) catch break :blk source;
             @memcpy(buf[0..prefix.len], prefix);

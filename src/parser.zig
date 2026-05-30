@@ -9085,7 +9085,7 @@ pub const Parser = struct {
             try self.emitDiagnostic(self.currentSpan(), "'{s}' is not allowed as a binding name in strict mode", .{self.tokenText(tok)});
             return error.ParseError;
         }
-        // eval and arguments — invalid in strict mode even in TS
+        // eval and arguments — invalid in strict mode
         const tag = self.tokenTagAt(tok);
         if (tag == .identifier) {
             const text = self.tokenText(tok);
