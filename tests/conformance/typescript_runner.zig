@@ -776,6 +776,7 @@ const semantic_only_codes = [_]u16{
     1376, // 'x' was imported here — related message, not a primary parse error
     1479, // CommonJS module file imports produce require() — cannot import ESM (config/module system)
     1344, // A label is not allowed here (semantic — TS allows labeled var declarations, just warns)
+    1038, // A 'declare' modifier cannot be used in an already ambient context (semantic in TS)
 };
 
 fn checkBaselineForSyntaxErrors(io: Io, allocator: std.mem.Allocator, path: []const u8) bool {

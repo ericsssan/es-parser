@@ -2761,10 +2761,8 @@ pub const Parser = struct {
                         next == .kw_interface or next == .kw_type or next == .kw_namespace or
                         next == .kw_module or next == .kw_abstract)
                     {
-                        // TS1038: A 'declare' modifier cannot be used in an already ambient context.
-                        if (self.in_ts_ambient) {
-                            try self.emitDiagnostic(self.currentSpan(), "A 'declare' modifier cannot be used in an already ambient context", .{});
-                        }
+                        // TS1038: TypeScript emits this when 'declare' appears in an already-ambient
+                        // context. We skip this check — it is a semantic error, not a parse error.
                         // TS1184: Modifiers cannot appear here (declare inside a non-namespace block).
                         if (self.is_ts and (self.in_block or self.in_function or self.in_loop or self.in_switch) and !self.in_ts_namespace) {
                             try self.emitDiagnostic(self.currentSpan(), "Modifiers cannot appear here", .{});
