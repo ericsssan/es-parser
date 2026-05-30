@@ -160,4 +160,20 @@ pub fn build(b: *std.Build) void {
     typescript_runner_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| typescript_runner_cmd.addArgs(args);
     b.step("conformance-typescript", "Run TypeScript parser conformance suite").dependOn(&typescript_runner_cmd.step);
+
+    const semantic_runner_mod = b.createModule(.{
+        .root_source_file = b.path("tests/conformance/semantic_runner.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .link_libc = true,
+    });
+    semantic_runner_mod.addImport("es_parser", conf_releaseFast);
+    const semantic_runner = b.addExecutable(.{
+        .name = "semantic_runner",
+        .root_module = semantic_runner_mod,
+    });
+    const semantic_runner_cmd = b.addRunArtifact(semantic_runner);
+    semantic_runner_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |bargs| semantic_runner_cmd.addArgs(bargs);
+    b.step("conformance-semantic", "Run semantic analysis conformance suite").dependOn(&semantic_runner_cmd.step);
 }
