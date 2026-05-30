@@ -6745,7 +6745,11 @@ pub const Parser = struct {
             const prev_in_generator_cf = self.in_generator;
             self.in_class_field = true;
             self.new_target_allowed = true;
-            self.in_async = false;
+            // In TS mode, preserve the outer async context so `await expr` inside
+            // a class field (e.g. inside an async function) parses without error.
+            // TypeScript accepts this syntactically and emits TS1308 semantically.
+            // In JS mode, class field initializers are not async contexts.
+            self.in_async = self.is_ts and prev_in_async_cf;
             self.in_generator = false;
             self.syncYieldLex();
             defer {

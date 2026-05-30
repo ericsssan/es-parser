@@ -151,12 +151,13 @@ fn parseExpressionPrec(p: *Parser, min_prec: Precedence) Error!NodeIndex {
                 continue;
             }
             if (tag == .l_paren) {
-                // Arrow functions are not valid call/member targets without parens.
-                // In TS mode, skip this check (TypeScript handles it at type-check level).
-                if (!is_ts and left != .none) {
+                if (left != .none) {
                     const left_tag = p.node_tags_ptr[left.toInt()];
                     if (left_tag == .arrow_fn or left_tag == .async_arrow_fn) {
-                        try p.emitError("Arrow function is not directly callable (wrap in parens)");
+                        // A bare arrow function cannot be directly called without wrapping
+                        // in parentheses. In JS mode emit a diagnostic; in TS mode just
+                        // apply ASI (TypeScript silently treats the `(` as a new statement).
+                        if (!is_ts) try p.emitError("Arrow function is not directly callable (wrap in parens)");
                         break;
                     }
                 }
