@@ -7400,7 +7400,8 @@ fn tryParseTsTypeArguments(p: *Parser) ?ast.SubRange {
         next == .question_question or next == .template_head or
         next == .template_no_sub or next == .eof or next == .r_brace or
         next == .bang or next == .l_brace or next == .kw_implements or
-        next == .kw_extends or next == .kw_as or next == .kw_satisfies)
+        next == .kw_extends or next == .kw_as or next == .kw_satisfies or
+        next == .kw_instanceof or next == .kw_in)
     {
         return range;
     }
