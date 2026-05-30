@@ -2527,8 +2527,13 @@ pub const Parser = struct {
                     .scope_close => depth -= 1,
                     .declare => if (depth == 0) {
                         const bk: BindingKindU8 = @enumFromInt(ev.aux);
-                        // Collect module-level var declarations for lex-var conflict check.
-                        if (bk == .@"var" and self.is_module and !self.is_ts) {
+                        // Collect var and function_decl names for lex-var conflict check.
+                        // In modules: var bindings conflict with lex bindings.
+                        // In scripts: var bindings AND function decls (which hoist as var)
+                        // conflict with lex bindings (let/const/class).
+                        if (!self.is_ts and (bk == .@"var" or
+                            (!self.is_module and (bk == .function_decl or bk == .function_decl_annex_b))))
+                        {
                             const vt = self.node_main_token_ptr[@intCast(ev.node)];
                             const vs = self.tok_starts_ptr[vt];
                             const vl = self.tok_lens_ptr[vt];
@@ -2570,10 +2575,10 @@ pub const Parser = struct {
                     else => {},
                 }
             }
-            // Module-level lex-vs-var conflict check.
-            // "It is a Syntax Error if any element of the LexicallyDeclaredNames of
-            // ModuleItemList also occurs in the VarDeclaredNames of ModuleItemList."
-            if (self.is_module and !self.is_ts and names_n > 0 and var_names_n > 0) {
+            // Lex-vs-var conflict check for both script and module top level.
+            // Script: LexicallyDeclaredNames(ScriptBody) ∩ VarDeclaredNames(ScriptBody) must be empty.
+            // Module: LexicallyDeclaredNames(ModuleItemList) ∩ VarDeclaredNames(ModuleItemList) must be empty.
+            if (!self.is_ts and names_n > 0 and var_names_n > 0) {
                 for (names_buf[0..names_n]) |lex_entry| {
                     for (var_names_buf[0..var_names_n]) |var_name| {
                         if (std.mem.eql(u8, lex_entry.name, var_name)) {
@@ -2654,9 +2659,9 @@ pub const Parser = struct {
                 // No LineTerminator may appear between `using` and its binding list.
                 const no_nl_before_binding = !self.newlines_ptr[self.tok_i + 1];
                 if (std.mem.eql(u8, text, "using") and no_nl_before_binding and
-                    (next_using == .identifier or next_using == .kw_await or
-                    next_using == .kw_yield or next_using == .kw_of or
-                    next_using == .kw_let))
+                    (next_using == .identifier or next_using == .escaped_keyword or
+                    next_using == .kw_await or next_using == .kw_yield or
+                    next_using == .kw_of or next_using == .kw_let))
                 {
                     return self.parseUsingDeclaration(false);
                 }
@@ -3485,6 +3490,10 @@ pub const Parser = struct {
 
         // Check for `for await (...)`
         const is_await = self.eat(.kw_await) != null;
+        if (is_await and !self.in_async and !self.is_ts) {
+            try self.emitDiagnostic(self.currentSpan(), "'for await' is only valid inside an async function", .{});
+            return error.ParseError;
+        }
 
         _ = try self.expect(.l_paren);
 
@@ -3537,19 +3546,29 @@ pub const Parser = struct {
             // Also allow `using of = ...` (for (using of = null;;)) — `of` is a valid binding
             // identifier; the `of` lookahead restriction only applies to for-of/for-await-of.
             if (for_init_tag == .identifier and std.mem.eql(u8, self.tokenText(self.tokIdx()), "using") and
-                (self.peekAt(1) == .identifier or self.peekAt(1) == .kw_let or
+                (self.peekAt(1) == .identifier or self.peekAt(1) == .escaped_keyword or
+                self.peekAt(1) == .kw_await or self.peekAt(1) == .kw_let or
                  (self.peekAt(1) == .kw_of and self.peekAt(2) == .equal))) {
                 const main_tok: u32 = self.tokIdx();
                 _ = self.advance(); // eat 'using'
                 break :init_blk try self.parseUsingDeclaratorList(main_tok);
             }
+            // `await using x` in for-of init (explicit resource management).
+            // [no LineTerminator here] between `await` and `using`.
             if (for_init_tag == .kw_await and self.peekAt(1) == .identifier and
+                !self.newlines_ptr[self.tok_i + 1] and
                 std.mem.eql(u8, self.tokenText(@intCast(self.tok_i + 1)), "using") and
-                (self.peekAt(2) == .identifier or self.peekAt(2) == .kw_of or self.peekAt(2) == .kw_let))
+                (self.peekAt(2) == .identifier or self.peekAt(2) == .escaped_keyword or
+                self.peekAt(2) == .kw_await or self.peekAt(2) == .kw_of or self.peekAt(2) == .kw_let))
             {
                 const main_tok: u32 = self.tokIdx();
                 _ = self.advance(); // eat 'await'
                 _ = self.advance(); // eat 'using'
+                // [no LineTerminator here] between `using` and the first binding name.
+                if (self.newlines_ptr[self.tok_i]) {
+                    try self.emitDiagnostic(self.currentSpan(), "No line terminator allowed between 'using' and binding in 'for await'", .{});
+                    return error.ParseError;
+                }
                 break :init_blk try self.parseUsingDeclaratorList(main_tok);
             }
             break :init_blk try self.parseExpression();
@@ -3557,6 +3576,10 @@ pub const Parser = struct {
 
         // Handle empty init (semicolon already consumed above).
         if (init == .none) {
+            if (is_await) {
+                try self.emitDiagnostic(self.currentSpan(), "'for await' requires 'of'", .{});
+                return error.ParseError;
+            }
             const result = try self.parseForRest(for_tok, .none);
             try self.emitScopeClose(.none);
             self.patchScopeOpenNode(for_scope_ev, result);
@@ -3565,6 +3588,10 @@ pub const Parser = struct {
 
         // Check for `in` or `of`
         if (self.eat(.kw_in)) |_| {
+            if (is_await) {
+                try self.emitDiagnostic(self.currentSpan(), "'for await' must use 'of', not 'in'", .{});
+                return error.ParseError;
+            }
             try self.rejectForInOfInitializer(init, true);
             try self.validateForInOfBinding(init, false);
             try checkForBindingNamesDup(self, init);
@@ -3659,6 +3686,12 @@ pub const Parser = struct {
             self.patchScopeOpenNode(for_scope_ev, node);
             self.patchEventNode(loop_ev, node);
             return node;
+        }
+
+        // `for await` requires `of` — if we reach the standard for-loop path it's invalid.
+        if (is_await) {
+            try self.emitDiagnostic(self.currentSpan(), "'for await' requires 'of'", .{});
+            return error.ParseError;
         }
 
         // Standard for loop: for (init; cond; update) body
@@ -3896,6 +3929,11 @@ pub const Parser = struct {
                         return error.ParseError;
                     }
                 }
+            },
+            // Arrow functions are never valid as for-in/of LHS (syntax error in all modes).
+            .arrow_fn, .async_arrow_fn => {
+                try self.emitDiagnostic(self.currentSpan(), "Invalid left-hand side in for-in/of: arrow function", .{});
+                return error.ParseError;
             },
             .this_expr, .number_literal, .string_literal, .boolean_literal,
             .null_literal, .add, .subtract, .multiply,
@@ -4587,9 +4625,8 @@ pub const Parser = struct {
 
         const label_name = self.tokenText(label_tok);
 
-        // Duplicate label check (always for strict/module/TS mode).
-        const check_dup_labels = self.is_ts or self.is_module or self.in_strict;
-        if (check_dup_labels) {
+        // Duplicate label check — always a SyntaxError per spec (not strict-only).
+        {
             if (self.ts_label_stack) |stack| {
                 var i: u8 = 0;
                 while (i < self.ts_label_count) : (i += 1) {
@@ -7932,6 +7969,11 @@ pub const Parser = struct {
         if (is_await) _ = self.advance(); // eat 'await'
         _ = self.advance(); // eat 'using'
 
+        // `using` is a lexical declaration — `let` is not a valid binding name.
+        const saved_lexical_decl = self.in_lexical_decl;
+        self.in_lexical_decl = true;
+        defer self.in_lexical_decl = saved_lexical_decl;
+
         const scratch_top = self.scratch.items.len;
         defer self.scratch.shrinkRetainingCapacity(scratch_top);
 
@@ -8619,16 +8661,21 @@ pub const Parser = struct {
                         try self.scratchPush(prop);
                     } else {
                         // Shorthand: { x } or { x = default }
+                        // In shorthand form, the key IS the binding — apply strict-mode checks.
+                        if (self.tokenTag(key_tok) == .identifier) {
+                            try self.checkStrictBinding(key_tok);
+                        }
                         // yield/await can't be binding names in generator/async/module context
                         const key_tag = self.tokenTag(key_tok);
                         if (key_tag == .kw_yield and self.in_generator) {
                             try self.emitDiagnostic(self.currentSpan(), "'yield' is not allowed as a binding name in generator", .{});
                         }
-                        if (key_tag == .kw_await and
-                            (self.in_async or self.is_module or (self.in_static_block and !self.in_function)))
-                        {
-                            try self.emitDiagnostic(self.currentSpan(), "'await' is not allowed as a binding name in async/module", .{});
-                            return error.ParseError;
+                        if (key_tag == .kw_await) {
+                            const in_async_fn3 = self.in_async and (self.in_function or self.in_fn_params);
+                            if (!self.in_ts_ambient and (in_async_fn3 or self.is_module or (self.in_static_block and !self.in_function))) {
+                                try self.emitDiagnostic(self.currentSpan(), "'await' is not allowed as a binding name in async/module", .{});
+                                return error.ParseError;
+                            }
                         }
                         // 'enum' is a future-reserved word in any mode — never valid as a binding.
                         if (key_tag == .kw_enum) {

@@ -786,10 +786,15 @@ pub fn validatePattern(p: *Parser, node: NodeIndex) Error!void {
                         return error.ParseError;
                     }
                 }
-                // Literals, compound assignments are invalid targets
-                if (child_tag == .number_literal or child_tag == .string_literal or
-                    child_tag == .boolean_literal or child_tag == .null_literal or
-                    child_tag == .add_assign or child_tag == .sub_assign or
+                // Literals, compound assignments are invalid targets.
+                // TypeScript's parser accepts literals in array patterns (type errors, not syntax errors).
+                if (!p.is_ts and (child_tag == .number_literal or child_tag == .string_literal or
+                    child_tag == .boolean_literal or child_tag == .null_literal))
+                {
+                    try p.emitError("Invalid destructuring target");
+                    return error.ParseError;
+                }
+                if (child_tag == .add_assign or child_tag == .sub_assign or
                     child_tag == .mul_assign or child_tag == .div_assign or
                     child_tag == .mod_assign or child_tag == .exp_assign or
                     child_tag == .and_assign or child_tag == .or_assign or
@@ -2026,6 +2031,21 @@ fn containsNodeTag(p: *Parser, node: NodeIndex, target: ast.Node.Tag) bool {
             }
             return false;
         },
+        // call_expr and optional_call_expr store args via extra_data SubRange.
+        // data.lhs = callee (already checked above), data.rhs = extra index to SubRange.
+        .call_expr, .optional_call_expr => {
+            const range_idx = data.rhs.toInt();
+            if (range_idx + 1 < p.extra_data.items.len) {
+                const arg_start = p.extra_data.items[range_idx];
+                const arg_end = p.extra_data.items[range_idx + 1];
+                var i = arg_start;
+                while (i < arg_end) : (i += 1) {
+                    const arg = NodeIndex.fromInt(p.extra_data.items[i]);
+                    if (containsNodeTag(p, arg, target)) return true;
+                }
+            }
+            return false;
+        },
         else => {},
     }
     if (containsNodeTag(p, data.rhs, target)) return true;
@@ -3181,6 +3201,14 @@ fn parseAsyncParenArrowOrCall(p: *Parser, async_tok: TokenIndex) Error!NodeIndex
             if (!p.is_ts and containsAwaitIdentifier(p, param_node)) {
                 try p.emitError("'await' is not allowed in async arrow parameter list");
                 return error.ParseError;
+            }
+            // Async arrow params cannot contain await expressions in defaults.
+            if (!p.is_ts and (pt == .assign or pt == .assignment_pattern)) {
+                const d = p.node_data_ptr[param_node.toInt()];
+                if (d.rhs != .none and containsNodeTag(p, d.rhs, .await_expr)) {
+                    try p.emitError("Arrow function parameters cannot contain await expressions");
+                    return error.ParseError;
+                }
             }
         }
 
@@ -4546,6 +4574,18 @@ fn parseRegularProperty(p: *Parser) Error!NodeIndex {
         if (isStrictFutureReserved(name)) {
             try p.emitError("Unexpected strict mode reserved word as shorthand property");
             return error.ParseError;
+        }
+    }
+    // An escaped keyword that resolves to an always-reserved word (e.g. br\u{65}ak = break)
+    // is invalid as a shorthand property — the identifier value would be a reserved word.
+    if (key_tag == .escaped_keyword) {
+        const text = p.tokenText(key_tok);
+        var resolved_buf: [256]u8 = undefined;
+        if (@import("parser.zig").resolveUnicodeEscapesParser(text, &resolved_buf)) |resolved| {
+            if (@import("parser.zig").isAlwaysReservedStr(resolved)) {
+                try p.emitError("Escaped reserved word cannot be used as shorthand property");
+                return error.ParseError;
+            }
         }
     }
 
