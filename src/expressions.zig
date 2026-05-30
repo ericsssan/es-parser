@@ -7393,6 +7393,7 @@ fn tryParseTsTypeArguments(p: *Parser) ?ast.SubRange {
     if (next == .l_paren or next == .r_paren or next == .r_bracket or
         next == .dot or next == .question_dot or next == .comma or next == .semicolon or
         next == .question or next == .colon or next == .arrow or
+        next == .equal or
         next == .equal_equal or next == .equal_equal_equal or
         next == .bang_equal or next == .bang_equal_equal or
         next == .ampersand_ampersand or next == .pipe_pipe or
