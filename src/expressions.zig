@@ -2577,7 +2577,7 @@ pub fn parsePrimaryExpression(p: *Parser) Error!NodeIndex {
             if (next != .dot and next != .l_bracket and next != .l_paren and
                 !(next == .less_than and p.is_ts))
             {
-                if (!p.is_ts) try p.emitError("'super' keyword unexpected here");
+                try p.emitError("'super' must be followed by an argument list or member access");
             }
             break :blk try parseLiteral(p, .super_expr);
         },
