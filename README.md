@@ -2,14 +2,12 @@
 
 A fast JavaScript / TypeScript / JSX parser written in Zig.
 
-A recursive-descent parser with a `MultiArrayList`-backed AST, a SIMD/bitmap
+Recursive-descent parser with a `MultiArrayList`-backed AST, a SIMD/bitmap
 lexer, an event-driven semantic layer (scope tree, symbol table, reference
 resolution), and a four-tier diagnostic system (error / warning / info / hint).
 Extracted from the Ez linter.
 
 ## Conformance
-
-Verified against external corpora (run via the steps under [Building](#building)):
 
 | Suite | Result |
 |-------|--------|
@@ -23,7 +21,7 @@ transpile-level error recovery, which a single-file parser does not perform.
 
 ## Features
 
-- **Languages**: JS, TS, JSX, TSX, `.d.ts`
+- **Languages**: JS, TS, JSX, TSX, `.d.ts` (also `.mjs`, `.cjs`, `.mts`, `.cts`)
 - **ES2025**: async/await, generators, optional chaining, nullish coalescing, import attributes, `using` declarations, decorators
 - **SIMD lexer**: bitmap-accelerated tokenization
 - **Scope analysis**: lexical scopes, symbol table, reference resolution
@@ -48,7 +46,7 @@ Add to your `build.zig.zon`:
 },
 ```
 
-Then in `build.zig` — the dependency is named `es_parser`, and it exposes a module
+Then in `build.zig` — the dependency is named `es_parser` and exposes a module
 called `es-parser`:
 
 ```zig
@@ -67,14 +65,14 @@ const es = @import("es_parser");
 var lr = try es.Lexer.tokenize(allocator, source);
 defer lr.deinit(allocator);
 
-// Parse
+// Parse — emit_events = true is set automatically by Parser.parse(),
+// enabling the fast-path semantic analyzer.
 var tree = try es.Parser.parse(allocator, source, lr.tokens.slice());
 defer tree.deinit(allocator);
 
 // tree.nodes  — MultiArrayList of AST nodes
-// tree.errors — diagnostics; each carries a `.severity`
-//               (.@"error" / .warning / .info / .hint).
-// A clean parse has no `.@"error"`-severity entries.
+// tree.errors — []const Diagnostic; each carries a .severity field
+//               (.@"error" / .warning / .info / .hint)
 for (tree.errors) |d| {
     if (d.severity == .@"error") std.debug.print("error: {s}\n", .{d.message});
 }
@@ -87,8 +85,9 @@ var lr = try es.Lexer.tokenizeWithLanguage(allocator, source, .ts);
 defer lr.deinit(allocator);
 
 var tree = try es.Parser.parseWithOptions(allocator, source, lr.tokens.slice(), .{
-    .language = .ts,     // .js, .jsx, .ts, or .tsx
-    .is_module = true,   // enable import/export + strict-mode semantics
+    .language = .ts,          // .js, .jsx, .ts, or .tsx
+    .is_module = true,        // enable import/export + strict-mode semantics
+    .emit_events = true,      // required for semantic analysis
 });
 defer tree.deinit(allocator);
 ```
@@ -96,30 +95,30 @@ defer tree.deinit(allocator);
 ### Semantic analysis
 
 ```zig
-var sem = try es.semantic.SemanticAnalyzer.analyzeModule(allocator, &tree, is_module);
+// analyze() defaults to module mode; use analyzeModule() to be explicit.
+var sem = try es.semantic.SemanticAnalyzer.analyze(allocator, &tree);
 defer sem.deinit(allocator);
 
-// sem.scopes      — scope tree
-// sem.symbols     — symbol table
-// sem.references  — reference list
+// sem.scopes      — scope tree (ScopeTree)
+// sem.symbols     — symbol table (SymbolTable)
+// sem.references  — reference list (ReferenceTable)
 // sem.diagnostics — early errors (duplicate bindings, etc.)
 ```
 
-## Building
+## Building and testing
 
 ```sh
-zig build              # build
-zig build test         # unit + lexer + parser + semantic tests + test262-parser-tests
+zig build test    # unit + lexer + parser + semantic tests + tc39/test262-parser-tests
 ```
 
 ### Conformance suites
 
-Each runner takes its corpus directory as an argument; the fixture repos are large
-and fetched separately:
+`conformance-parser-tests` runs against the bundled submodule automatically.
+The other suites require large external repos and an explicit path argument:
 
 ```sh
-# tc39/test262-parser-tests
-zig build conformance-parser-tests -- tests/conformance/test262-parser-tests
+# Bundled — no argument needed
+zig build conformance-parser-tests
 
 # Full tc39/test262
 git submodule add https://github.com/tc39/test262.git tests/conformance/test262
@@ -132,6 +131,9 @@ zig build conformance-babel -- tests/conformance/babel/packages/babel-parser/tes
 # TypeScript compiler tests
 git submodule add https://github.com/microsoft/TypeScript.git tests/conformance/typescript
 zig build conformance-typescript -- tests/conformance/typescript/tests/cases
+
+# Semantic analysis fixtures
+zig build conformance-semantic -- tests/fixtures/semantic
 ```
 
 ## Support
