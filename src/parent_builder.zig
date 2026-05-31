@@ -813,18 +813,9 @@ pub fn buildTraversalAux(
 /// mintok→preorder→dfs chain.  Both finish in parallel; total wall time
 /// drops from sum (8.84 ms on typescript.js) to max(core, aux) ≈ 6.0 ms.
 ///
-/// Optionally also runs computeTagNodeCsr on the aux sub-thread (when
-/// `tag_csr_buf` is non-null), signaling `tag_csr_ready` right after.
-/// This pulls the ~1.9 ms tag_csr cost off main's pre-fire chain — main
-/// can signal parents_ready right after parents_only + depths instead of
-/// also waiting on tag_csr.
 pub fn buildTraversalParallel(
     tree: *const Ast,
     alloc: std.mem.Allocator,
-    tag_csr_buf: ?[*]u8,
-    tag_csr_backing: ?*@import("js_buffer.zig").JsBufferAllocator,
-    tag_csr_out: ?*?@import("js_buffer.zig").TagNodeCsrResult,
-    tag_csr_ready: ?*std.atomic.Value(bool),
 ) !TraversalResult {
     const n = tree.nodes.len;
     if (n == 0) return buildTraversal(tree, alloc);
@@ -847,27 +838,11 @@ pub fn buildTraversalParallel(
         tree: *const Ast,
         alloc: std.mem.Allocator,
         parents: []const u32,
-        tag_csr_buf: ?[*]u8 = null,
-        tag_csr_backing: ?*@import("js_buffer.zig").JsBufferAllocator = null,
-        tag_csr_out: ?*?@import("js_buffer.zig").TagNodeCsrResult = null,
-        tag_csr_ready: ?*std.atomic.Value(bool) = null,
         resolved_parents: []u32 = &.{},
         type_overrides: []u8 = &.{},
         parent_kinds: []u8 = &.{},
         err: ?anyerror = null,
         fn run(self: *@This()) void {
-            // tag_csr first (if requested) — signal early so worker doesn't spin.
-            if (self.tag_csr_buf) |buf| {
-                if (self.tag_csr_backing) |backing| {
-                    if (@import("js_buffer.zig").computeTagNodeCsr(
-                        buf, backing, self.tree.nodes.items(.tag),
-                    )) |csr| {
-                        if (self.tag_csr_out) |out| out.* = csr;
-                    } else |_| {}
-                }
-            }
-            if (self.tag_csr_ready) |a| a.store(true, .release);
-            // Then resolved_parents + type_overrides + parent_kinds.
             if (buildTraversalAux(self.tree, self.alloc, self.parents)) |r| {
                 self.resolved_parents = r.resolved_parents;
                 self.type_overrides = r.type_overrides;
@@ -881,10 +856,6 @@ pub fn buildTraversalParallel(
         .tree = tree,
         .alloc = alloc,
         .parents = parents,
-        .tag_csr_buf = tag_csr_buf,
-        .tag_csr_backing = tag_csr_backing,
-        .tag_csr_out = tag_csr_out,
-        .tag_csr_ready = tag_csr_ready,
     };
     const aux_thread = std.Thread.spawn(.{}, AuxJob.run, .{&aux_job}) catch null;
 
@@ -957,16 +928,6 @@ pub fn buildTraversalParallel(
         if (aux_job.err) |e| return e;
     } else {
         // Fallback: aux runs synchronously here.
-        if (tag_csr_buf) |buf| {
-            if (tag_csr_backing) |b| {
-                if (@import("js_buffer.zig").computeTagNodeCsr(
-                    buf, b, tree.nodes.items(.tag),
-                )) |csr| {
-                    if (tag_csr_out) |out| out.* = csr;
-                } else |_| {}
-            }
-        }
-        if (tag_csr_ready) |a| a.store(true, .release);
         const r = try buildTraversalAux(tree, alloc, parents);
         aux_job.resolved_parents = r.resolved_parents;
         aux_job.type_overrides = r.type_overrides;
