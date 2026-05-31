@@ -110,7 +110,7 @@ pub fn build(b: *std.Build) void {
     });
     const parser_tests_runner_cmd = b.addRunArtifact(parser_tests_runner);
     parser_tests_runner_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| parser_tests_runner_cmd.addArgs(args);
+    if (@hasField(@TypeOf(b.*), "args")) { if (b.args) |args| parser_tests_runner_cmd.addArgs(args); }
     b.step("conformance-parser-tests", "Run tc39/test262-parser-tests conformance suite").dependOn(&parser_tests_runner_cmd.step);
 
     const test262_runner_mod = b.createModule(.{
@@ -126,7 +126,7 @@ pub fn build(b: *std.Build) void {
     });
     const test262_runner_cmd = b.addRunArtifact(test262_runner);
     test262_runner_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| test262_runner_cmd.addArgs(args);
+    if (@hasField(@TypeOf(b.*), "args")) { if (b.args) |args| test262_runner_cmd.addArgs(args); }
     b.step("conformance-test262", "Run tc39/test262 conformance suite").dependOn(&test262_runner_cmd.step);
 
     const babel_runner_mod = b.createModule(.{
@@ -142,7 +142,7 @@ pub fn build(b: *std.Build) void {
     });
     const babel_runner_cmd = b.addRunArtifact(babel_runner);
     babel_runner_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| babel_runner_cmd.addArgs(args);
+    if (@hasField(@TypeOf(b.*), "args")) { if (b.args) |args| babel_runner_cmd.addArgs(args); }
     b.step("conformance-babel", "Run Babel parser conformance suite").dependOn(&babel_runner_cmd.step);
 
     const typescript_runner_mod = b.createModule(.{
@@ -158,7 +158,7 @@ pub fn build(b: *std.Build) void {
     });
     const typescript_runner_cmd = b.addRunArtifact(typescript_runner);
     typescript_runner_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| typescript_runner_cmd.addArgs(args);
+    if (@hasField(@TypeOf(b.*), "args")) { if (b.args) |args| typescript_runner_cmd.addArgs(args); }
     b.step("conformance-typescript", "Run TypeScript parser conformance suite").dependOn(&typescript_runner_cmd.step);
 
     const semantic_runner_mod = b.createModule(.{
@@ -174,6 +174,6 @@ pub fn build(b: *std.Build) void {
     });
     const semantic_runner_cmd = b.addRunArtifact(semantic_runner);
     semantic_runner_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |bargs| semantic_runner_cmd.addArgs(bargs);
+    if (@hasField(@TypeOf(b.*), "args")) { if (b.args) |bargs| semantic_runner_cmd.addArgs(bargs); }
     b.step("conformance-semantic", "Run semantic analysis conformance suite").dependOn(&semantic_runner_cmd.step);
 }
