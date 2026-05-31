@@ -13,7 +13,6 @@ pub const symbol = @import("symbol.zig");
 pub const reference = @import("reference.zig");
 pub const semantic = @import("semantic.zig");
 
-pub const js_buffer = @import("js_buffer.zig");
 pub const layout = @import("layout.zig");
 pub const parent_builder = @import("parent_builder.zig");
 pub const scope_events = @import("scope_events.zig");
@@ -30,7 +29,6 @@ test {
     _ = @import("symbol.zig");
     _ = @import("reference.zig");
     _ = @import("semantic.zig");
-    _ = @import("js_buffer.zig");
     _ = @import("layout.zig");
     _ = @import("lexer.zig");
 }
