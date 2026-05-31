@@ -18,7 +18,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: true
 
@@ -28,7 +28,7 @@ jobs:
           version: master
 
       - name: Cache Zig build artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: .zig-cache
           key: zig-${{ matrix.os }}-${{ hashFiles('build.zig', 'build.zig.zon', 'src/**') }}
