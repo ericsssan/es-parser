@@ -578,6 +578,26 @@ fn parseAwaitExpression(p: *Parser) Error!NodeIndex {
             try p.emitError("'await' is not allowed as an identifier in static initialization block");
             return error.ParseError;
         }
+        // TS contextual `await`: even outside an async context (e.g. at the top
+        // level of a script), `await <operand>` is an AwaitExpression when an
+        // operand clearly follows on the same line. This matches TypeScript's
+        // `nextTokenIsIdentifierOrKeywordOrLiteralOnSameLine` lookahead — TS only
+        // treats `await` as a plain identifier when it is NOT followed by such an
+        // operand (`const await = 1`, `await.foo`, `await()`, `await + 1`).
+        if (p.is_ts and !p.newlines_ptr[p.tok_i + 1]) {
+            const nxt = p.peekAt(1);
+            if (nxt == .identifier or nxt.isKeyword() or
+                nxt == .number_literal or nxt == .bigint_literal or nxt == .string_literal)
+            {
+                const await_tok = p.advance(); // consume `await`
+                const await_operand = try parseExpressionPrec(p, .unary);
+                return p.addNode(.{
+                    .tag = .await_expr,
+                    .main_token = await_tok,
+                    .data = .{ .lhs = await_operand, .rhs = .none },
+                });
+            }
+        }
         // `await` used outside async context — treat as identifier reference.
         return parseIdentifierRef(p);
     }
@@ -3840,10 +3860,16 @@ fn parseArrowFunctionBody(p: *Parser, param_tok: TokenIndex, is_async: bool) Err
     defer p.in_async = saved_async;
     // Use parseBlockBodyWithStrictChecks for block bodies to retroactively validate
     // the parameter against any "use strict" directive in the body (e.g. `eval => {"use strict"}`).
-    const body = if (p.peek() == .l_brace)
-        try parseBlockBodyWithStrictChecks(p, params, .none)
-    else
-        try parseArrowBody(p);
+    const body = if (p.peek() == .l_brace) blk: {
+        // Entering a new function body: always allow `in`. The `allow_in = false`
+        // flag from an enclosing for-loop init must not leak into the block body
+        // (e.g. `for (a = b => { return c in d } ;;)`). The concise-body branch
+        // (parseArrowBody) inherits `[?In]` per spec and is handled there.
+        const saved_allow_in_blk = p.allow_in;
+        p.allow_in = true;
+        defer p.allow_in = saved_allow_in_blk;
+        break :blk try parseBlockBodyWithStrictChecks(p, params, .none);
+    } else try parseArrowBody(p);
     try p.emitScopeClose(.none);
 
     const extra = try p.addExtra(ast.ArrowData, .{
@@ -5266,9 +5292,10 @@ fn containsOptionalChain(p: *Parser, node: NodeIndex) bool {
                 if (cur == .none) return false;
             },
             .grouping_expr => {
-                // `new (foo?.bar)()` — Babel rejects this too.
-                cur = p.node_data_ptr[cur.toInt()].lhs;
-                if (cur == .none) return false;
+                // Parentheses seal off the optional chain: `new (foo?.bar)()` is
+                // VALID per spec (the paren group is a MemberExpression). Only a
+                // bare `new foo?.bar()` is a SyntaxError. Don't descend.
+                return false;
             },
             else => return false,
         }
@@ -7149,8 +7176,10 @@ fn parseTsTypePostfix(p: *Parser, left: NodeIndex, node_tag: Node.Tag) Error!Nod
     const op_tok = p.advance();
     const ts_mod = @import("typescript.zig");
     const type_node = try ts_mod.parseType(p);
-    // JSDoc postfix nullable: `as any?` — consume trailing `?` (TS17019 semantic).
-    _ = p.eat(.question);
+    // NOTE: do not consume a trailing `?` here. In an `as`/`satisfies`
+    // expression, `?` is the conditional operator — `x as T ? a : b` parses as
+    // `(x as T) ? a : b`. Postfix `?` on the asserted type is not valid TS, so
+    // eating it would wrongly swallow the ternary (dropping `a : b`).
     return p.addNode(.{
         .tag = node_tag,
         .main_token = op_tok,
@@ -7394,6 +7423,15 @@ fn tryParseTsTypeArguments(p: *Parser) ?ast.SubRange {
     const saved_diag_len = p.diagnostics.items.len;
     const saved_nodes_len = p.nodes.len;
     const saved_extra_len = p.extra_data.items.len;
+    // Record any in-place `>>`→`>` / `<<`→`<` token splits performed while
+    // speculating, so we can undo them if we backtrack. Without this, a split
+    // applied to a token past the failure point (e.g. a sibling enum member's
+    // `>>`) would corrupt the token stream permanently. `prev_record` supports
+    // nested speculation: an inner success keeps its journal entries so an
+    // outer attempt can still undo them.
+    const saved_mut_top = p.tok_mut_log.items.len;
+    const prev_record = p.record_tok_muts;
+    p.record_tok_muts = true;
 
     // Try parsing type arguments
     const typescript = @import("typescript.zig");
@@ -7402,6 +7440,8 @@ fn tryParseTsTypeArguments(p: *Parser) ?ast.SubRange {
         // Free any diagnostic messages allocated during the failed attempt
         // before shrinking the list; shrinkRetainingCapacity does not free them.
         for (p.diagnostics.items[saved_diag_len..]) |d| p.gpa.free(d.message);
+        p.undoTokMuts(saved_mut_top);
+        p.record_tok_muts = prev_record;
         p.tok_i = saved_tok;
         p.diagnostics.shrinkRetainingCapacity(saved_diag_len);
         p.nodes.len = @intCast(saved_nodes_len);
@@ -7424,10 +7464,16 @@ fn tryParseTsTypeArguments(p: *Parser) ?ast.SubRange {
         next == .kw_extends or next == .kw_as or next == .kw_satisfies or
         next == .kw_instanceof or next == .kw_in)
     {
+        // Committed: the splits stick. Discard the journal only if we are the
+        // outermost recorder; otherwise leave entries for the outer attempt.
+        p.record_tok_muts = prev_record;
+        if (!prev_record) p.tok_mut_log.shrinkRetainingCapacity(saved_mut_top);
         return range;
     }
 
     // Not a valid type argument context — backtrack
+    p.undoTokMuts(saved_mut_top);
+    p.record_tok_muts = prev_record;
     p.tok_i = saved_tok;
     p.diagnostics.shrinkRetainingCapacity(saved_diag_len);
     p.nodes.len = @intCast(saved_nodes_len);

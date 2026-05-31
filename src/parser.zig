@@ -635,6 +635,11 @@ const Language = @import("token.zig").Language;
 pub const Parser = struct {
     const LabelEntry = struct { name: []const u8, fn_depth: u16, is_loop: bool = false };
 
+    /// A single recorded token rewrite, used to undo TS `>>`→`>` / `<<`→`<`
+    /// splits when a speculative type-argument parse backtracks. See
+    /// `tok_mut_log` / `recordTokMut`.
+    pub const TokMut = struct { idx: u32, tag: TokenTag, start: u32 };
+
     source: []const u8,
     tokens: TokenList.Slice,
     /// Cached pointer to the tag array — avoids MultiArrayList.items(.tag)
@@ -780,6 +785,16 @@ pub const Parser = struct {
     parents_buf: []u32 = &.{},
     gpa: std.mem.Allocator,
     max_nodes: usize,
+
+    /// Journal of in-place token rewrites (the TS `>>`→`>` / `<<`→`<` splits)
+    /// made while speculatively parsing type arguments. The mutation helpers
+    /// in typescript.zig append the original (tag, start) here, but ONLY while
+    /// `record_tok_muts` is true. When a speculative `tryParseTsTypeArguments`
+    /// backtracks it replays this journal in reverse to undo the splits, which
+    /// would otherwise corrupt the token stream for later parses (e.g. a
+    /// trailing `>>` in a sibling enum member). Zero cost on the committed path.
+    tok_mut_log: std.ArrayListUnmanaged(TokMut) = .{ .items = &.{}, .capacity = 0 },
+    record_tok_muts: bool = false,
 
     // Context flags
     in_function: bool,
@@ -1053,6 +1068,7 @@ pub const Parser = struct {
         defer if (p.parents_buf.len > 0) allocator.free(p.parents_buf);
         defer p.private_decls.deinit(allocator);
         defer p.private_refs.deinit(allocator);
+        defer p.tok_mut_log.deinit(allocator);
         defer p.exported_names.deinit(allocator);
         defer p.pending_export_local_toks.deinit(allocator);
         defer p.module_decl_names.deinit(allocator);
@@ -9588,6 +9604,31 @@ pub const Parser = struct {
     /// Emit a simple error diagnostic at the current position (no format args).
     pub fn emitError(self: *Parser, message: []const u8) !void {
         try self.emitDiagnostic(self.currentSpan(), "{s}", .{message});
+    }
+
+    /// Record the current (tag, start) of token `idx` before an in-place
+    /// rewrite, so a backtracking speculative type-argument parse can undo it.
+    /// No-op unless `record_tok_muts` is set (i.e. inside speculation).
+    pub fn recordTokMut(self: *Parser, idx: usize) void {
+        if (!self.record_tok_muts) return;
+        self.tok_mut_log.append(self.gpa, .{
+            .idx = @intCast(idx),
+            .tag = self.tags_ptr[idx],
+            .start = self.tok_starts_ptr[idx],
+        }) catch {};
+    }
+
+    /// Undo all token rewrites recorded at or after `log_top` (in reverse),
+    /// then truncate the journal back to `log_top`.
+    pub fn undoTokMuts(self: *Parser, log_top: usize) void {
+        var i = self.tok_mut_log.items.len;
+        while (i > log_top) {
+            i -= 1;
+            const m = self.tok_mut_log.items[i];
+            self.tags_ptr[m.idx] = m.tag;
+            self.tok_starts_ptr[m.idx] = m.start;
+        }
+        self.tok_mut_log.shrinkRetainingCapacity(log_top);
     }
 
     /// Return the current length of the scratch buffer.

@@ -1591,6 +1591,7 @@ pub fn parseTypeArguments(p: *Parser) Error!SubRange {
     // Handle '<<' — e.g. foo<<T>() => R> where '<T>() => R' is a generic function type arg.
     // Split the first '<' as the opening bracket; leave the second '<' for the inner type.
     if (p.peek() == .less_less) {
+        p.recordTokMut(p.tok_i);
         p.tags_ptr[p.tok_i] = .less_than;
         p.tok_starts_ptr[p.tok_i] += 1;
         // tok_i unchanged — the second '<' is now the current token for inner parsing.
@@ -2486,27 +2487,32 @@ pub fn expectClosingAngleBracket(p: *Parser) Error!void {
         .greater_than => _ = p.advance(),
         .greater_greater => {
             // `>>` → consume first `>`, leave second as `>`
+            p.recordTokMut(p.tok_i);
             p.tags_ptr[p.tok_i] = .greater_than;
             // Advance the start position by 1 byte so the remaining `>` is correct
             p.tok_starts_ptr[p.tok_i] += 1;
         },
         .greater_greater_greater => {
             // `>>>` → consume first `>`, leave `>>`
+            p.recordTokMut(p.tok_i);
             p.tags_ptr[p.tok_i] = .greater_greater;
             p.tok_starts_ptr[p.tok_i] += 1;
         },
         .greater_equal => {
             // `>=` → consume first `>`, leave `=`
+            p.recordTokMut(p.tok_i);
             p.tags_ptr[p.tok_i] = .equal;
             p.tok_starts_ptr[p.tok_i] += 1;
         },
         .greater_greater_equal => {
             // `>>=` → consume first `>`, leave `>=`
+            p.recordTokMut(p.tok_i);
             p.tags_ptr[p.tok_i] = .greater_equal;
             p.tok_starts_ptr[p.tok_i] += 1;
         },
         .greater_greater_greater_equal => {
             // `>>>=` → consume first `>`, leave `>>=`
+            p.recordTokMut(p.tok_i);
             p.tags_ptr[p.tok_i] = .greater_greater_equal;
             p.tok_starts_ptr[p.tok_i] += 1;
         },
