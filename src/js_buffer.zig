@@ -100,10 +100,18 @@ pub const BufferHeader = extern struct {
     // post-resolve tag-pattern cascade with a single typed-array read.
     // See parent_builder.ParentKind for the mapping.
     parent_kind_offset: u32 = 0,
+    // v15: per-node identifier name byte ranges (UTF-8 offsets into source).
+    // For identifier/property_ident nodes: [start, end) encloses the name text
+    // in the source buffer, with '#' already stripped for private identifiers.
+    // For all other node types: both are 0 (zero-length = not an identifier).
+    // Lets JS skip _identAt() and inline the unicode-escape check rather than
+    // calling _resolveUnicodeEscapes() on every identifier at construction time.
+    node_name_starts_offset: u32 = 0,
+    node_name_ends_offset: u32 = 0,
 };
 
 comptime {
-    std.debug.assert(@sizeOf(BufferHeader) == 152);
+    std.debug.assert(@sizeOf(BufferHeader) == 160);
 }
 
 // ── Semantic Data Header ─────────────────────────────────────────
@@ -1340,6 +1348,8 @@ pub const HeaderInfo = struct {
     resolved_parent_offset: u32 = 0,
     type_overrides_offset: u32 = 0,
     parent_kind_offset: u32 = 0,
+    node_name_starts_offset: u32 = 0,
+    node_name_ends_offset: u32 = 0,
 };
 
 /// Write the buffer header at offset 0 after parsing is complete.
@@ -1388,6 +1398,8 @@ pub fn writeHeader(buf: [*]u8, tree: *const Ast, info: HeaderInfo) void {
         .resolved_parent_offset = info.resolved_parent_offset,
         .type_overrides_offset = info.type_overrides_offset,
         .parent_kind_offset = info.parent_kind_offset,
+        .node_name_starts_offset = info.node_name_starts_offset,
+        .node_name_ends_offset = info.node_name_ends_offset,
     };
 }
 
