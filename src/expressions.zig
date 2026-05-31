@@ -6305,19 +6305,27 @@ fn parseComputedMember(p: *Parser, object: NodeIndex) Error!NodeIndex {
 fn parseOptionalChain(p: *Parser, object: NodeIndex) Error!NodeIndex {
     const q_dot_tok = p.advance(); // consume `?.`
 
-    // obj?.<T>(args) — TypeScript optional generic call
+    // obj?.<T>(args) — TypeScript optional generic call.
+    // Wrap the callee in ts_instantiation_expr so consumers can detect type args.
     if (p.is_ts and p.peek() == .less_than) {
-        if (tryParseTsTypeArguments(p)) |_| {
+        const lt_tok: u32 = @intCast(p.tok_i);
+        if (tryParseTsTypeArguments(p)) |type_args_range| {
             if (p.peek() == .l_paren) {
+                const range_extra = try p.addExtra(SubRange, type_args_range);
+                const inst = try p.addNode(.{
+                    .tag = .ts_instantiation_expr,
+                    .main_token = lt_tok,
+                    .data = .{ .lhs = object, .rhs = NodeIndex.fromInt(range_extra) },
+                });
                 const args_range = try parseArgumentList(p);
-                const range_extra = try p.addExtra(SubRange, .{
+                const call_range_extra = try p.addExtra(SubRange, .{
                     .start = args_range.start,
                     .end = args_range.end,
                 });
                 return p.addNode(.{
                     .tag = .optional_call_expr,
                     .main_token = q_dot_tok,
-                    .data = .{ .lhs = object, .rhs = NodeIndex.fromInt(range_extra) },
+                    .data = .{ .lhs = inst, .rhs = NodeIndex.fromInt(call_range_extra) },
                 });
             }
         }
