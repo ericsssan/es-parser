@@ -31,7 +31,7 @@ transpile-level error recovery, which a single-file parser does not perform.
 
 ## Requirements
 
-Zig `0.17.0-dev.305+bdfbf432d` or later.
+Zig `0.17.0-dev.607+456b2ec07` or later.
 
 ## Usage
 
