@@ -13,6 +13,7 @@ pub const symbol = @import("symbol.zig");
 pub const reference = @import("reference.zig");
 pub const semantic = @import("semantic.zig");
 
+pub const code_path = @import("code_path.zig");
 pub const layout = @import("layout.zig");
 pub const parent_builder = @import("parent_builder.zig");
 pub const scope_events = @import("scope_events.zig");
