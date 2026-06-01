@@ -2377,6 +2377,13 @@ pub const Parser = struct {
         });
     }
 
+    /// Recovery helper: append a fresh error_node to the scratch stack.
+    /// Used by statement / member-list loops after a `synchronize()` to keep
+    /// a placeholder child so the surrounding list still produces a node.
+    pub fn pushErrorNode(self: *Parser) !void {
+        try self.scratchPush(try self.makeErrorNode());
+    }
+
     /// Maximum recursive-descent nesting depth. Parsing pathologically nested
     /// input (e.g. thousands of nested `(`, `{`, type annotations, or JSX
     /// elements) would otherwise recurse until the native stack overflows and
@@ -2520,8 +2527,7 @@ pub const Parser = struct {
                     // Guarantee forward progress — if synchronize didn't advance,
                     // skip one token to avoid infinite loop on unrecoverable input.
                     if (self.tok_i == before) _ = self.advance();
-                    const err_node = self.makeErrorNode() catch return error.OutOfMemory;
-                    try self.scratchPush(err_node);
+                    try self.pushErrorNode();
                     continue;
                 },
                 error.OutOfMemory => return error.OutOfMemory,
@@ -3071,8 +3077,7 @@ pub const Parser = struct {
                     }
                     self.synchronize();
                     if (self.tok_i == before) _ = self.advance();
-                    const err_node = self.makeErrorNode() catch return error.OutOfMemory;
-                    try self.scratchPush(err_node);
+                    try self.pushErrorNode();
                     continue;
                 },
                 error.OutOfMemory => return error.OutOfMemory,
@@ -4454,8 +4459,7 @@ pub const Parser = struct {
                 const stmt = self.parseStatement() catch |err| switch (err) {
                     error.ParseError => {
                         self.synchronize();
-                        const err_node = self.makeErrorNode() catch return error.OutOfMemory;
-                        try self.scratchPush(err_node);
+                        try self.pushErrorNode();
                         continue;
                     },
                     error.OutOfMemory => return error.OutOfMemory,
@@ -4501,8 +4505,7 @@ pub const Parser = struct {
             const stmt = self.parseStatement() catch |err| switch (err) {
                 error.ParseError => {
                     self.synchronize();
-                    const err_node = self.makeErrorNode() catch return error.OutOfMemory;
-                    try self.scratchPush(err_node);
+                    try self.pushErrorNode();
                     continue;
                 },
                 error.OutOfMemory => return error.OutOfMemory,
@@ -5718,8 +5721,7 @@ pub const Parser = struct {
             const member = self.parseClassMember() catch |err| switch (err) {
                 error.ParseError => {
                     self.synchronize();
-                    const err_node = self.makeErrorNode() catch return error.OutOfMemory;
-                    try self.scratchPush(err_node);
+                    try self.pushErrorNode();
                     continue;
                 },
                 error.OutOfMemory => return error.OutOfMemory,
@@ -9723,6 +9725,34 @@ pub const Parser = struct {
     /// Checkpoint: save current parser position for speculative parsing.
     pub fn checkpoint(self: *const Parser) u32 {
         return self.tokIdx();
+    }
+
+    /// Snapshot of the mutable parse state that speculative parsing must be
+    /// able to undo: token cursor plus the high-water marks of the diagnostic,
+    /// node, and extra_data buffers. Restoring rewinds the cursor and discards
+    /// anything appended since the snapshot. Used by TS type parsing to
+    /// backtrack a trial parse (e.g. conditional-type `extends`, JSDoc `?`/`!`).
+    pub const SpeculativeState = struct {
+        tok_i: usize,
+        diag_len: usize,
+        nodes_len: usize,
+        extra_len: usize,
+    };
+
+    pub fn saveSpeculative(self: *const Parser) SpeculativeState {
+        return .{
+            .tok_i = self.tok_i,
+            .diag_len = self.diagnostics.items.len,
+            .nodes_len = self.nodes.len,
+            .extra_len = self.extra_data.items.len,
+        };
+    }
+
+    pub fn restoreSpeculative(self: *Parser, s: SpeculativeState) void {
+        self.tok_i = s.tok_i;
+        self.diagnostics.shrinkRetainingCapacity(s.diag_len);
+        self.nodes.len = @intCast(s.nodes_len);
+        self.extra_data.shrinkRetainingCapacity(s.extra_len);
     }
 
     /// Restore parser position from a checkpoint.

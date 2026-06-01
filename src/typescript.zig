@@ -19,6 +19,7 @@ const TokenIndex = ast.TokenIndex;
 const parser_mod = @import("parser.zig");
 pub const Parser = parser_mod.Parser;
 const Error = parser_mod.Error;
+const TokenTag = @import("token.zig").Tag;
 
 // =====================================================================
 // 1. parseType — Main type parsing entry point
@@ -110,10 +111,7 @@ pub fn parseType(p: *Parser) Error!NodeIndex {
     // Only parse as conditional if `?` actually follows the extends clause.
     // `extends` also appears in type parameter constraints where no `?` follows.
     if (p.peek() == .kw_extends) {
-        const saved_tok = p.tok_i;
-        const saved_diag = p.diagnostics.items.len;
-        const saved_nodes = p.nodes.len;
-        const saved_extra = p.extra_data.items.len;
+        const snap = p.saveSpeculative();
 
         const extends_tok = p.advance(); // consume `extends`
         const prev_in_cond = p.in_conditional_extends;
@@ -128,19 +126,13 @@ pub fn parseType(p: *Parser) Error!NodeIndex {
         const check_type_result = parseNonConditionalType(p);
         const check_type = check_type_result catch {
             // Backtrack if extends clause fails to parse
-            p.tok_i = saved_tok;
-            p.diagnostics.shrinkRetainingCapacity(saved_diag);
-            p.nodes.len = @intCast(saved_nodes);
-            p.extra_data.shrinkRetainingCapacity(saved_extra);
+            p.restoreSpeculative(snap);
             return result;
         };
 
         if (p.peek() != .question) {
             // Not a conditional type — backtrack
-            p.tok_i = saved_tok;
-            p.diagnostics.shrinkRetainingCapacity(saved_diag);
-            p.nodes.len = @intCast(saved_nodes);
-            p.extra_data.shrinkRetainingCapacity(saved_extra);
+            p.restoreSpeculative(snap);
             return result;
         }
 
@@ -174,52 +166,63 @@ pub fn parseType(p: *Parser) Error!NodeIndex {
 // =====================================================================
 
 /// Parse a union type: `IntersectionType (| IntersectionType)*`
-pub fn parseNonConditionalType(p: *Parser) Error!NodeIndex {
-    // Allow leading `|`
-    if (p.peek() == .pipe) {
-        _ = p.advance();
+/// Function/constructor types must be parenthesized inside a union (TS1385)
+/// or intersection (TS1387) type. Emit `msg` against `node` when it is one.
+fn checkTypeOperandParenthesized(p: *Parser, node: NodeIndex, comptime msg: []const u8) !void {
+    const tag = p.node_tags_ptr[node.toInt()];
+    if (tag == .ts_function_type or tag == .ts_constructor_type) {
+        try p.emitDiagnosticAtToken(p.node_main_token_ptr[node.toInt()], msg, .{});
     }
+}
 
-    const first = try parseIntersectionType(p);
+/// Parse a left-associative chain of `op`-separated types — union (`|`) or
+/// intersection (`&`) — each member parsed by `inner`. A leading `op` is
+/// permitted. A lone member (no `op`) is returned directly; otherwise the
+/// members are wrapped in a `result_tag` node.
+///
+/// `main_token_from_first`: the union node takes the first member's main_token
+/// so lint span computation bounds it at [first member start, last member end]
+/// rather than the post-consume token; the intersection node uses the current
+/// token. This difference is preserved from the original two functions.
+fn parseTypeOperatorChain(
+    p: *Parser,
+    comptime op: TokenTag,
+    comptime inner: fn (*Parser) Error!NodeIndex,
+    comptime result_tag: Node.Tag,
+    comptime fn_paren_msg: []const u8,
+    comptime main_token_from_first: bool,
+) Error!NodeIndex {
+    if (p.peek() == op) _ = p.advance(); // leading operator
 
-    if (p.peek() != .pipe) {
-        return first;
-    }
+    const first = try inner(p);
+    if (p.peek() != op) return first;
 
-    // Collect union members.
     const scratch_top = p.scratchLen();
     defer p.scratchPop(scratch_top);
-    // TS1385: function type in union must be parenthesized.
-    const first_tag = p.node_tags_ptr[first.toInt()];
-    if (first_tag == .ts_function_type or first_tag == .ts_constructor_type) {
-        try p.emitDiagnosticAtToken(p.node_main_token_ptr[first.toInt()], "Function type notation must be parenthesized when used in a union type", .{});
-    }
+    try checkTypeOperandParenthesized(p, first, fn_paren_msg);
     try p.scratchPush(first);
 
-    while (p.peek() == .pipe) {
-        _ = p.advance(); // consume `|`
-        const member = try parseIntersectionType(p);
-        // TS1385: function type in union must be parenthesized.
-        const member_tag = p.node_tags_ptr[member.toInt()];
-        if (member_tag == .ts_function_type or member_tag == .ts_constructor_type) {
-            try p.emitDiagnosticAtToken(p.node_main_token_ptr[member.toInt()], "Function type notation must be parenthesized when used in a union type", .{});
-        }
+    while (p.peek() == op) {
+        _ = p.advance();
+        const member = try inner(p);
+        try checkTypeOperandParenthesized(p, member, fn_paren_msg);
         try p.scratchPush(member);
     }
 
-    const members = p.scratchSlice(scratch_top);
-    const range = try p.addSlice(members);
-
-    // Use the first member's main_token as the union's main_token so
-    // lint span computation (which propagates min/max through children)
-    // correctly bounds the union at [first member start, last member end].
-    // Using the post-consume token (e.g. `;`) would push max_tok past
-    // the union into the following statement terminator.
+    const range = try p.addSlice(p.scratchSlice(scratch_top));
+    const main_token = if (main_token_from_first)
+        p.nodes.items(.main_token)[first.toInt()]
+    else
+        p.tokIdx();
     return p.addNode(.{
-        .tag = .ts_union_type,
-        .main_token = p.nodes.items(.main_token)[first.toInt()],
+        .tag = result_tag,
+        .main_token = main_token,
         .data = .{ .lhs = NodeIndex.fromInt(range.start), .rhs = NodeIndex.fromInt(range.end) },
     });
+}
+
+pub fn parseNonConditionalType(p: *Parser) Error!NodeIndex {
+    return parseTypeOperatorChain(p, .pipe, parseIntersectionType, .ts_union_type, "Function type notation must be parenthesized when used in a union type", true);
 }
 
 // =====================================================================
@@ -228,46 +231,7 @@ pub fn parseNonConditionalType(p: *Parser) Error!NodeIndex {
 
 /// Parse an intersection type: `PrimaryType (& PrimaryType)*`
 pub fn parseIntersectionType(p: *Parser) Error!NodeIndex {
-    // Allow leading `&`
-    if (p.peek() == .ampersand) {
-        _ = p.advance();
-    }
-
-    const first = try parsePrimaryType(p);
-
-    if (p.peek() != .ampersand) {
-        return first;
-    }
-
-    // Collect intersection members.
-    const scratch_top = p.scratchLen();
-    defer p.scratchPop(scratch_top);
-    // TS1387: function type in intersection must be parenthesized.
-    const first_itag = p.node_tags_ptr[first.toInt()];
-    if (first_itag == .ts_function_type or first_itag == .ts_constructor_type) {
-        try p.emitDiagnosticAtToken(p.node_main_token_ptr[first.toInt()], "Function type notation must be parenthesized when used in an intersection type", .{});
-    }
-    try p.scratchPush(first);
-
-    while (p.peek() == .ampersand) {
-        _ = p.advance(); // consume `&`
-        const member = try parsePrimaryType(p);
-        // TS1387: function type in intersection must be parenthesized.
-        const member_itag = p.node_tags_ptr[member.toInt()];
-        if (member_itag == .ts_function_type or member_itag == .ts_constructor_type) {
-            try p.emitDiagnosticAtToken(p.node_main_token_ptr[member.toInt()], "Function type notation must be parenthesized when used in an intersection type", .{});
-        }
-        try p.scratchPush(member);
-    }
-
-    const members = p.scratchSlice(scratch_top);
-    const range = try p.addSlice(members);
-
-    return p.addNode(.{
-        .tag = .ts_intersection_type,
-        .main_token = p.tokIdx(),
-        .data = .{ .lhs = NodeIndex.fromInt(range.start), .rhs = NodeIndex.fromInt(range.end) },
-    });
+    return parseTypeOperatorChain(p, .ampersand, parsePrimaryType, .ts_intersection_type, "Function type notation must be parenthesized when used in an intersection type", false);
 }
 
 // =====================================================================
@@ -407,10 +371,7 @@ fn parsePrimaryTypeInner(p: *Parser) Error!NodeIndex {
             // conditional type, not an infer constraint. Backtrack in that case.
             var constraint: NodeIndex = .none;
             if (p.peek() == .kw_extends) {
-                const saved_tok = p.tok_i;
-                const saved_diag = p.diagnostics.items.len;
-                const saved_nodes = p.nodes.len;
-                const saved_extra = p.extra_data.items.len;
+                const snap = p.saveSpeculative();
                 _ = p.advance(); // consume `extends`
                 const type_ok = blk: {
                     constraint = parsePrimaryType(p) catch break :blk false;
@@ -419,10 +380,7 @@ fn parsePrimaryTypeInner(p: *Parser) Error!NodeIndex {
                 if (!type_ok or (p.peek() == .question and !p.in_conditional_extends)) {
                     // Backtrack: either parse failed or `?` follows in a context
                     // where conditional types are allowed (not in extends check type)
-                    p.tok_i = saved_tok;
-                    p.diagnostics.shrinkRetainingCapacity(saved_diag);
-                    p.nodes.len = @intCast(saved_nodes);
-                    p.extra_data.shrinkRetainingCapacity(saved_extra);
+                    p.restoreSpeculative(snap);
                     constraint = .none;
                 }
             }
@@ -605,18 +563,12 @@ fn parsePrimaryTypeInner(p: *Parser) Error!NodeIndex {
         .question, .bang => {
             const prefix_tok = p.advance(); // consume `?` or `!`
             // Speculatively parse inner type; bare `?` or `!` is also valid JSDoc.
-            const saved_tok2 = p.tok_i;
-            const saved_diag2 = p.diagnostics.items.len;
-            const saved_nodes2 = p.nodes.len;
-            const saved_extra2 = p.extra_data.items.len;
+            const snap = p.saveSpeculative();
             const maybe_inner = parsePrimaryType(p) catch null;
             // If parsing failed OR new diagnostics were added (parse emitted errors without Zig error),
             // restore state and return a dummy node for the `?`/`!` token.
-            if (maybe_inner == null or p.diagnostics.items.len > saved_diag2) {
-                p.tok_i = saved_tok2;
-                p.diagnostics.shrinkRetainingCapacity(saved_diag2);
-                p.nodes.len = @intCast(saved_nodes2);
-                p.extra_data.shrinkRetainingCapacity(saved_extra2);
+            if (maybe_inner == null or p.diagnostics.items.len > snap.diag_len) {
+                p.restoreSpeculative(snap);
                 return p.addNode(.{
                     .tag = .ts_type_reference,
                     .main_token = prefix_tok,

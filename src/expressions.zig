@@ -5125,8 +5125,7 @@ fn parseClassExpression(p: *Parser) Error!NodeIndex {
             error.ParseError => {
                 p.synchronize();
                 if (p.tok_i == before) _ = p.advance();
-                const err_node = p.makeErrorNode() catch return error.OutOfMemory;
-                try p.scratchPush(err_node);
+                try p.pushErrorNode();
                 continue;
             },
             error.OutOfMemory => return error.OutOfMemory,
