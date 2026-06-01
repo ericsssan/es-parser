@@ -393,16 +393,6 @@ pub const SymbolTable = struct {
     pub fn allFlags(self: *const SymbolTable) []const SymbolFlags {
         return self.flags.items;
     }
-
-    /// Returns a slice of all binding kinds (dense, cache-friendly iteration).
-    pub fn allBindingKinds(self: *const SymbolTable) []const BindingKind {
-        return self.binding_kinds.items;
-    }
-
-    /// Returns a slice of all scope ids (dense, cache-friendly iteration).
-    pub fn allScopeIds(self: *const SymbolTable) []const ScopeId {
-        return self.scope_ids.items;
-    }
 };
 
 // ── Flags construction helpers ─────────────────────────────

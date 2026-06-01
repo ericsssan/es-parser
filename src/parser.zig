@@ -9330,14 +9330,6 @@ pub const Parser = struct {
         };
     }
 
-    /// Check if current token is a strict reserved word in strict mode and emit error.
-    pub fn checkStrictReservedWord(self: *Parser, tok: TokenIndex) !void {
-        if (self.in_strict and self.isStrictReservedWord(tok)) {
-            try self.emitDiagnostic(self.currentSpan(), "'{s}' is not allowed as an identifier in strict mode", .{self.tokenText(tok)});
-            return error.ParseError;
-        }
-    }
-
     /// Check strict-mode binding restrictions: no eval/arguments as binding names,
     /// and no future reserved words as binding names.
     pub inline fn checkStrictBinding(self: *Parser, tok: TokenIndex) !void {
@@ -9452,44 +9444,6 @@ pub const Parser = struct {
             }
         }
         return false;
-    }
-
-    /// Check if the next block body contains "use strict" and params are non-simple.
-    /// This is always a SyntaxError in plain JS, but not in TypeScript (TS1346/TS1347 are semantic).
-    pub fn checkUseStrictNonSimpleParams(self: *Parser, params: SubRange) !void {
-        if (self.is_ts) return;
-        if (self.peek() == .l_brace) {
-            var pos = self.tok_i + 1;
-            while (pos < self.parsed_len) {
-                const tag = self.tags_ptr[pos];
-                if (tag != .string_literal) break;
-                const start = self.tok_starts_ptr[pos];
-                // Check if it's "use strict"
-                if (start + 12 <= self.source.len and
-                    self.source[start] == '"' and
-                    std.mem.eql(u8, self.source[start .. start + 12], "\"use strict\""))
-                {
-                    if (self.hasNonSimpleParams(params)) {
-                        try self.emitDiagnostic(self.currentSpan(), "\"use strict\" directive not allowed in function with non-simple parameters", .{});
-                        return error.ParseError;
-                    }
-                    break;
-                }
-                // Also check single-quoted
-                if (start + 12 <= self.source.len and
-                    self.source[start] == '\'' and
-                    std.mem.eql(u8, self.source[start .. start + 12], "'use strict'"))
-                {
-                    if (self.hasNonSimpleParams(params)) {
-                        try self.emitDiagnostic(self.currentSpan(), "\"use strict\" directive not allowed in function with non-simple parameters", .{});
-                        return error.ParseError;
-                    }
-                    break;
-                }
-                pos += 1;
-                if (pos < self.parsed_len and self.tags_ptr[pos] == .semicolon) pos += 1;
-            }
-        }
     }
 
     /// Check parameters for strict-mode eval/arguments restrictions.

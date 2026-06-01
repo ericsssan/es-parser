@@ -198,15 +198,6 @@ pub const Stats = struct {
     symbol_count: u64 = 0,
 };
 
-/// Lightweight stats used by the bench.  The full `SemanticResult` is the
-/// production return type — use `resolveFull` for that.
-pub const Result = struct {
-    scope_count: u32,
-    binding_count: u32,
-    resolved: u32,
-    unresolved: u32,
-};
-
 /// Returns the "looping target" node for a loop — the child node that ESLint's
 /// `isLoopingTarget` function recognises as the loop's entry point on each
 /// iteration.  This is the node that the loop-body segment's seg_start event
@@ -233,92 +224,6 @@ fn loopingTargetNode(ast: *const ast_mod.Ast, n: NodeIndex, loop_type: code_path
             const fd = ast.extraData(ast_mod.ForInOfData, @intFromEnum(data.lhs));
             break :blk fd.binding; // left (binding)
         },
-    };
-}
-
-// ── PoC stats-only resolver (kept for the existing bench harness) ───
-
-pub fn resolve(
-    allocator: std.mem.Allocator,
-    ast: *const Ast,
-    events: []const Event,
-) !Result {
-    const StatsEntry = struct { name_hash: u64, name: []const u8 };
-    var builders: [256]std.ArrayListUnmanaged(StatsEntry) = undefined;
-    for (&builders) |*b| b.* = .{ .items = &.{}, .capacity = 0 };
-    defer for (&builders) |*b| b.deinit(allocator);
-
-    var sp: u32 = 0;
-    var scope_count: u32 = 0;
-
-    const tok_starts = ast.tokens.items(.start);
-    const tok_lens = ast.tokens.items(.len);
-    const node_main_tokens = ast.nodes.items(.main_token);
-    const source = ast.source;
-
-    var binding_count: u32 = 0;
-    var resolved: u32 = 0;
-    var unresolved: u32 = 0;
-
-    for (events) |e| switch (e.kind) {
-        .scope_open => {
-            // Elided scopes have no matching scope_close — skip them.
-            const kind: ScopeKind = @enumFromInt(e.aux);
-            if (kind == .elided) continue;
-            if (sp < builders.len) sp += 1;
-            scope_count += 1;
-        },
-        .scope_close => if (sp > 0) {
-            builders[sp - 1].clearRetainingCapacity();
-            sp -= 1;
-        },
-        // CFG events ignored by the stats-only resolver — resolveFull handles them.
-        .terminator, .branch_open, .branch_else, .branch_close,
-        .loop_open, .loop_test_end, .loop_body_end, .loop_close,
-        .try_open, .try_body_end, .try_catch_start, .try_catch_end, .try_finally_start, .try_close,
-        .switch_open, .switch_case_start, .switch_case_end, .switch_close,
-        .logical_open, .logical_right, .logical_close,
-        .cond_open, .cond_fork, .cond_alt, .cond_close,
-        .label_open, .label_close,
-        .if_open, .if_alt, .if_close,
-        .nop,
-        => {},
-        .declare => {
-            if (sp == 0) continue;
-            const main_tok = node_main_tokens[e.node];
-            const start = tok_starts[main_tok];
-            const len = tok_lens[main_tok];
-            const name = source[start .. start + len];
-            const name_hash = std.hash.Wyhash.hash(0, name);
-            try builders[sp - 1].append(allocator, .{ .name_hash = name_hash, .name = name });
-            binding_count += 1;
-        },
-        .reference => {
-            if (sp == 0) { unresolved += 1; continue; }
-            const main_tok = node_main_tokens[e.node];
-            const start = tok_starts[main_tok];
-            const len = tok_lens[main_tok];
-            const name = source[start .. start + len];
-            const name_hash = std.hash.Wyhash.hash(0, name);
-            var i: i32 = @as(i32, @intCast(sp)) - 1;
-            var found = false;
-            done: while (i >= 0) : (i -= 1) {
-                for (builders[@intCast(i)].items) |entry| {
-                    if (entry.name_hash == name_hash and std.mem.eql(u8, entry.name, name)) {
-                        found = true;
-                        break :done;
-                    }
-                }
-            }
-            if (found) resolved += 1 else unresolved += 1;
-        },
-    };
-
-    return .{
-        .scope_count = scope_count,
-        .binding_count = binding_count,
-        .resolved = resolved,
-        .unresolved = unresolved,
     };
 }
 

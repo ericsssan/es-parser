@@ -90,15 +90,6 @@ pub const EventType = enum(u8) {
     seg_loop = 6,
 };
 
-/// Bits 30-31 of the serialized node field encode the event phase:
-///   00 = fire at node ENTER (before enter handler)
-///   01 = fire at node EXIT (before exit handler)
-///   10 = fire at node POST (after exit handler)
-///   11 = fire at node AFTER_ENTER (after enter handler, before children)
-pub const EVENT_EXIT_FLAG: u32 = 0x40000000;
-pub const EVENT_POST_FLAG: u32 = 0x80000000;
-pub const EVENT_NODE_MASK: u32 = 0x3FFFFFFF;
-
 pub const EventPhase = enum(u2) { enter = 0, exit = 1, post = 2, after_enter = 3 };
 
 pub const Event = struct {

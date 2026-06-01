@@ -1,5 +1,3 @@
-const std = @import("std");
-
 /// A byte range in the source text.
 pub const Span = struct {
     start: u32,

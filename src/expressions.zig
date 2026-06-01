@@ -5121,10 +5121,7 @@ fn parseClassExpression(p: *Parser) Error!NodeIndex {
             continue;
         }
         const before = p.tok_i;
-        // Route to the canonical parser.zig implementation. The expressions.zig
-        // copy below (parseClassMember) is a stale duplicate that misses
-        // type-annotation + initializer combos and many TS features; kept only
-        // as dead code pending removal.
+        // Class members are parsed by the canonical implementation in parser.zig.
         const member = p.parseClassMember() catch |err| switch (err) {
             error.ParseError => {
                 p.synchronize();
