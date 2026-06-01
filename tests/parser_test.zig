@@ -493,4 +493,13 @@ test "deeply nested input is rejected, not a stack overflow" {
     try expectRejectsDeepNesting("let ", "[", "", reps, .js); // binding patterns (parseBindingPattern)
     try expectRejectsDeepNesting("type T=", "(", "", reps, .ts); // TS types (parseType)
     try expectRejectsDeepNesting("x=", "<a>", "1", reps, .tsx); // JSX (parseJsxElement)
+    // Prefix-operator recursion recurses on its operand, never re-entering
+    // parsePrimaryExpression — so each needs its own guard (parseUnaryOp,
+    // parseAwaitExpression, parseNewExpression).
+    try expectRejectsDeepNesting("", "new ", "Foo()", reps, .js); // parseNewExpression
+    try expectRejectsDeepNesting("x=", "!", "y", reps, .js); // parseUnaryOp (logical not)
+    try expectRejectsDeepNesting("x=", "typeof ", "y", reps, .js); // parseUnaryOp (typeof)
+    try expectRejectsDeepNesting("x=", "void ", "y", reps, .js); // parseUnaryOp (void)
+    try expectRejectsDeepNesting("x=", "-", "y", reps, .js); // parseUnaryOp (unary minus)
+    try expectRejectsDeepNesting("await ", "await ", "y", reps, .js); // parseAwaitExpression
 }

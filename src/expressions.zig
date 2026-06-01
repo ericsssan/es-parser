@@ -410,6 +410,8 @@ fn containsPrivateMember(p: *Parser, node: NodeIndex) bool {
 }
 
 fn parseUnaryOp(p: *Parser, node_tag: Node.Tag) Error!NodeIndex {
+    try p.enterRecursion();
+    defer p.leaveRecursion();
     const tok = p.advance();
     // TS: prefix ++/-- followed by ++/-- on a new line — the second ++/-- is parsed
     // as postfix with no operand, yielding TS1109 "Expression expected".
@@ -548,6 +550,8 @@ fn parsePostfixUpdate(p: *Parser, operand: NodeIndex, postfix_tag: TokenTag) Err
 // ── Await ────────────────────────────────────────────────────────
 
 fn parseAwaitExpression(p: *Parser) Error!NodeIndex {
+    try p.enterRecursion();
+    defer p.leaveRecursion();
     // Determine if `await` is reserved here or can be treated as an identifier.
     // In TypeScript script mode, `in_async` is set at top-level to allow top-level
     // await expressions, but `await` is still a valid identifier in non-function
@@ -5297,6 +5301,8 @@ fn containsOptionalChain(p: *Parser, node: NodeIndex) bool {
 }
 
 fn parseNewExpression(p: *Parser) Error!NodeIndex {
+    try p.enterRecursion();
+    defer p.leaveRecursion();
     const new_tok = p.advance(); // consume `new`
 
     // new.target — create the `new` meta identifier BEFORE consuming
