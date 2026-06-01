@@ -58,7 +58,9 @@ pub fn build(b: *std.Build) void {
     const run_semantic_tests = b.addRunArtifact(semantic_tests);
 
     // ── Conformance: test262-parser-tests (always run, submodule included) ──
-    const conf_mod = b.createModule(.{
+    // Shared ReleaseFast build of the parser, reused by the bundled test-step
+    // runner below and every standalone conformance runner.
+    const conf_releaseFast = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = .ReleaseFast,
@@ -70,7 +72,7 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseFast,
         .link_libc = true,
     });
-    ptr_mod.addImport("es_parser", conf_mod);
+    ptr_mod.addImport("es_parser", conf_releaseFast);
     const ptr_exe = b.addExecutable(.{ .name = "parser_tests_runner", .root_module = ptr_mod });
     const ptr_cmd = b.addRunArtifact(ptr_exe);
     ptr_cmd.addArg("tests/conformance/test262-parser-tests");
@@ -89,13 +91,6 @@ pub fn build(b: *std.Build) void {
     //   zig build conformance-parser-tests -- tests/conformance/test262-parser-tests
     //   zig build conformance-test262      -- tests/conformance/test262
     //   zig build conformance-babel        -- tests/conformance/babel/packages/babel-parser/test/fixtures
-
-    const conf_releaseFast = b.createModule(.{
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-        .optimize = .ReleaseFast,
-        .link_libc = true,
-    });
 
     const parser_tests_runner_mod = b.createModule(.{
         .root_source_file = b.path("tests/conformance/parser_tests_runner.zig"),
