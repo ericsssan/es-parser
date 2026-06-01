@@ -2208,10 +2208,6 @@ pub fn isIdStart(cp: u32) bool {
     return rangeContains(&id_start_ranges, cp);
 }
 
-pub fn isIdContinue(cp: u32) bool {
-    return rangeContains(&id_continue_ranges, cp);
-}
-
 /// ZWNJ (U+200C) and ZWJ (U+200D) are valid as identifier-continue per
 /// ECMAScript spec but classified as Cf — not in UCD ID_Continue.
 pub fn isIdContinueJS(cp: u32) bool {

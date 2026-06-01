@@ -756,15 +756,6 @@ inline fn keywordLookupFromRaw(raw8: u64, ptr: [*]const u8, len: usize, ts: bool
     };
 }
 
-/// Hot-path keyword lookup. Caller guarantees ptr+8 is readable.
-/// Issues a single 8-byte unaligned load then delegates to keywordLookupFromRaw,
-/// which derives fc from raw8 and uses register shifts for ptr[1]/ptr[2].
-pub inline fn keywordLookupHot(ptr: [*]const u8, len: usize, ts: bool) Tag {
-    const raw8 = @as(*align(1) const u64, @ptrCast(ptr)).*;
-    return keywordLookupFromRaw(raw8, ptr, len, ts);
-}
-
-
 /// Position of the next set bit at index ≥ `from`, or `n` if none.
 /// Used to scan strings / comments / templates against pre-built bitmaps
 /// instead of doing a fresh 16-byte SIMD pass.
@@ -804,19 +795,6 @@ inline fn lineCommentEndBM(newline_bm: []const u64, start: u32, src: []const u8,
         if (src[i] == 0xE2 and src[i + 1] == 0x80 and (src[i + 2] == 0xA8 or src[i + 2] == 0xA9)) return i;
     }
     return nl;
-}
-
-/// Bitmap-driven string scan. Walks structural|newline (both contain quote
-/// and backslash; newline terminates an unterminated string). Returns
-/// `end` such that the string token spans [open .. end).
-pub fn stringEndBM(
-    src: []const u8,
-    structural_bm: []const u64,
-    newline_bm: []const u64,
-    open: u32,
-    n: u32,
-) u32 {
-    return stringEndBMOpt(src, structural_bm, newline_bm, open, n, false);
 }
 
 /// JSX-aware string scanner. Two orthogonal flags:

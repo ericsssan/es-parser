@@ -105,11 +105,6 @@ pub inline fn parseAssignmentExpression(p: *Parser) Error!NodeIndex {
     return parseExpressionPrec(p, .assignment);
 }
 
-/// Parse a conditional expression (ternary level, no assignment).
-pub inline fn parseConditionalExpression(p: *Parser) Error!NodeIndex {
-    return parseExpressionPrec(p, .conditional);
-}
-
 // =====================================================================
 // Core Pratt loop
 // =====================================================================

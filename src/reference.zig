@@ -163,11 +163,6 @@ pub const ReferenceTable = struct {
         return ReferenceId.fromInt(index);
     }
 
-    /// Get the write expression node for a reference (`.none` if not a write ref).
-    pub fn getWriteExpr(self: *const ReferenceTable, ref_id: ReferenceId) ast.NodeIndex {
-        return self.write_expr_ids.items[ref_id.toInt()];
-    }
-
     /// Resolve a previously-unresolved reference to a symbol.
     pub fn resolve(self: *ReferenceTable, ref_id: ReferenceId, symbol_id: SymbolId) void {
         self.symbol_ids.items[ref_id.toInt()] = symbol_id;
@@ -198,31 +193,14 @@ pub const ReferenceTable = struct {
         return self.scope_ids.items[ref_id.toInt()];
     }
 
-    /// Get the segment ID where this reference occurs (std.math.maxInt(u32) = NONE_SEG).
-    pub fn getSegId(self: *const ReferenceTable, ref_id: ReferenceId) u32 {
-        return self.seg_ids.items[ref_id.toInt()];
-    }
-
-    /// Set the segment ID for a reference (called by event_resolver after addReference).
-    pub fn setSegId(self: *ReferenceTable, ref_id: ReferenceId, seg_id: u32) void {
-        self.seg_ids.items[ref_id.toInt()] = seg_id;
-    }
-
     /// Total number of tracked references.
     pub fn count(self: *const ReferenceTable) u32 {
         return @intCast(self.symbol_ids.items.len);
     }
 
-    /// Sort all reference arrays by symbol_id so each symbol's references
-    /// form a contiguous range. Unresolved refs (symbol_id == .none,
-    /// value 0xFFFFFFFF) sort to the end. Call once after resolveUnresolved.
     /// Sort references by symbol_id using counting sort (O(n + k)).  Unresolved
     /// refs (symbol_id = .none) sort to the end.  The input `max_symbol` is the
     /// number of distinct symbol IDs, used to size the counting buckets.
-    pub fn sortBySymbol(self: *ReferenceTable, allocator: std.mem.Allocator) !void {
-        return self.sortBySymbolWithMax(allocator, null);
-    }
-
     pub fn sortBySymbolWithMax(self: *ReferenceTable, allocator: std.mem.Allocator, max_symbol: ?u32) !void {
         const n: u32 = @intCast(self.symbol_ids.items.len);
         if (n == 0) return;

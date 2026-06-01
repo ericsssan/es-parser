@@ -136,10 +136,6 @@ pub const EventStream = struct {
         }
     }
 
-    pub inline fn pushAssumeCapacity(self: *EventStream, ev: Event) void {
-        self.events.appendAssumeCapacity(ev);
-    }
-
     pub fn ensureCapacity(self: *EventStream, alloc: std.mem.Allocator, n: usize) !void {
         try self.events.ensureTotalCapacity(alloc, n);
     }

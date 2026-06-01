@@ -944,43 +944,6 @@ pub const Ast = struct {
         const end = start + self.tokens.items(.len)[tok];
         return .{ .start = start, .end = end };
     }
-
-    /// Returns true if `callee_node` is a call to a known mutating Object/Reflect method
-    /// (Object.assign, Object.defineProperty, Reflect.set, etc.) whose first argument is
-    /// a write target.  Used by the semantic analyser to set is_member_written on namespace
-    /// import bindings passed as the target.
-    /// @takes node_index_of(self)
-    pub fn isMutatingCall(self: *const Ast, callee_node: NodeIndex) bool {
-        if (callee_node == .none) return false;
-        var node = callee_node;
-        // Strip grouping (parenthesised callee like `(Object?.defineProperty)(...)`)
-        while (self.nodeTag(node) == .grouping_expr) {
-            node = self.nodeData(node).lhs;
-            if (node == .none) return false;
-        }
-        const tag = self.nodeTag(node);
-        if (tag != .member_expr and tag != .optional_member_expr) return false;
-        const callee_data = self.nodeData(node);
-        const base = callee_data.lhs;
-        if (base == .none or self.nodeTag(base) != .identifier) return false;
-        const base_name = self.tokenText(self.nodeMainToken(base));
-        // Property name is the main token of the member expression itself
-        const prop_name = self.tokenText(self.nodeMainToken(node));
-        if (std.mem.eql(u8, base_name, "Object")) {
-            return std.mem.eql(u8, prop_name, "assign") or
-                   std.mem.eql(u8, prop_name, "defineProperty") or
-                   std.mem.eql(u8, prop_name, "defineProperties") or
-                   std.mem.eql(u8, prop_name, "setPrototypeOf") or
-                   std.mem.eql(u8, prop_name, "freeze");
-        }
-        if (std.mem.eql(u8, base_name, "Reflect")) {
-            return std.mem.eql(u8, prop_name, "defineProperty") or
-                   std.mem.eql(u8, prop_name, "deleteProperty") or
-                   std.mem.eql(u8, prop_name, "set") or
-                   std.mem.eql(u8, prop_name, "setPrototypeOf");
-        }
-        return false;
-    }
 };
 
 // ── Helpers ────────────────────────────────────────────────

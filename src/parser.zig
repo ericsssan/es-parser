@@ -5211,11 +5211,6 @@ pub const Parser = struct {
         });
     }
 
-    /// Parse `binding [: Type] = init`.
-    pub fn parseDeclarator(self: *Parser) Error!NodeIndex {
-        return self.parseDeclaratorConst(false, false);
-    }
-
     /// Parse `binding [: Type] = init`, with optional const-requires-initializer check.
     fn parseDeclaratorConst(self: *Parser, is_const: bool, is_ts_ambient: bool) Error!NodeIndex {
         const main_tok: u32 = self.tokIdx();

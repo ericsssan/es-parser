@@ -343,16 +343,6 @@ pub const ScopeTree = struct {
         return false;
     }
 
-    /// Find the nearest scope of a specific kind at or above `id`.
-    pub fn nearestOfKind(self: *const ScopeTree, id: ScopeId, target: ScopeKind) ScopeId {
-        var cur = id;
-        while (cur.isValid()) {
-            if (self.kind(cur) == target) return cur;
-            cur = self.parent(cur);
-        }
-        return .none;
-    }
-
     /// Return the total number of scopes in the tree.
     pub fn len(self: *const ScopeTree) u32 {
         return @intCast(self.kinds.items.len);

@@ -60,13 +60,6 @@ pub const SymbolFlags = packed struct(u16) {
     pub fn isImmutable(self: SymbolFlags) bool {
         return self.is_const or self.is_import;
     }
-
-    /// Returns true if the symbol has any declaration flag set.
-    pub fn isDeclared(self: SymbolFlags) bool {
-        return self.is_var or self.is_let or self.is_const or
-            self.is_function or self.is_class or self.is_parameter or
-            self.is_catch_param or self.is_import;
-    }
 };
 
 // ── Binding kind ───────────────────────────────────────────
@@ -195,20 +188,6 @@ pub const SymbolTable = struct {
     decl_nodes: std.ArrayList(ast.NodeIndex) = .empty,
     /// Range of references to this symbol in an external reference table.
     references: std.ArrayList(RefRange) = .empty,
-    /// For variable declarations with an initializer: first symbol-table index of a symbol
-    /// declared *inside* the initializer expression. 0 = no init or no inner symbols.
-    /// Used by no-shadow `ignoreOnInitialization` together with `init_sym_ends`.
-    init_sym_starts: std.ArrayList(u32) = .empty,
-    /// One past the last symbol-table index of a symbol declared inside the initializer.
-    /// A symbol `id` is in outer `outer`'s init iff:
-    ///   outer.init_sym_starts <= id < outer.init_sym_ends  (and both > 0).
-    init_sym_ends: std.ArrayList(u32) = .empty,
-    /// The AST node of the initializer expression itself (e.g. the RHS of a VariableDeclarator,
-    /// the right of an AssignmentPattern default, or the iterable of a for-in/of statement).
-    /// `.none` when there is no initializer.  Used by `ignoreOnInitialization` to distinguish
-    /// "inner fn IS the direct init value" (same node → must NOT skip) from "inner fn is a
-    /// callback argument inside the init" (different node → may skip).
-    init_nodes: std.ArrayList(ast.NodeIndex) = .empty,
 
     gpa: std.mem.Allocator,
 
@@ -223,9 +202,6 @@ pub const SymbolTable = struct {
         try self.scope_ids.ensureTotalCapacity(self.gpa, n);
         try self.decl_nodes.ensureTotalCapacity(self.gpa, n);
         try self.references.ensureTotalCapacity(self.gpa, n);
-        try self.init_sym_starts.ensureTotalCapacity(self.gpa, n);
-        try self.init_sym_ends.ensureTotalCapacity(self.gpa, n);
-        try self.init_nodes.ensureTotalCapacity(self.gpa, n);
     }
 
     pub fn deinit(self: *SymbolTable) void {
@@ -235,9 +211,6 @@ pub const SymbolTable = struct {
         self.scope_ids.deinit(self.gpa);
         self.decl_nodes.deinit(self.gpa);
         self.references.deinit(self.gpa);
-        self.init_sym_starts.deinit(self.gpa);
-        self.init_sym_ends.deinit(self.gpa);
-        self.init_nodes.deinit(self.gpa);
         self.* = undefined;
     }
 
@@ -262,9 +235,6 @@ pub const SymbolTable = struct {
         self.scope_ids.appendAssumeCapacity(scope_id);
         self.decl_nodes.appendAssumeCapacity(decl_node);
         self.references.appendAssumeCapacity(.{});
-        self.init_sym_starts.appendAssumeCapacity(0);
-        self.init_sym_ends.appendAssumeCapacity(0);
-        self.init_nodes.appendAssumeCapacity(.none);
 
         return SymbolId.fromInt(id);
     }
@@ -291,13 +261,6 @@ pub const SymbolTable = struct {
         return self.decl_nodes.items[id.toInt()];
     }
 
-    /// Returns the [start, end) symbol-index range of symbols declared inside `id`'s init.
-    /// Both values are 0 when the symbol has no initializer or no inner symbols.
-    pub fn getInitRange(self: *const SymbolTable, id: SymbolId) struct { start: u32, end: u32 } {
-        const idx = id.toInt();
-        return .{ .start = self.init_sym_starts.items[idx], .end = self.init_sym_ends.items[idx] };
-    }
-
     pub fn getRefRange(self: *const SymbolTable, id: SymbolId) RefRange {
         return self.references.items[id.toInt()];
     }
@@ -306,20 +269,6 @@ pub const SymbolTable = struct {
 
     pub fn setFlags(self: *SymbolTable, id: SymbolId, symbol_flags: SymbolFlags) void {
         self.flags.items[id.toInt()] = symbol_flags;
-    }
-
-    pub fn setInitRange(self: *SymbolTable, id: SymbolId, start: u32, end: u32) void {
-        const idx = id.toInt();
-        self.init_sym_starts.items[idx] = start;
-        self.init_sym_ends.items[idx] = end;
-    }
-
-    pub fn getInitNode(self: *const SymbolTable, id: SymbolId) ast.NodeIndex {
-        return self.init_nodes.items[id.toInt()];
-    }
-
-    pub fn setInitNode(self: *SymbolTable, id: SymbolId, node: ast.NodeIndex) void {
-        self.init_nodes.items[id.toInt()] = node;
     }
 
     pub fn setRefRange(self: *SymbolTable, id: SymbolId, range: RefRange) void {
@@ -341,11 +290,6 @@ pub const SymbolTable = struct {
     /// Mark a symbol as used in a typeof expression.
     pub inline fn markTypeOf(self: *SymbolTable, id: SymbolId) void {
         self.flags.items[id.toInt()].is_type_of = true;
-    }
-
-    /// Mark a symbol as having a member written (e.g. `ns.prop = 0` marks `ns`).
-    pub fn markMemberWritten(self: *SymbolTable, id: SymbolId) void {
-        self.flags.items[id.toInt()].is_member_written = true;
     }
 
     /// Mark a symbol as exported.
