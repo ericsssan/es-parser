@@ -1,10 +1,24 @@
-//! Parser module public API — re-exports all parser types.
+//! es-parser public API.
+//!
+//! ── Stable API ───────────────────────────────────────────────────────
+//! The entry points and data types below are the supported surface:
+//!   • Pipeline:  `Lexer.tokenize*` → `Parser.parse*` → `semantic.SemanticAnalyzer.analyze*`
+//!   • Data:      `ast.Ast`, `diagnostic.Diagnostic`, `token.Language`,
+//!                `scope`, `symbol`, `reference`
+//! See README.md for usage.
+//!
+//! ── Advanced exports ─────────────────────────────────────────────────
+//! The modules under "Advanced" expose semantic-analysis internals (CFG,
+//! event stream, parent indices, memory layout). They are consumed by
+//! downstream tooling built on this parser and are re-exported for that
+//! reason, but they are lower-level and less stable than the API above —
+//! prefer the `semantic` facade where it covers your need.
 
+// ── Stable API ───────────────────────────────────────────────────────
 pub const ast = @import("ast.zig");
 pub const token = @import("token.zig");
 pub const span = @import("span.zig");
 pub const diagnostic = @import("diagnostic.zig");
-pub const debug = @import("debug.zig");
 
 pub const Lexer = @import("lexer.zig");
 pub const Parser = @import("parser.zig").Parser;
@@ -13,6 +27,8 @@ pub const symbol = @import("symbol.zig");
 pub const reference = @import("reference.zig");
 pub const semantic = @import("semantic.zig");
 
+// ── Advanced — lower-level internals, prefer `semantic` above ─────────
+pub const debug = @import("debug.zig");
 pub const code_path = @import("code_path.zig");
 pub const layout = @import("layout.zig");
 pub const parent_builder = @import("parent_builder.zig");

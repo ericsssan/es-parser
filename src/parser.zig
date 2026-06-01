@@ -8730,9 +8730,11 @@ pub const Parser = struct {
     // Expression parsing (delegated to parser/expressions.zig)
     // ────────────────────────────────────────────────────────────
 
+    // Internal sibling modules. Kept private — sibling files reach typescript/
+    // jsx via their own `@import`, and these are implementation detail, not part
+    // of the parser's public surface.
     const expressions = @import("expressions.zig");
-    pub const typescript = @import("typescript.zig");
-    pub const jsx = @import("jsx.zig");
+    const typescript = @import("typescript.zig");
 
     pub fn parseExpression(self: *Parser) Error!NodeIndex {
         return expressions.parseExpression(self);

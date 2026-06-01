@@ -22,7 +22,6 @@ pub const Diagnostic = struct {
     message: []const u8,
     span: Span,
     severity: Severity,
-    rule_name: []const u8 = "",
 
     /// Format as "file:line:col: severity: message"
     pub fn format(

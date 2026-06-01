@@ -31,6 +31,22 @@ fn analyzeModuleSource(source: []const u8) !semantic.SemanticResult {
     return semantic.SemanticAnalyzer.analyzeModule(allocator, &tree, true);
 }
 
+test "analyze without scope-event emission errors instead of returning empty" {
+    const allocator = testing.allocator;
+    const source = "let x = 1; x;";
+    var _lr = try Lexer.tokenize(allocator, source);
+    defer _lr.deinit(allocator);
+    var tokens = _lr.tokens;
+    // emit_events defaults to false here, so no scope events are produced.
+    var tree = try Parser.parseWithOptions(allocator, source, tokens.slice(), .{});
+    defer tree.deinit(allocator);
+    try testing.expectEqual(@as(usize, 0), tree.scope_events.len);
+    try testing.expectError(
+        semantic.SemanticAnalyzer.Error.MissingScopeEvents,
+        semantic.SemanticAnalyzer.analyze(allocator, &tree),
+    );
+}
+
 // ── Structural test helpers ─────────────────────────────────
 //
 // Unlike count-based smoke checks (`symbols.count() > 0`), these assert the

@@ -112,7 +112,20 @@ pub const SemanticAnalyzer = struct {
         return analyzeWithOptions(allocator, ast, .{ .is_module = true, .globals = globals });
     }
 
+    /// Returned when `analyze*` is called on an AST that was parsed without
+    /// scope-event emission. Semantic analysis is driven entirely by the
+    /// parser's event stream, so an empty stream would otherwise yield a
+    /// structurally-valid but empty result (no scopes/symbols/references) with
+    /// no indication anything went wrong. Parse with `Parser.parse` (events on
+    /// by default) or `parseWithOptions(.. .{ .emit_events = true })`.
+    pub const Error = error{MissingScopeEvents};
+
     pub fn analyzeWithOptions(allocator: std.mem.Allocator, ast: *const Ast, opts: Options) !SemanticResult {
+        // A parse with emission enabled always emits at least the program
+        // scope_open (even for empty source), so an empty stream unambiguously
+        // means events were never emitted — fail loudly instead of silently
+        // returning an empty result.
+        if (ast.scope_events.len == 0) return Error.MissingScopeEvents;
         var result = try event_resolver.resolveFull(allocator, ast, ast.scope_events, .{
             .skip_ref_ranges = !opts.build_ref_ranges,
             .globals = opts.globals,
