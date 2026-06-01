@@ -111,11 +111,12 @@ pub fn combineParts(
     // Stamp per-reference seg_id + dead-node bits. Both arrays were filled in
     // the same `.reference` event order, so index k aligns by construction.
     const n = @min(s.ref_event_to_id.len, c.ref_event_seg_ids.len);
+    const seg_col = s.references.list.items(.seg_id);
     var k: usize = 0;
     while (k < n) : (k += 1) {
         const rid = s.ref_event_to_id[k];
         if (rid == .none) continue;
-        s.references.seg_ids.items[rid.toInt()] = c.ref_event_seg_ids[k];
+        seg_col[rid.toInt()] = c.ref_event_seg_ids[k];
         // Dead-reference: mark the ref's node unreachable. Node index lives in
         // the reference table itself — pull it back from there.
         if (c.ref_event_alive[k] == 0) {
@@ -831,7 +832,7 @@ fn resolveFullImpl(
             ref_cache[name_hash & 511] = .{ .hash = name_hash, .sym = sym_id };
             // Track running per-scope count — used by downstream code that
             // expects `bindings_count` to be populated (see semantic.zig).
-            scopes.bindings_count.items[scope_id.toInt()] += 1;
+            scopes.list.items(.bindings_count)[scope_id.toInt()] += 1;
         },
         .reference => {
             // CFG-only fast path: just record side arrays and the dead-node bit.
@@ -849,7 +850,7 @@ fn resolveFullImpl(
             const ref_node: NodeIndex = @enumFromInt(e.node);
             const ref_id = try references.addReference(ref_kind, ref_node, scope_id, .none);
             if (do_cfg) {
-                references.seg_ids.items[ref_id.toInt()] = cpb.currentSegId();
+                references.list.items(.seg_id)[ref_id.toInt()] = cpb.currentSegId();
                 if (!cfg_alive and e.node < node_reachable.len) node_reachable[e.node] = 0;
             }
             if (phase == .scope_only) try ref_event_to_id.append(allocator, ref_id);
@@ -1092,8 +1093,8 @@ fn resolveFullImpl(
     // using hoist_map (O(1) per level) instead of all_entries binary search
     // (O(log N) per level across every lexical scope).
     if (do_scope and !skip_resolve) {
-        const scope_count: u32 = @intCast(scopes.kinds.items.len);
-        const kinds = scopes.kinds.items;
+        const scope_count: u32 = @intCast(scopes.len());
+        const kinds = scopes.list.items(.kind);
         for (unresolved_refs.items) |ur| {
             const ref_id = ur.ref_id;
             const ref_scope = references.getScope(ref_id);
@@ -1178,7 +1179,7 @@ fn resolveFullImpl(
     // file and removes the need for the eager `void globalScope.through` in the runner.
     // Refs that match a global name get resolved here so ref.resolved is non-null;
     // the Zig through CSR excludes implicit_global refs, keeping scope.through clean.
-    if (do_scope and !skip_resolve and opts.globals.len > 0 and scopes.kinds.items.len > 0) {
+    if (do_scope and !skip_resolve and opts.globals.len > 0 and scopes.len() > 0) {
         const global_scope_id = ScopeId.fromInt(0);
         const implicit_flags = symbol_mod.flagsFromBindingKind(.implicit_global);
 
@@ -1237,8 +1238,8 @@ fn resolveFullImpl(
             _ = std.c.clock_gettime(.MONOTONIC, &t_after_resolve);
             st.resolve_unresolved_ns = @intCast((t_after_resolve.sec - post_start_ts.sec) * std.time.ns_per_s + (t_after_resolve.nsec - post_start_ts.nsec));
             st.unresolved_count = unresolved_refs.items.len;
-            st.scope_count = scopes.kinds.items.len;
-            st.symbol_count = symbols.names.items.len;
+            st.scope_count = scopes.len();
+            st.symbol_count = symbols.count();
         }
     }
 
@@ -1303,11 +1304,11 @@ fn buildRefRanges(
     sa: std.mem.Allocator,   // scope_arena — temp arrays freed in bulk
     allocator: std.mem.Allocator, // outer allocator — ref_by_sym persists
 ) ![]ReferenceId {
-    const sym_count: u32 = @intCast(symbols.names.items.len);
+    const sym_count: u32 = @intCast(symbols.count());
     const ref_count: u32 = references.count();
     if (ref_count == 0 or sym_count == 0) return &.{};
 
-    const sym_ids = references.symbol_ids.items;
+    const sym_ids = references.list.items(.symbol_id);
     const buckets = sym_count + 1; // last bucket holds unresolved (.none)
 
     // Pass 1: count refs per symbol.
@@ -1347,15 +1348,15 @@ fn buildScopeBindings(
     symbols: *SymbolTable,
     allocator: std.mem.Allocator,
 ) !void {
-    const sym_count: u32   = @intCast(symbols.names.items.len);
-    const scope_count: u32 = @intCast(scopes.kinds.items.len);
+    const sym_count: u32   = @intCast(symbols.count());
+    const scope_count: u32 = @intCast(scopes.len());
     if (sym_count == 0) return;
 
     // Count symbols per scope.
     const counts = try allocator.alloc(u32, scope_count);
     defer allocator.free(counts);
     @memset(counts, 0);
-    for (symbols.scope_ids.items) |sid| {
+    for (symbols.list.items(.scope_id)) |sid| {
         const s = sid.toInt();
         if (s < scope_count) counts[s] += 1;
     }

@@ -176,18 +176,27 @@ pub const RefRange = struct {
 /// All ArrayLists are unmanaged (Zig 0.16 convention) — the allocator
 /// is passed explicitly to each mutating call via the `gpa` field.
 pub const SymbolTable = struct {
-    /// Symbol name — slice into the source buffer (zero-copy).
-    names: std.ArrayList([]const u8) = .empty,
-    /// Packed flags describing the symbol's properties.
-    flags: std.ArrayList(SymbolFlags) = .empty,
-    /// What kind of binding created this symbol.
-    binding_kinds: std.ArrayList(BindingKind) = .empty,
-    /// Scope where the symbol was declared.
-    scope_ids: std.ArrayList(ScopeId) = .empty,
-    /// AST node of the declaration site.
-    decl_nodes: std.ArrayList(ast.NodeIndex) = .empty,
-    /// Range of references to this symbol in an external reference table.
-    references: std.ArrayList(RefRange) = .empty,
+    /// One symbol row. Stored column-wise via `MultiArrayList` (SoA): when a
+    /// lint rule iterates all names (e.g. naming conventions) it reads a dense
+    /// array of name slices without loading flags/scopes into cache.
+    pub const Entry = struct {
+        /// Symbol name — slice into the source buffer (zero-copy).
+        name: []const u8,
+        /// Packed flags describing the symbol's properties.
+        flags: SymbolFlags,
+        /// What kind of binding created this symbol.
+        binding_kind: BindingKind,
+        /// Scope where the symbol was declared.
+        scope_id: ScopeId,
+        /// AST node of the declaration site.
+        decl_node: ast.NodeIndex,
+        /// Range of references to this symbol in an external reference table.
+        ref_range: RefRange,
+    };
+
+    /// Column-wise symbol storage. Access a column as a slice with
+    /// `list.items(.name)` etc.
+    list: std.MultiArrayList(Entry) = .{},
 
     gpa: std.mem.Allocator,
 
@@ -196,21 +205,11 @@ pub const SymbolTable = struct {
     }
 
     pub fn ensureCapacity(self: *SymbolTable, n: u32) !void {
-        try self.names.ensureTotalCapacity(self.gpa, n);
-        try self.flags.ensureTotalCapacity(self.gpa, n);
-        try self.binding_kinds.ensureTotalCapacity(self.gpa, n);
-        try self.scope_ids.ensureTotalCapacity(self.gpa, n);
-        try self.decl_nodes.ensureTotalCapacity(self.gpa, n);
-        try self.references.ensureTotalCapacity(self.gpa, n);
+        try self.list.ensureTotalCapacity(self.gpa, n);
     }
 
     pub fn deinit(self: *SymbolTable) void {
-        self.names.deinit(self.gpa);
-        self.flags.deinit(self.gpa);
-        self.binding_kinds.deinit(self.gpa);
-        self.scope_ids.deinit(self.gpa);
-        self.decl_nodes.deinit(self.gpa);
-        self.references.deinit(self.gpa);
+        self.list.deinit(self.gpa);
         self.* = undefined;
     }
 
@@ -223,18 +222,20 @@ pub const SymbolTable = struct {
         scope_id: ScopeId,
         decl_node: ast.NodeIndex,
     ) !SymbolId {
-        const id: u32 = @intCast(self.names.items.len);
+        const id: u32 = @intCast(self.list.len);
 
         // Capacity pre-allocated via ensureCapacity(); grow only when exhausted.
-        if (self.names.items.len >= self.names.capacity)
-            try self.ensureCapacity(@intCast(self.names.capacity * 2 + 16));
+        if (self.list.len >= self.list.capacity)
+            try self.ensureCapacity(@intCast(self.list.capacity * 2 + 16));
 
-        self.names.appendAssumeCapacity(name);
-        self.flags.appendAssumeCapacity(symbol_flags);
-        self.binding_kinds.appendAssumeCapacity(binding_kind);
-        self.scope_ids.appendAssumeCapacity(scope_id);
-        self.decl_nodes.appendAssumeCapacity(decl_node);
-        self.references.appendAssumeCapacity(.{});
+        self.list.appendAssumeCapacity(.{
+            .name = name,
+            .flags = symbol_flags,
+            .binding_kind = binding_kind,
+            .scope_id = scope_id,
+            .decl_node = decl_node,
+            .ref_range = .{},
+        });
 
         return SymbolId.fromInt(id);
     }
@@ -242,100 +243,100 @@ pub const SymbolTable = struct {
     // ── Getters ────────────────────────────────────────────
 
     pub fn getName(self: *const SymbolTable, id: SymbolId) []const u8 {
-        return self.names.items[id.toInt()];
+        return self.list.items(.name)[id.toInt()];
     }
 
     pub fn getFlags(self: *const SymbolTable, id: SymbolId) SymbolFlags {
-        return self.flags.items[id.toInt()];
+        return self.list.items(.flags)[id.toInt()];
     }
 
     pub fn getScope(self: *const SymbolTable, id: SymbolId) ScopeId {
-        return self.scope_ids.items[id.toInt()];
+        return self.list.items(.scope_id)[id.toInt()];
     }
 
     pub fn getBindingKind(self: *const SymbolTable, id: SymbolId) BindingKind {
-        return self.binding_kinds.items[id.toInt()];
+        return self.list.items(.binding_kind)[id.toInt()];
     }
 
     pub fn getDeclNode(self: *const SymbolTable, id: SymbolId) ast.NodeIndex {
-        return self.decl_nodes.items[id.toInt()];
+        return self.list.items(.decl_node)[id.toInt()];
     }
 
     pub fn getRefRange(self: *const SymbolTable, id: SymbolId) RefRange {
-        return self.references.items[id.toInt()];
+        return self.list.items(.ref_range)[id.toInt()];
     }
 
     // ── Setters ────────────────────────────────────────────
 
     pub fn setFlags(self: *SymbolTable, id: SymbolId, symbol_flags: SymbolFlags) void {
-        self.flags.items[id.toInt()] = symbol_flags;
+        self.list.items(.flags)[id.toInt()] = symbol_flags;
     }
 
     pub fn setRefRange(self: *SymbolTable, id: SymbolId, range: RefRange) void {
-        self.references.items[id.toInt()] = range;
+        self.list.items(.ref_range)[id.toInt()] = range;
     }
 
     // ── Mutation helpers ───────────────────────────────────
 
     /// Mark a symbol as read/referenced.
     pub inline fn markRead(self: *SymbolTable, id: SymbolId) void {
-        self.flags.items[id.toInt()].is_read = true;
+        self.list.items(.flags)[id.toInt()].is_read = true;
     }
 
     /// Mark a symbol as written/assigned after declaration.
     pub inline fn markWritten(self: *SymbolTable, id: SymbolId) void {
-        self.flags.items[id.toInt()].is_written = true;
+        self.list.items(.flags)[id.toInt()].is_written = true;
     }
 
     /// Mark a symbol as used in a typeof expression.
     pub inline fn markTypeOf(self: *SymbolTable, id: SymbolId) void {
-        self.flags.items[id.toInt()].is_type_of = true;
+        self.list.items(.flags)[id.toInt()].is_type_of = true;
     }
 
     /// Mark a symbol as exported.
     pub fn markExported(self: *SymbolTable, id: SymbolId) void {
-        self.flags.items[id.toInt()].is_export = true;
+        self.list.items(.flags)[id.toInt()].is_export = true;
     }
 
     // ── Queries ────────────────────────────────────────────
 
     /// Check if a symbol is used (read, written, or typeof'd).
     pub fn isUsed(self: *const SymbolTable, id: SymbolId) bool {
-        const f = self.flags.items[id.toInt()];
+        const f = self.list.items(.flags)[id.toInt()];
         return f.is_read or f.is_written or f.is_type_of;
     }
 
     /// Check if a symbol is in the temporal dead zone.
     /// True for let/const/class declarations (they are not hoisted).
     pub fn isInTDZ(self: *const SymbolTable, id: SymbolId) bool {
-        return self.binding_kinds.items[id.toInt()].hasTDZ();
+        return self.list.items(.binding_kind)[id.toInt()].hasTDZ();
     }
 
     /// Check if a symbol is immutable (const or import binding).
     pub fn isImmutable(self: *const SymbolTable, id: SymbolId) bool {
-        return self.binding_kinds.items[id.toInt()].isImmutable();
+        return self.list.items(.binding_kind)[id.toInt()].isImmutable();
     }
 
     /// Check if a symbol is an implicit global (referenced but never declared).
     pub fn isImplicitGlobal(self: *const SymbolTable, id: SymbolId) bool {
-        return self.flags.items[id.toInt()].is_implicit_global;
+        return self.list.items(.flags)[id.toInt()].is_implicit_global;
     }
 
     /// Get the number of symbols in the table.
     pub fn count(self: *const SymbolTable) u32 {
-        return @intCast(self.names.items.len);
+        return @intCast(self.list.len);
     }
 
     // ── Bulk iteration helpers ─────────────────────────────
 
     /// Returns a slice of all symbol names (dense, cache-friendly iteration).
     pub fn allNames(self: *const SymbolTable) []const []const u8 {
-        return self.names.items;
+        return self.list.items(.name);
     }
 
     /// Returns a slice of all symbol flags (dense, cache-friendly iteration).
     pub fn allFlags(self: *const SymbolTable) []const SymbolFlags {
-        return self.flags.items;
+        return self.list.items(.flags);
     }
 };
 

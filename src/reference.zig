@@ -86,53 +86,45 @@ pub const ReferenceKind = enum {
 /// Uses Zig 0.16 unmanaged ArrayLists — the allocator is stored once in the
 /// struct and passed to each mutating call.
 pub const ReferenceTable = struct {
-    /// Resolved symbol for each reference, or `.none` if unresolved.
-    symbol_ids: std.ArrayList(SymbolId),
-    /// How the identifier is used at this reference site.
-    kinds: std.ArrayList(ReferenceKind),
-    /// AST node where the reference occurs.
-    node_ids: std.ArrayList(ast.NodeIndex),
-    /// Scope in which the reference occurs.
-    scope_ids: std.ArrayList(ScopeId),
-    /// For write/read_write references: the expression being written (RHS of
-    /// assignment, VariableDeclarator init, ForIn/Of iterable). `.none` for
-    /// read-only references and update expressions (x++, x--).
-    write_expr_ids: std.ArrayList(ast.NodeIndex),
-    /// Segment ID at which each reference occurs (set by event_resolver during
-    /// code-path analysis; std.math.maxInt(u32) = NONE_SEG if no code path active).
-    seg_ids: std.ArrayList(u32),
+    /// One reference row. Stored column-wise via `MultiArrayList` (SoA) so that
+    /// scanning a single field (e.g. all `symbol_id`s to count unresolved
+    /// references) touches contiguous memory without pulling in node/scope data.
+    pub const Entry = struct {
+        /// Resolved symbol, or `.none` if unresolved.
+        symbol_id: SymbolId,
+        /// How the identifier is used at this reference site.
+        kind: ReferenceKind,
+        /// AST node where the reference occurs.
+        node_id: ast.NodeIndex,
+        /// Scope in which the reference occurs.
+        scope_id: ScopeId,
+        /// For write/read_write references: the expression being written (RHS of
+        /// assignment, VariableDeclarator init, ForIn/Of iterable). `.none` for
+        /// read-only references and update expressions (x++, x--).
+        write_expr_id: ast.NodeIndex,
+        /// Segment ID at which the reference occurs (set by event_resolver during
+        /// code-path analysis; std.math.maxInt(u32) = NONE_SEG if no code path active).
+        seg_id: u32,
+    };
+
+    /// Column-wise reference storage. Access a column as a slice with
+    /// `list.items(.symbol_id)` etc.; the field slices are individually
+    /// contiguous, preserving the cache-friendly SoA layout.
+    list: std.MultiArrayList(Entry) = .{},
 
     /// Allocator used for all internal arrays.
     gpa: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) ReferenceTable {
-        return .{
-            .symbol_ids = .empty,
-            .kinds = .empty,
-            .node_ids = .empty,
-            .scope_ids = .empty,
-            .write_expr_ids = .empty,
-            .seg_ids = .empty,
-            .gpa = allocator,
-        };
+        return .{ .gpa = allocator };
     }
 
     pub fn ensureCapacity(self: *ReferenceTable, n: u32) !void {
-        try self.symbol_ids.ensureTotalCapacity(self.gpa, n);
-        try self.kinds.ensureTotalCapacity(self.gpa, n);
-        try self.node_ids.ensureTotalCapacity(self.gpa, n);
-        try self.scope_ids.ensureTotalCapacity(self.gpa, n);
-        try self.write_expr_ids.ensureTotalCapacity(self.gpa, n);
-        try self.seg_ids.ensureTotalCapacity(self.gpa, n);
+        try self.list.ensureTotalCapacity(self.gpa, n);
     }
 
     pub fn deinit(self: *ReferenceTable) void {
-        self.symbol_ids.deinit(self.gpa);
-        self.kinds.deinit(self.gpa);
-        self.node_ids.deinit(self.gpa);
-        self.scope_ids.deinit(self.gpa);
-        self.write_expr_ids.deinit(self.gpa);
-        self.seg_ids.deinit(self.gpa);
+        self.list.deinit(self.gpa);
     }
 
     /// Add a new reference. The reference starts unresolved (symbol_id = .none).
@@ -147,66 +139,68 @@ pub const ReferenceTable = struct {
         scope_id: ScopeId,
         write_expr: ast.NodeIndex,
     ) !ReferenceId {
-        const index: u32 = @intCast(self.symbol_ids.items.len);
+        const index: u32 = @intCast(self.list.len);
 
         // Capacity pre-allocated via ensureCapacity(); grow only when exhausted.
-        if (self.symbol_ids.items.len >= self.symbol_ids.capacity)
-            try self.ensureCapacity(@intCast(self.symbol_ids.capacity * 2 + 16));
+        if (self.list.len >= self.list.capacity)
+            try self.ensureCapacity(@intCast(self.list.capacity * 2 + 16));
 
-        self.symbol_ids.appendAssumeCapacity(.none);
-        self.kinds.appendAssumeCapacity(kind);
-        self.node_ids.appendAssumeCapacity(node_id);
-        self.scope_ids.appendAssumeCapacity(scope_id);
-        self.write_expr_ids.appendAssumeCapacity(write_expr);
-        self.seg_ids.appendAssumeCapacity(std.math.maxInt(u32));
+        self.list.appendAssumeCapacity(.{
+            .symbol_id = .none,
+            .kind = kind,
+            .node_id = node_id,
+            .scope_id = scope_id,
+            .write_expr_id = write_expr,
+            .seg_id = std.math.maxInt(u32),
+        });
 
         return ReferenceId.fromInt(index);
     }
 
     /// Resolve a previously-unresolved reference to a symbol.
     pub fn resolve(self: *ReferenceTable, ref_id: ReferenceId, symbol_id: SymbolId) void {
-        self.symbol_ids.items[ref_id.toInt()] = symbol_id;
+        self.list.items(.symbol_id)[ref_id.toInt()] = symbol_id;
     }
 
     /// Get the symbol a reference is resolved to (`.none` if unresolved).
     pub fn getSymbol(self: *const ReferenceTable, ref_id: ReferenceId) SymbolId {
-        return self.symbol_ids.items[ref_id.toInt()];
+        return self.list.items(.symbol_id)[ref_id.toInt()];
     }
 
     /// Check if a reference has been resolved to a symbol.
     pub fn isResolved(self: *const ReferenceTable, ref_id: ReferenceId) bool {
-        return self.symbol_ids.items[ref_id.toInt()] != .none;
+        return self.list.items(.symbol_id)[ref_id.toInt()] != .none;
     }
 
     /// Get the kind of reference (read, write, read_write, type_of).
     pub fn getKind(self: *const ReferenceTable, ref_id: ReferenceId) ReferenceKind {
-        return self.kinds.items[ref_id.toInt()];
+        return self.list.items(.kind)[ref_id.toInt()];
     }
 
     /// Get the AST node where this reference occurs.
     pub fn getNode(self: *const ReferenceTable, ref_id: ReferenceId) ast.NodeIndex {
-        return self.node_ids.items[ref_id.toInt()];
+        return self.list.items(.node_id)[ref_id.toInt()];
     }
 
     /// Get the scope in which this reference occurs.
     pub fn getScope(self: *const ReferenceTable, ref_id: ReferenceId) ScopeId {
-        return self.scope_ids.items[ref_id.toInt()];
+        return self.list.items(.scope_id)[ref_id.toInt()];
     }
 
     /// Total number of tracked references.
     pub fn count(self: *const ReferenceTable) u32 {
-        return @intCast(self.symbol_ids.items.len);
+        return @intCast(self.list.len);
     }
 
     /// Sort references by symbol_id using counting sort (O(n + k)).  Unresolved
     /// refs (symbol_id = .none) sort to the end.  The input `max_symbol` is the
     /// number of distinct symbol IDs, used to size the counting buckets.
     pub fn sortBySymbolWithMax(self: *ReferenceTable, allocator: std.mem.Allocator, max_symbol: ?u32) !void {
-        const n: u32 = @intCast(self.symbol_ids.items.len);
+        const n: u32 = @intCast(self.list.len);
         if (n == 0) return;
 
         // Count unresolved refs (sort key = k, placed at end).
-        const syms = self.symbol_ids.items;
+        const syms = self.list.items(.symbol_id);
         var k: u32 = 0;
         if (max_symbol) |m| {
             k = m;
@@ -254,12 +248,12 @@ pub const ReferenceTable = struct {
 
         // Step 4: apply permutation in place via cycle decomposition — one copy
         // per element instead of 2× full-array copies for each of 5 fields.
-        try applyPermutation(SymbolId,      self.symbol_ids.items,    new_pos, allocator);
-        try applyPermutation(ReferenceKind, self.kinds.items,         new_pos, allocator);
-        try applyPermutation(ast.NodeIndex, self.node_ids.items,      new_pos, allocator);
-        try applyPermutation(ScopeId,       self.scope_ids.items,     new_pos, allocator);
-        try applyPermutation(ast.NodeIndex, self.write_expr_ids.items, new_pos, allocator);
-        try applyPermutation(u32,           self.seg_ids.items,       new_pos, allocator);
+        try applyPermutation(SymbolId,      self.list.items(.symbol_id),     new_pos, allocator);
+        try applyPermutation(ReferenceKind, self.list.items(.kind),          new_pos, allocator);
+        try applyPermutation(ast.NodeIndex, self.list.items(.node_id),       new_pos, allocator);
+        try applyPermutation(ScopeId,       self.list.items(.scope_id),      new_pos, allocator);
+        try applyPermutation(ast.NodeIndex, self.list.items(.write_expr_id), new_pos, allocator);
+        try applyPermutation(u32,           self.list.items(.seg_id),        new_pos, allocator);
     }
 
     /// In-place permute `arr[new_pos[i]] = arr[i]` using cycle decomposition.
@@ -278,7 +272,7 @@ pub const ReferenceTable = struct {
     /// Count unresolved references (potential globals or errors).
     pub fn unresolvedCount(self: *const ReferenceTable) u32 {
         var n: u32 = 0;
-        for (self.symbol_ids.items) |sid| {
+        for (self.list.items(.symbol_id)) |sid| {
             if (sid == .none) n += 1;
         }
         return n;

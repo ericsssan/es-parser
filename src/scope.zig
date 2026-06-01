@@ -98,59 +98,41 @@ pub const ScopeFlags = packed struct(u16) {
 /// Bindings are not stored here; instead `bindings_start` and
 /// `bindings_count` index into the companion `SymbolTable`.
 pub const ScopeTree = struct {
-    kinds: std.ArrayList(ScopeKind),
-    flags: std.ArrayList(ScopeFlags),
-    parents: std.ArrayList(ScopeId),
-    first_child: std.ArrayList(ScopeId),
-    last_child: std.ArrayList(ScopeId),
-    next_sibling: std.ArrayList(ScopeId),
-    node_ids: std.ArrayList(ast.NodeIndex),
-    bindings_start: std.ArrayList(u32),
-    bindings_count: std.ArrayList(u32),
+    /// One scope row. Stored column-wise via `MultiArrayList` (SoA). A single
+    /// backing allocation keeps every column the same length even across grows
+    /// — unlike parallel `ArrayList`s, whose per-element-size capacity rounding
+    /// otherwise drifts out of sync.
+    pub const Entry = struct {
+        kind: ScopeKind,
+        flags: ScopeFlags,
+        parent: ScopeId,
+        first_child: ScopeId,
+        last_child: ScopeId,
+        next_sibling: ScopeId,
+        node_id: ast.NodeIndex,
+        bindings_start: u32,
+        bindings_count: u32,
+    };
+
+    /// Column-wise scope storage. Access a column with `list.items(.kind)` etc.
+    list: std.MultiArrayList(Entry) = .{},
 
     gpa: std.mem.Allocator,
 
     // ── Lifecycle ──────────────────────────────────────────
 
-    /// Pre-allocate capacity for `n` scopes across all 9 parallel arrays in one call.
-    /// Eliminates per-scope ensureUnusedCapacity overhead in the hot addScope path.
+    /// Pre-allocate capacity for `n` scopes in one call. Eliminates per-scope
+    /// ensureUnusedCapacity overhead in the hot addScope path.
     pub fn ensureCapacity(self: *ScopeTree, n: u32) !void {
-        try self.kinds.ensureTotalCapacity(self.gpa, n);
-        try self.flags.ensureTotalCapacity(self.gpa, n);
-        try self.parents.ensureTotalCapacity(self.gpa, n);
-        try self.first_child.ensureTotalCapacity(self.gpa, n);
-        try self.last_child.ensureTotalCapacity(self.gpa, n);
-        try self.next_sibling.ensureTotalCapacity(self.gpa, n);
-        try self.node_ids.ensureTotalCapacity(self.gpa, n);
-        try self.bindings_start.ensureTotalCapacity(self.gpa, n);
-        try self.bindings_count.ensureTotalCapacity(self.gpa, n);
+        try self.list.ensureTotalCapacity(self.gpa, n);
     }
 
     pub fn init(allocator: std.mem.Allocator) ScopeTree {
-        return .{
-            .kinds = .empty,
-            .flags = .empty,
-            .parents = .empty,
-            .first_child = .empty,
-            .last_child = .empty,
-            .next_sibling = .empty,
-            .node_ids = .empty,
-            .bindings_start = .empty,
-            .bindings_count = .empty,
-            .gpa = allocator,
-        };
+        return .{ .gpa = allocator };
     }
 
     pub fn deinit(self: *ScopeTree) void {
-        self.kinds.deinit(self.gpa);
-        self.flags.deinit(self.gpa);
-        self.parents.deinit(self.gpa);
-        self.first_child.deinit(self.gpa);
-        self.last_child.deinit(self.gpa);
-        self.next_sibling.deinit(self.gpa);
-        self.node_ids.deinit(self.gpa);
-        self.bindings_start.deinit(self.gpa);
-        self.bindings_count.deinit(self.gpa);
+        self.list.deinit(self.gpa);
     }
 
     // ── Mutation ───────────────────────────────────────────
@@ -170,7 +152,7 @@ pub const ScopeTree = struct {
         parent_id: ScopeId,
         node_id: ast.NodeIndex,
     ) !ScopeId {
-        const idx: u32 = @intCast(self.kinds.items.len);
+        const idx: u32 = @intCast(self.list.len);
         const id = ScopeId.fromInt(idx);
 
         // Derive initial flags from the scope kind.
@@ -222,30 +204,27 @@ pub const ScopeTree = struct {
             }
         }
 
-        // ArrayList.ensureTotalCapacity rounds up differently per element size,
-        // so the 9 parallel arrays drift out of sync after grows (kinds is u8,
-        // parents is u32 — different power-of-2 rounding gives different
-        // actual capacities). Use try append on each (it ensures unused
-        // capacity per-array).
-        try self.kinds.append(self.gpa, scope_kind);
-        try self.flags.append(self.gpa, scope_flags);
-        try self.parents.append(self.gpa, parent_id);
-        try self.first_child.append(self.gpa, .none);
-        try self.last_child.append(self.gpa, .none);
-        try self.next_sibling.append(self.gpa, .none);
-        try self.node_ids.append(self.gpa, node_id);
-        try self.bindings_start.append(self.gpa, 0);
-        try self.bindings_count.append(self.gpa, 0);
+        try self.list.append(self.gpa, .{
+            .kind = scope_kind,
+            .flags = scope_flags,
+            .parent = parent_id,
+            .first_child = .none,
+            .last_child = .none,
+            .next_sibling = .none,
+            .node_id = node_id,
+            .bindings_start = 0,
+            .bindings_count = 0,
+        });
 
         // Link into the parent's child list — O(1) via last_child pointer.
         if (parent_id.isValid()) {
-            const last = self.last_child.items[parent_id.toInt()];
+            const last = self.list.items(.last_child)[parent_id.toInt()];
             if (!last.isValid()) {
-                self.first_child.items[parent_id.toInt()] = id;
+                self.list.items(.first_child)[parent_id.toInt()] = id;
             } else {
-                self.next_sibling.items[last.toInt()] = id;
+                self.list.items(.next_sibling)[last.toInt()] = id;
             }
-            self.last_child.items[parent_id.toInt()] = id;
+            self.list.items(.last_child)[parent_id.toInt()] = id;
         }
 
         return id;
@@ -253,38 +232,38 @@ pub const ScopeTree = struct {
 
     /// Set the bindings range for a scope (index into the symbol table).
     pub fn setBindings(self: *ScopeTree, id: ScopeId, start: u32, count: u32) void {
-        self.bindings_start.items[id.toInt()] = start;
-        self.bindings_count.items[id.toInt()] = count;
+        self.list.items(.bindings_start)[id.toInt()] = start;
+        self.list.items(.bindings_count)[id.toInt()] = count;
     }
 
     pub fn setFlags(self: *ScopeTree, id: ScopeId, scope_flags: ScopeFlags) void {
-        self.flags.items[id.toInt()] = scope_flags;
+        self.list.items(.flags)[id.toInt()] = scope_flags;
     }
 
     // ── Read-only accessors ────────────────────────────────
 
     pub fn parent(self: *const ScopeTree, id: ScopeId) ScopeId {
-        return self.parents.items[id.toInt()];
+        return self.list.items(.parent)[id.toInt()];
     }
 
     pub fn kind(self: *const ScopeTree, id: ScopeId) ScopeKind {
-        return self.kinds.items[id.toInt()];
+        return self.list.items(.kind)[id.toInt()];
     }
 
     pub fn getFlags(self: *const ScopeTree, id: ScopeId) ScopeFlags {
-        return self.flags.items[id.toInt()];
+        return self.list.items(.flags)[id.toInt()];
     }
 
     pub fn nodeId(self: *const ScopeTree, id: ScopeId) ast.NodeIndex {
-        return self.node_ids.items[id.toInt()];
+        return self.list.items(.node_id)[id.toInt()];
     }
 
     pub fn getBindingsStart(self: *const ScopeTree, id: ScopeId) u32 {
-        return self.bindings_start.items[id.toInt()];
+        return self.list.items(.bindings_start)[id.toInt()];
     }
 
     pub fn getBindingsCount(self: *const ScopeTree, id: ScopeId) u32 {
-        return self.bindings_count.items[id.toInt()];
+        return self.list.items(.bindings_count)[id.toInt()];
     }
 
     // ── Traversal helpers ──────────────────────────────────
@@ -345,7 +324,7 @@ pub const ScopeTree = struct {
 
     /// Return the total number of scopes in the tree.
     pub fn len(self: *const ScopeTree) u32 {
-        return @intCast(self.kinds.items.len);
+        return @intCast(self.list.len);
     }
 };
 
@@ -461,11 +440,11 @@ test "sibling linkage" {
     const c = try tree.addScope(.block, global, .none);
 
     // first_child of global should be `a`.
-    try std.testing.expectEqual(a, tree.first_child.items[global.toInt()]);
+    try std.testing.expectEqual(a, tree.list.items(.first_child)[global.toInt()]);
     // Siblings: a -> b -> c -> none.
-    try std.testing.expectEqual(b, tree.next_sibling.items[a.toInt()]);
-    try std.testing.expectEqual(c, tree.next_sibling.items[b.toInt()]);
-    try std.testing.expectEqual(ScopeId.none, tree.next_sibling.items[c.toInt()]);
+    try std.testing.expectEqual(b, tree.list.items(.next_sibling)[a.toInt()]);
+    try std.testing.expectEqual(c, tree.list.items(.next_sibling)[b.toInt()]);
+    try std.testing.expectEqual(ScopeId.none, tree.list.items(.next_sibling)[c.toInt()]);
 }
 
 test "isAncestor" {
