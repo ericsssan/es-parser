@@ -735,22 +735,3 @@ fn switchBodyAlwaysTerminates(
 
     return suffix_terminates;
 }
-
-// ── Back-compat bench debug stats (kept as unused no-ops) ────────────
-//
-// The tree walker used to populate these counters; the event-driven path
-// does not.  They remain so the benchmark harness compiles.
-pub const DEBUG_RESOLVE_STATS: bool = false;
-pub var debug_resolve_lookups: u64 = 0;
-pub var debug_resolve_calls: u64 = 0;
-pub var debug_resolve_hits: u64 = 0;
-pub var debug_resolve_depth_sum: u64 = 0;
-
-pub const DEBUG_VISIT_STATS: bool = false;
-pub var debug_visit_nodes: u64 = 0;
-pub var debug_visit_tag_counts: [256]u64 = @splat(0);
-pub var debug_enter_scope: u64 = 0;
-pub var debug_declare_binding: u64 = 0;
-pub var debug_add_reference: u64 = 0;
-pub var debug_visit_sub_range_calls: u64 = 0;
-pub var debug_visit_sub_range_items: u64 = 0;
