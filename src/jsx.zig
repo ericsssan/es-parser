@@ -28,6 +28,8 @@ const Error = parser_mod.Error;
 ///
 /// Dispatches to fragment parsing (`<>`) or element parsing (`<tag`).
 pub fn parseJsxElement(p: *Parser) Error!NodeIndex {
+    try p.enterRecursion();
+    defer p.leaveRecursion();
     // Fragment: `<>children</>`
     if (p.peek() == .greater_than) {
         return parseJsxFragment(p);

@@ -439,3 +439,58 @@ test "mongolian vowel separator between var and name is SyntaxError" {
     try testing.expect(tree.errors.len > 0);
 }
 
+
+// ── Deep-nesting recursion guard (stack-overflow protection) ────────
+//
+// Pathologically nested input must be rejected with a diagnostic — not
+// abort the process via native stack overflow. The recursive-descent
+// parser caps nesting depth at `Parser.max_recursion_depth`; past that it
+// emits "maximum nesting depth … exceeded" and recovers like any other
+// syntax error. Each vector below nests an order of magnitude deeper than
+// the cap; before the guard existed these crashed the process. The test
+// surviving (and reporting errors rather than accepting) is the regression
+// check. Vectors cover every guarded recursion chokepoint: expressions,
+// statements, binding patterns, TS types, and JSX elements.
+
+fn expectRejectsDeepNesting(
+    prefix: []const u8,
+    unit: []const u8,
+    suffix: []const u8,
+    reps: usize,
+    language: es_parser.token.Language,
+) !void {
+    const allocator = testing.allocator;
+    const buf = try allocator.alloc(u8, prefix.len + unit.len * reps + suffix.len);
+    defer allocator.free(buf);
+    var w: usize = 0;
+    @memcpy(buf[w..][0..prefix.len], prefix);
+    w += prefix.len;
+    for (0..reps) |_| {
+        @memcpy(buf[w..][0..unit.len], unit);
+        w += unit.len;
+    }
+    @memcpy(buf[w..][0..suffix.len], suffix);
+
+    var lr = try Lexer.tokenizeWithLanguage(allocator, buf, language);
+    defer lr.deinit(allocator);
+    // The parser recovers internally, so an over-deep parse returns an Ast
+    // carrying diagnostics rather than raising; tolerate a raised
+    // ParseError too. Either way it must not crash and must reject.
+    var tree = Parser.parseWithOptions(allocator, buf, lr.tokens.slice(), .{ .language = language }) catch |e| {
+        try testing.expectEqual(error.ParseError, e);
+        return;
+    };
+    defer tree.deinit(allocator);
+    try testing.expect(tree.errors.len > 0);
+}
+
+test "deeply nested input is rejected, not a stack overflow" {
+    // An order of magnitude beyond the recursion cap — would overflow the
+    // native stack if the depth guard were removed.
+    const reps = @as(usize, Parser.max_recursion_depth) * 12;
+    try expectRejectsDeepNesting("", "(", "", reps, .js); // expressions (parsePrimaryExpression)
+    try expectRejectsDeepNesting("", "{", "", reps, .js); // statements (parseStatement)
+    try expectRejectsDeepNesting("let ", "[", "", reps, .js); // binding patterns (parseBindingPattern)
+    try expectRejectsDeepNesting("type T=", "(", "", reps, .ts); // TS types (parseType)
+    try expectRejectsDeepNesting("x=", "<a>", "1", reps, .tsx); // JSX (parseJsxElement)
+}

@@ -2385,6 +2385,8 @@ fn checkStrictOctalString(p: *Parser) !void {
 // =====================================================================
 
 pub fn parsePrimaryExpression(p: *Parser) Error!NodeIndex {
+    try p.enterRecursion();
+    defer p.leaveRecursion();
     const tag = p.peek();
     return switch (tag) {
         .identifier, .escaped_keyword,
@@ -6658,6 +6660,8 @@ fn parseBindingElement(p: *Parser) Error!NodeIndex {
 }
 
 fn parseBindingPattern(p: *Parser) Error!NodeIndex {
+    try p.enterRecursion();
+    defer p.leaveRecursion();
     return switch (p.peek()) {
         .identifier => blk: {
             // Strict mode: `eval` and `arguments` cannot be binding names.

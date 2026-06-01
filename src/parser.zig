@@ -796,6 +796,11 @@ pub const Parser = struct {
     tok_mut_log: std.ArrayListUnmanaged(TokMut) = .{ .items = &.{}, .capacity = 0 },
     record_tok_muts: bool = false,
 
+    /// Current recursive-descent nesting depth, bumped at each statement /
+    /// expression / type / JSX recursion chokepoint via `enterRecursion`.
+    /// Guards against native stack overflow on pathologically nested input.
+    recursion_depth: u16 = 0,
+
     // Context flags
     in_function: bool,
     in_async: bool,
@@ -2372,6 +2377,37 @@ pub const Parser = struct {
         });
     }
 
+    /// Maximum recursive-descent nesting depth. Parsing pathologically nested
+    /// input (e.g. thousands of nested `(`, `{`, type annotations, or JSX
+    /// elements) would otherwise recurse until the native stack overflows and
+    /// the process aborts. At this depth `enterRecursion` records a diagnostic
+    /// and returns `error.ParseError` instead — recoverable like any other
+    /// syntax error.
+    ///
+    /// Sized for headroom on a standard ~8 MiB stack even in unoptimized
+    /// builds (~13 KiB/level measured in Debug → 400 levels ≈ 5 MiB; far more
+    /// headroom in optimized builds), while staying well beyond the nesting
+    /// depth of any real source.
+    pub const max_recursion_depth: u16 = 400;
+
+    /// Enter one level of recursive descent. Every successful call MUST be
+    /// paired with `defer self.leaveRecursion();` at the call site. When the
+    /// depth cap is reached this records a diagnostic and returns
+    /// `error.ParseError` WITHOUT incrementing, so the (unpaired) error path
+    /// never leaves the counter skewed.
+    pub fn enterRecursion(self: *Parser) Error!void {
+        if (self.recursion_depth >= max_recursion_depth) {
+            try self.emitDiagnosticAtToken(self.tokIdx(), "maximum nesting depth ({d}) exceeded", .{max_recursion_depth});
+            return error.ParseError;
+        }
+        self.recursion_depth += 1;
+    }
+
+    /// Leave one level of recursive descent. Pairs with `enterRecursion`.
+    pub inline fn leaveRecursion(self: *Parser) void {
+        self.recursion_depth -= 1;
+    }
+
     // ────────────────────────────────────────────────────────────
     // Diagnostics
     // ────────────────────────────────────────────────────────────
@@ -2703,6 +2739,8 @@ pub const Parser = struct {
     /// Dispatch to the correct statement/declaration parser based on the
     /// current token.
     pub fn parseStatement(self: *Parser) Error!NodeIndex {
+        try self.enterRecursion();
+        defer self.leaveRecursion();
         const tag = self.peek();
 
         // Fast path: identifier is the most common statement-starting token.
@@ -8747,6 +8785,8 @@ pub const Parser = struct {
     /// Parse a binding pattern. For now, just parse identifiers, plus
     /// basic array/object destructuring.
     pub fn parseBindingPattern(self: *Parser) Error!NodeIndex {
+        try self.enterRecursion();
+        defer self.leaveRecursion();
         switch (self.peek()) {
             .identifier => {
                 try self.checkStrictBinding(self.tokIdx());

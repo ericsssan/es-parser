@@ -28,6 +28,8 @@ const Error = parser_mod.Error;
 ///
 /// Grammar: `NonConditionalType [extends Type ? Type : Type]`
 pub fn parseType(p: *Parser) Error!NodeIndex {
+    try p.enterRecursion();
+    defer p.leaveRecursion();
     // Type predicate: `x is Type` or `asserts x is Type`
     if (p.peek() == .identifier) {
         const text = p.tokenText(p.tokIdx());
