@@ -349,6 +349,31 @@ fn parseJsxAttributeName(p: *Parser) Error!NodeIndex {
 ///   - anything else — treated as JSX text content
 ///
 /// Returns a SubRange of child node indices.
+///
+/// Emit a `jsx_gap_node` for pure-whitespace tokens between the previous child
+/// and the current token, so whitespace-sensitive lint rules (react/jsx-newline
+/// etc.) can inspect inter-child gaps. No-op at the start of the child list or
+/// when the previous child was a text node (text absorbs its trailing gap into
+/// its own end range).
+fn emitJsxGap(p: *Parser, last_child_was_text: bool) !void {
+    if (last_child_was_text or p.tok_i == 0) return;
+    const starts = p.tok_starts_ptr;
+    const lens = p.tok_lens_ptr;
+    const prev_end = starts[p.tok_i - 1] + lens[p.tok_i - 1];
+    const cur_start = starts[p.tok_i];
+    if (prev_end < cur_start) {
+        const gap_node = try p.addNode(.{
+            .tag = .jsx_gap_node,
+            .main_token = @intCast(p.tok_i - 1),
+            .data = .{
+                .lhs = NodeIndex.fromInt(prev_end),
+                .rhs = NodeIndex.fromInt(cur_start),
+            },
+        });
+        try p.scratchPush(gap_node);
+    }
+}
+
 fn parseJsxChildren(p: *Parser) Error!SubRange {
     const scratch_top = p.scratchLen();
     const starts = p.tok_starts_ptr;
@@ -366,42 +391,14 @@ fn parseJsxChildren(p: *Parser) Error!SubRange {
             if (p.peekAt(1) == .slash) {
                 // Emit gap before closing tag only if last child wasn't a text node.
                 // (If last child was text, its end already extends to tok_starts[<].)
-                if (!last_child_was_text and p.tok_i > 0) {
-                    const prev_end = starts[p.tok_i - 1] + lens[p.tok_i - 1];
-                    const cur_start = starts[p.tok_i];
-                    if (prev_end < cur_start) {
-                        const gap_node = try p.addNode(.{
-                            .tag = .jsx_gap_node,
-                            .main_token = @intCast(p.tok_i - 1),
-                            .data = .{
-                                .lhs = NodeIndex.fromInt(prev_end),
-                                .rhs = NodeIndex.fromInt(cur_start),
-                            },
-                        });
-                        try p.scratchPush(gap_node);
-                    }
-                }
+                try emitJsxGap(p, last_child_was_text);
                 break;
             }
 
             // Before consuming a child element, emit any gap from the previous token.
             // This gap is pure whitespace (no text tokens) and needs to be a JSXText node
             // so rules like react/jsx-newline can inspect the whitespace between elements.
-            if (!last_child_was_text and p.tok_i > 0) {
-                const prev_end = starts[p.tok_i - 1] + lens[p.tok_i - 1];
-                const cur_start = starts[p.tok_i];
-                if (prev_end < cur_start) {
-                    const gap_node = try p.addNode(.{
-                        .tag = .jsx_gap_node,
-                        .main_token = @intCast(p.tok_i - 1),
-                        .data = .{
-                            .lhs = NodeIndex.fromInt(prev_end),
-                            .rhs = NodeIndex.fromInt(cur_start),
-                        },
-                    });
-                    try p.scratchPush(gap_node);
-                }
-            }
+            try emitJsxGap(p, last_child_was_text);
 
             // Nested JSX element or fragment: `<Foo>` or `<>`.
             _ = p.advance(); // consume `<`
@@ -414,21 +411,7 @@ fn parseJsxChildren(p: *Parser) Error!SubRange {
         // Expression container: `{expr}` or `{}`.
         if (tag == .l_brace) {
             // Emit gap before expression if last child wasn't a text node.
-            if (!last_child_was_text and p.tok_i > 0) {
-                const prev_end = starts[p.tok_i - 1] + lens[p.tok_i - 1];
-                const cur_start = starts[p.tok_i];
-                if (prev_end < cur_start) {
-                    const gap_node = try p.addNode(.{
-                        .tag = .jsx_gap_node,
-                        .main_token = @intCast(p.tok_i - 1),
-                        .data = .{
-                            .lhs = NodeIndex.fromInt(prev_end),
-                            .rhs = NodeIndex.fromInt(cur_start),
-                        },
-                    });
-                    try p.scratchPush(gap_node);
-                }
-            }
+            try emitJsxGap(p, last_child_was_text);
 
             const brace_tok = p.advance(); // consume `{`
 
