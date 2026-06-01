@@ -92,83 +92,37 @@ pub fn build(b: *std.Build) void {
     //   zig build conformance-test262      -- tests/conformance/test262
     //   zig build conformance-babel        -- tests/conformance/babel/packages/babel-parser/test/fixtures
 
-    const parser_tests_runner_mod = b.createModule(.{
-        .root_source_file = b.path("tests/conformance/parser_tests_runner.zig"),
-        .target = target,
-        .optimize = .ReleaseFast,
-        .link_libc = true,
-    });
-    parser_tests_runner_mod.addImport("es_parser", conf_releaseFast);
-    const parser_tests_runner = b.addExecutable(.{
-        .name = "parser_tests_runner",
-        .root_module = parser_tests_runner_mod,
-    });
-    const parser_tests_runner_cmd = b.addRunArtifact(parser_tests_runner);
-    parser_tests_runner_cmd.step.dependOn(b.getInstallStep());
-    if (@hasField(@TypeOf(b.*), "args")) { if (b.args) |args| parser_tests_runner_cmd.addArgs(args); }
-    b.step("conformance-parser-tests", "Run tc39/test262-parser-tests conformance suite").dependOn(&parser_tests_runner_cmd.step);
+    addConformanceRunner(b, target, conf_releaseFast, "parser_tests_runner", "tests/conformance/parser_tests_runner.zig", "conformance-parser-tests", "Run tc39/test262-parser-tests conformance suite");
+    addConformanceRunner(b, target, conf_releaseFast, "test262_runner", "tests/conformance/test262_runner.zig", "conformance-test262", "Run tc39/test262 conformance suite");
+    addConformanceRunner(b, target, conf_releaseFast, "babel_runner", "tests/conformance/babel_runner.zig", "conformance-babel", "Run Babel parser conformance suite");
+    addConformanceRunner(b, target, conf_releaseFast, "typescript_runner", "tests/conformance/typescript_runner.zig", "conformance-typescript", "Run TypeScript parser conformance suite");
+    addConformanceRunner(b, target, conf_releaseFast, "semantic_runner", "tests/conformance/semantic_runner.zig", "conformance-semantic", "Run semantic analysis conformance suite");
+}
 
-    const test262_runner_mod = b.createModule(.{
-        .root_source_file = b.path("tests/conformance/test262_runner.zig"),
+/// Wire up one standalone conformance runner: a ReleaseFast executable built
+/// from `src`, importing the shared parser module `dep`, exposed as build step
+/// `step_name`. Forwards `-- <args>` (a fixture dir) through to the runner.
+fn addConformanceRunner(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    dep: *std.Build.Module,
+    name: []const u8,
+    src: []const u8,
+    step_name: []const u8,
+    desc: []const u8,
+) void {
+    const mod = b.createModule(.{
+        .root_source_file = b.path(src),
         .target = target,
         .optimize = .ReleaseFast,
         .link_libc = true,
     });
-    test262_runner_mod.addImport("es_parser", conf_releaseFast);
-    const test262_runner = b.addExecutable(.{
-        .name = "test262_runner",
-        .root_module = test262_runner_mod,
-    });
-    const test262_runner_cmd = b.addRunArtifact(test262_runner);
-    test262_runner_cmd.step.dependOn(b.getInstallStep());
-    if (@hasField(@TypeOf(b.*), "args")) { if (b.args) |args| test262_runner_cmd.addArgs(args); }
-    b.step("conformance-test262", "Run tc39/test262 conformance suite").dependOn(&test262_runner_cmd.step);
-
-    const babel_runner_mod = b.createModule(.{
-        .root_source_file = b.path("tests/conformance/babel_runner.zig"),
-        .target = target,
-        .optimize = .ReleaseFast,
-        .link_libc = true,
-    });
-    babel_runner_mod.addImport("es_parser", conf_releaseFast);
-    const babel_runner = b.addExecutable(.{
-        .name = "babel_runner",
-        .root_module = babel_runner_mod,
-    });
-    const babel_runner_cmd = b.addRunArtifact(babel_runner);
-    babel_runner_cmd.step.dependOn(b.getInstallStep());
-    if (@hasField(@TypeOf(b.*), "args")) { if (b.args) |args| babel_runner_cmd.addArgs(args); }
-    b.step("conformance-babel", "Run Babel parser conformance suite").dependOn(&babel_runner_cmd.step);
-
-    const typescript_runner_mod = b.createModule(.{
-        .root_source_file = b.path("tests/conformance/typescript_runner.zig"),
-        .target = target,
-        .optimize = .ReleaseFast,
-        .link_libc = true,
-    });
-    typescript_runner_mod.addImport("es_parser", conf_releaseFast);
-    const typescript_runner = b.addExecutable(.{
-        .name = "typescript_runner",
-        .root_module = typescript_runner_mod,
-    });
-    const typescript_runner_cmd = b.addRunArtifact(typescript_runner);
-    typescript_runner_cmd.step.dependOn(b.getInstallStep());
-    if (@hasField(@TypeOf(b.*), "args")) { if (b.args) |args| typescript_runner_cmd.addArgs(args); }
-    b.step("conformance-typescript", "Run TypeScript parser conformance suite").dependOn(&typescript_runner_cmd.step);
-
-    const semantic_runner_mod = b.createModule(.{
-        .root_source_file = b.path("tests/conformance/semantic_runner.zig"),
-        .target = target,
-        .optimize = .ReleaseFast,
-        .link_libc = true,
-    });
-    semantic_runner_mod.addImport("es_parser", conf_releaseFast);
-    const semantic_runner = b.addExecutable(.{
-        .name = "semantic_runner",
-        .root_module = semantic_runner_mod,
-    });
-    const semantic_runner_cmd = b.addRunArtifact(semantic_runner);
-    semantic_runner_cmd.step.dependOn(b.getInstallStep());
-    if (@hasField(@TypeOf(b.*), "args")) { if (b.args) |bargs| semantic_runner_cmd.addArgs(bargs); }
-    b.step("conformance-semantic", "Run semantic analysis conformance suite").dependOn(&semantic_runner_cmd.step);
+    mod.addImport("es_parser", dep);
+    const exe = b.addExecutable(.{ .name = name, .root_module = mod });
+    const cmd = b.addRunArtifact(exe);
+    cmd.step.dependOn(b.getInstallStep());
+    if (@hasField(@TypeOf(b.*), "args")) {
+        if (b.args) |args| cmd.addArgs(args);
+    }
+    b.step(step_name, desc).dependOn(&cmd.step);
 }
