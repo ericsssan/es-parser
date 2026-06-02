@@ -730,8 +730,15 @@ pub fn tokenizeScalar(alloc: std.mem.Allocator, src: []const u8, language: Langu
 }
 
 /// Tokenize `src` into a `TokenList`, matching `Lexer.tokenizeWithAllOptions`.
-/// Now a thin driver over `Cursor` — proves the on-demand cursor produces the
-/// identical stream (validated by the differential harness).
+///
+/// This is the materialized (eager) path: it keeps the hot lexer state
+/// (`i`, `prev_kind`, `saw_nl`, `at_line_start`) in locals so it stays in
+/// registers across the token-append loop. Driving `Cursor.next()` instead
+/// forces that state behind the `self` pointer, and the per-token append
+/// (which may alias) makes the compiler reload it every token — ~18% slower
+/// on ident-dense input. `Cursor` exists for the rewindable on-demand/fused
+/// path (`parser.parseFused`); the two share token-production logic kept in
+/// sync by the differential harness, not source.
 pub fn tokenizeScalarWithOptions(
     alloc: std.mem.Allocator,
     src: []const u8,
@@ -740,16 +747,283 @@ pub fn tokenizeScalarWithOptions(
 ) !TokenList {
     var toks: TokenList = .empty;
     try toks.ensureTotalCapacity(alloc, @max(src.len / 4 + 16, 64));
-    var cur = Cursor.init(src, language, opts);
-    while (cur.next()) |t| {
-        if (toks.len >= toks.capacity) try toks.ensureTotalCapacity(alloc, toks.capacity * 2 + 16);
-        toks.appendAssumeCapacity(.{
-            .tag = t.tag,
-            .start = t.start,
-            .len = t.len,
-            .has_newline_before = t.has_newline_before,
-            .has_unicode_escape = t.has_unicode_escape,
-        });
+    const n: u32 = @intCast(src.len);
+    const is_ts = language.isTs();
+    const is_jsx = language.isJsx();
+    var i: u32 = 0;
+    var saw_nl = false;
+    var at_line_start = true;
+    var prev_kind: Tag = .eof;
+    var tmpl_depth: u32 = 0;
+    var brace_d: [16]u32 = @splat(0);
+    // JSX opening-tag header depth and `{...}` nesting within it; used to
+    // classify a string as a JSX attribute value vs. an ordinary string.
+    var jsx_tag_depth: u32 = 0;
+    var jsx_brace_nest: u32 = 0;
+    // Annex B HTML comments (`<!--` / `-->`) are enabled only in non-module
+    // scripts with annex_b set.
+    const annex_b = opts.annex_b;
+    const is_module = opts.is_module;
+
+    // Hashbang `#!...` only valid at byte 0.
+    if (n >= 2 and src[0] == '#' and src[1] == '!') {
+        i = lineTerminatorScan(src, 2, n);
+        try toks.append(alloc, .{ .tag = .hashbang, .start = 0, .len = i, .has_newline_before = false });
+        at_line_start = false;
     }
+
+    while (i < n) {
+        const c = src[i];
+        switch (c) {
+            ' ', '\t', 0x0B, 0x0C => { i += 1; continue; },
+            '\n' => { saw_nl = true; at_line_start = true; i += 1; continue; },
+            '\r' => { saw_nl = true; at_line_start = true; i += 1; continue; },
+            '<' => {
+                // Annex B HTML open comment `<!--` (non-module scripts).
+                if (annex_b and !is_module and i + 3 < n and src[i + 1] == '!' and src[i + 2] == '-' and src[i + 3] == '-') {
+                    i = lineTerminatorScan(src, i + 4, n);
+                    saw_nl = true;
+                    continue;
+                }
+            },
+            '-' => {
+                // Annex B HTML close comment `-->` (only at logical line start).
+                if (annex_b and !is_module and at_line_start and i + 2 < n and src[i + 1] == '-' and src[i + 2] == '>') {
+                    i = lineTerminatorScan(src, i + 3, n);
+                    saw_nl = true;
+                    continue;
+                }
+            },
+            '/' => {
+                if (i + 1 < n and src[i + 1] == '/') {
+                    const ce = lineTerminatorScan(src, i + 2, n);
+                    // JSX: a `//` inside JSX text content (where the line also
+                    // contains `</`) is literal text, not a comment. Skip both
+                    // slashes so the rest of the line stays visible.
+                    if (is_jsx and !(i > 0 and src[i - 1] == '/')) {
+                        var k = i + 2;
+                        while (k + 1 < ce) : (k += 1) {
+                            if (src[k] == '<' and src[k + 1] == '/') {
+                                i += 2;
+                                break;
+                            }
+                        } else {
+                            i = ce;
+                            saw_nl = true;
+                        }
+                        continue;
+                    }
+                    i = ce;
+                    saw_nl = true;
+                    continue;
+                }
+                if (i + 1 < n and src[i + 1] == '*') {
+                    const res = Lex.blockCommentEnd(src, i);
+                    if (res.has_nl) { saw_nl = true; at_line_start = true; }
+                    if (res.end >= n and !(n >= 2 and src[n - 2] == '*' and src[n - 1] == '/')) {
+                        // JSX: an unterminated `/*` in JSX text is a literal `/`,
+                        // not an error. Emit it as a slash and resume after it.
+                        if (is_jsx) {
+                            if (toks.len >= toks.capacity) try toks.ensureTotalCapacity(alloc, toks.capacity * 2 + 16);
+                            toks.appendAssumeCapacity(.{ .tag = .slash, .start = i, .len = 1, .has_newline_before = saw_nl });
+                            prev_kind = .slash;
+                            saw_nl = false;
+                            at_line_start = false;
+                            i += 1;
+                            continue;
+                        }
+                        // `Lex.blockCommentEnd`'s scalar tail can miss a trailing
+                        // newline byte; rescan the body so an unterminated comment's
+                        // newline still propagates to the following token.
+                        if (!res.has_nl) {
+                            var q = i + 2;
+                            while (q < n) : (q += 1) {
+                                const cc = src[q];
+                                if (cc == '\n' or cc == '\r' or
+                                    (cc == 0xE2 and q + 2 < n and src[q + 1] == 0x80 and (src[q + 2] == 0xA8 or src[q + 2] == 0xA9)))
+                                {
+                                    saw_nl = true;
+                                    break;
+                                }
+                            }
+                        }
+                        // Unterminated block comment → single invalid token, then stop.
+                        if (toks.len >= toks.capacity) try toks.ensureTotalCapacity(alloc, toks.capacity * 2 + 16);
+                        toks.appendAssumeCapacity(.{ .tag = .invalid, .start = i, .len = res.end - i, .has_newline_before = saw_nl });
+                        i = res.end;
+                        // Note: saw_nl is intentionally left set — the main lexer
+                        // breaks here without clearing it, so a trailing EOF inherits
+                        // any newline seen inside the unterminated comment.
+                        continue;
+                    }
+                    i = res.end;
+                    continue;
+                }
+            },
+            else => {},
+        }
+        // High-byte line terminators / whitespace / BOM.
+        if (c >= 0x80) {
+            if (c == 0xE2 and i + 2 < n and src[i + 1] == 0x80 and (src[i + 2] == 0xA8 or src[i + 2] == 0xA9)) {
+                saw_nl = true;
+                at_line_start = true;
+                i += 3;
+                continue;
+            }
+            if (c == 0xEF and i + 2 < n and src[i + 1] == 0xBB and src[i + 2] == 0xBF) {
+                i += 3;
+                continue;
+            }
+            const cl: u32 = @intCast(std.unicode.utf8ByteSequenceLength(c) catch 1);
+            if (i + cl > n) {
+                // Truncated UTF-8 sequence at EOF: skip one byte.
+                i += 1;
+                continue;
+            }
+            const cp = std.unicode.utf8Decode(src[i .. i + cl]) catch 0;
+            if (lexer.isUnicodeWhitespace(@intCast(cp))) {
+                i += cl;
+                continue;
+            }
+        }
+        const prev = prev_kind;
+        const start = i;
+        var tag: Tag = undefined;
+        var has_esc = false;
+        if (c < 0x80 and isIdentStartByte(c)) {
+            // Hot path: SIMD-scan the ASCII identifier body. If it stops on a
+            // plain delimiter (not `\` or a 0x80+ byte), it is a pure-ASCII
+            // identifier — no escape decoding or Unicode validation needed.
+            const e = asciiIdentEnd(src, start, n);
+            const stop: u8 = if (e < n) src[e] else 0;
+            if (stop == '\\' or stop >= 0x80) {
+                @branchHint(.cold);
+                const r = scanIdentRun(src, start, n, prev, is_ts);
+                tag = r.tag;
+                has_esc = r.has_escape;
+                i = r.end;
+            } else {
+                i = e;
+                tag = if (isPropertyAccess(prev)) .identifier else lexer.keywordLookup(src[start..e], is_ts);
+            }
+        } else if (c >= 0x80) {
+            // High-byte start (whitespace/BOM/LS/PS/truncation already filtered).
+            const sl: u32 = @intCast(std.unicode.utf8ByteSequenceLength(c) catch 1);
+            const start_cp = std.unicode.utf8Decode(src[start .. start + sl]) catch 0;
+            if (!uid.isIdStart(@intCast(start_cp))) {
+                tag = .invalid;
+                i = start + sl;
+            } else {
+                tag = .identifier;
+                i = scanHighIdentRun(src, start, n);
+            }
+        } else if (c == '\\') {
+            const r = scanEscapedIdentStart(src, start, n);
+            tag = r.tag;
+            has_esc = r.has_escape;
+            i = r.end;
+        } else if (c >= '0' and c <= '9') {
+            i = Lex.numberEnd(src, start);
+            const is_bn = i > start and src[i - 1] == 'n';
+            tag = if (!lexer.validateNumericLiteral(src, start, i) or (i < n and lexer.isIdentStartAtPos(src, i)))
+                .invalid
+            else if (is_bn) .bigint_literal else .number_literal;
+        } else if (c == '.' and i + 1 < n and src[i + 1] >= '0' and src[i + 1] <= '9') {
+            i = Lex.numberEnd(src, start);
+            tag = if (!lexer.validateNumericLiteral(src, start, i) or (i < n and lexer.isIdentStartAtPos(src, i)))
+                .invalid
+            else
+                .number_literal;
+        } else if (c == '"' or c == '\'') {
+            tag = .string_literal;
+            // JSX attribute value (`<div id="x">`, prev `=` inside a tag header):
+            // no escapes, terminate at `<`. JSX text content (prev `>` or an
+            // identifier): terminate at `<` but still a string. Otherwise plain JS.
+            const jsx_attr = is_jsx and prev == .equal and jsx_tag_depth > 0;
+            const jsx_text = is_jsx and (prev == .greater_than or prev == .identifier);
+            i = scanStringJsx(src, start, n, jsx_attr or jsx_text, jsx_attr);
+        } else if (c == '/' and Lex.regexAllowed(prev) and !(is_jsx and (prev == .less_than or prev == .greater_than))) {
+            tag = .regex_literal;
+            i = Lex.regexEnd(src, start);
+        } else if (c == '`') {
+            const res = Lex.templateChunkEnd(src, start);
+            i = res.end;
+            if (!res.terminated) {
+                tag = .invalid;
+            } else if (res.has_expr) {
+                tag = .template_head;
+                if (tmpl_depth < brace_d.len) {
+                    brace_d[tmpl_depth] = 0;
+                    tmpl_depth += 1;
+                }
+            } else tag = .template_no_sub;
+        } else if (c == '{') {
+            if (tmpl_depth > 0) brace_d[tmpl_depth - 1] += 1;
+            tag = .l_brace;
+            i += 1;
+        } else if (c == '}') {
+            if (tmpl_depth > 0 and brace_d[tmpl_depth - 1] == 0) {
+                const res = Lex.templateChunkEnd(src, start);
+                i = res.end;
+                if (!res.terminated) {
+                    tag = .invalid;
+                } else if (res.has_expr) {
+                    tag = .template_middle;
+                } else {
+                    tag = .template_tail;
+                    tmpl_depth -= 1;
+                }
+            } else {
+                if (tmpl_depth > 0) brace_d[tmpl_depth - 1] -= 1;
+                tag = .r_brace;
+                i += 1;
+            }
+        } else if (c == '-' and at_line_start and (is_module or !annex_b) and
+            i + 2 < n and src[i + 1] == '-' and src[i + 2] == '>')
+        {
+            // A line-start `-->` outside Annex B (module, or annex_b disabled)
+            // is not an HTML close comment — it is a single invalid token.
+            tag = .invalid;
+            i += 3;
+        } else {
+            const r = scanOp(src, i, n);
+            tag = r.tag;
+            i = r.end;
+        }
+        if (toks.len >= toks.capacity) try toks.ensureTotalCapacity(alloc, toks.capacity * 2 + 16);
+        toks.appendAssumeCapacity(.{ .tag = tag, .start = start, .len = i - start, .has_newline_before = saw_nl, .has_unicode_escape = has_esc });
+
+        // Maintain JSX opening-tag depth. `<` opens a JSX element when in
+        // expression/child position (regexAllowed) and followed by a tag-name
+        // start or `>` (fragment); `{`/`}` nest inside the tag header; `>`
+        // closes the header.
+        if (is_jsx) {
+            switch (tag) {
+                .less_than => {
+                    if (Lex.regexAllowed(prev)) {
+                        const nb: u8 = if (i < n) src[i] else 0;
+                        const opens = nb == '>' or nb == '_' or nb == '$' or
+                            (nb >= 'a' and nb <= 'z') or (nb >= 'A' and nb <= 'Z') or nb >= 0x80;
+                        if (opens) jsx_tag_depth += 1;
+                    }
+                },
+                .l_brace => if (jsx_tag_depth > 0) {
+                    jsx_brace_nest += 1;
+                },
+                .r_brace => if (jsx_brace_nest > 0) {
+                    jsx_brace_nest -= 1;
+                },
+                .greater_than => if (jsx_tag_depth > 0 and jsx_brace_nest == 0) {
+                    jsx_tag_depth -= 1;
+                },
+                else => {},
+            }
+        }
+
+        prev_kind = if (isPropertyAccess(prev) and tag.isKeyword()) .identifier else tag;
+        saw_nl = false;
+        at_line_start = false;
+    }
+    try toks.append(alloc, .{ .tag = .eof, .start = n, .len = 0, .has_newline_before = saw_nl });
     return toks;
 }
