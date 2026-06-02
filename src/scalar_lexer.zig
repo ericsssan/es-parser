@@ -114,40 +114,45 @@ inline fn lineTerminatorScan(src: []const u8, start: u32, n: u32) u32 {
     return i;
 }
 
-inline fn hexVal(h: u8, ok: *bool) u32 {
-    return switch (h) {
-        '0'...'9' => h - '0',
-        'a'...'f' => h - 'a' + 10,
-        'A'...'F' => h - 'A' + 10,
-        else => blk: {
-            ok.* = false;
-            break :blk 0;
-        },
-    };
-}
+/// Hex-digit value (0–15) for each byte, or 0xFF for non-hex. Lets the escape
+/// parser decode without per-digit branches: OR the four looked-up nibbles and
+/// a single `& 0xF0 != 0` test flags any non-hex digit.
+const hex_lut: [256]u8 = blk: {
+    var t: [256]u8 = @splat(0xFF);
+    for ('0'..'9' + 1) |c| t[c] = c - '0';
+    for ('a'..'f' + 1) |c| t[c] = @as(u8, c - 'a') + 10;
+    for ('A'..'F' + 1) |c| t[c] = @as(u8, c - 'A') + 10;
+    break :blk t;
+};
 
 /// Parse a `\uXXXX` or `\u{...}` escape starting at `p` (which points at `\`).
-/// Returns the codepoint, the end offset, and whether it was well-formed.
+/// Returns the codepoint, the end offset, and whether it was well-formed. The
+/// `cp` value is only meaningful when `ok` (callers bail on `!ok` before using
+/// it), so invalid digits need not contribute zero — they just set `ok=false`.
 fn parseUnicodeEscape(src: []const u8, p: u32, n: u32) struct { cp: u32, end: u32, ok: bool } {
-    var ok = true;
-    var cp: u32 = 0;
     var e: u32 = p + 2; // skip "\u"
     if (e < n and src[e] == '{') {
         e += 1;
-        while (e < n and src[e] != '}') : (e += 1) cp = (cp << 4) | hexVal(src[e], &ok);
-        if (e >= n or src[e] != '}') ok = false else e += 1;
-    } else if (e + 4 <= n) {
-        var hh: u32 = 0;
-        for (0..4) |_| {
-            hh = (hh << 4) | hexVal(src[e], &ok);
-            e += 1;
+        var cp: u32 = 0;
+        var bad: u8 = 0;
+        while (e < n and src[e] != '}') : (e += 1) {
+            const h = hex_lut[src[e]];
+            bad |= h;
+            cp = (cp << 4) | (h & 0x0F);
         }
-        cp = hh;
+        const closed = e < n and src[e] == '}';
+        if (closed) e += 1;
+        return .{ .cp = cp, .end = e, .ok = closed and (bad & 0xF0) == 0 };
+    } else if (e + 4 <= n) {
+        const h0 = hex_lut[src[e]];
+        const h1 = hex_lut[src[e + 1]];
+        const h2 = hex_lut[src[e + 2]];
+        const h3 = hex_lut[src[e + 3]];
+        const cp = (@as(u32, h0 & 0x0F) << 12) | (@as(u32, h1 & 0x0F) << 8) | (@as(u32, h2 & 0x0F) << 4) | (h3 & 0x0F);
+        return .{ .cp = cp, .end = e + 4, .ok = ((h0 | h1 | h2 | h3) & 0xF0) == 0 };
     } else {
-        ok = false;
-        e = p + 2;
+        return .{ .cp = 0, .end = p + 2, .ok = false };
     }
-    return .{ .cp = cp, .end = e, .ok = ok };
 }
 
 inline fn cpIsIdStart(cp: u32) bool {
