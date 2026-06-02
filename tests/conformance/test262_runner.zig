@@ -2,8 +2,8 @@ const std = @import("std");
 const es_parser = @import("es_parser");
 const Lexer = es_parser.Lexer;
 
-fn tokenizeMaybe(alloc: std.mem.Allocator, source: []const u8, lang: es_parser.token.Language, is_module: bool) !Lexer.TokenizeResult {
-    return Lexer.tokenizeWithOptions(alloc, source, lang, is_module);
+fn tokenizeMaybe(alloc: std.mem.Allocator, source: []const u8, lang: es_parser.token.Language, is_module: bool) !es_parser.scalar_lexer.TokenList {
+    return es_parser.scalar_lexer.tokenizeScalarWithOptions(alloc, source, lang, .{ .is_module = is_module });
 }
 const Parser = es_parser.Parser;
 const Io = std.Io;
@@ -201,7 +201,7 @@ const ErrorDetail = struct {
 };
 
 fn tryParseDetailed(allocator: std.mem.Allocator, source: []const u8, is_module: bool) struct { has_error: bool, detail: ErrorDetail } {
-    var tokens = (tokenizeMaybe(allocator, source, .js, is_module) catch return .{ .has_error = true, .detail = .{ .kind = .parse, .count = 0 } }).tokens;
+    var tokens = tokenizeMaybe(allocator, source, .js, is_module) catch return .{ .has_error = true, .detail = .{ .kind = .parse, .count = 0 } };
     defer tokens.deinit(allocator);
 
     var tree = Parser.parseWithLanguage(allocator, source, tokens.slice(), .js, is_module) catch return .{ .has_error = true, .detail = .{ .kind = .parse, .count = 0 } };

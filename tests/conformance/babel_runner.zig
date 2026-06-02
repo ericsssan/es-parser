@@ -7,8 +7,8 @@ const Io = std.Io;
 /// Fast in-process runner for Babel parser test fixtures.
 /// Usage: babel_runner <fixtures-dir>
 
-fn tokenizeMaybe(alloc: std.mem.Allocator, source: []const u8, lang: es_parser.token.Language, is_module: bool, annex_b: bool) !Lexer.TokenizeResult {
-    return Lexer.tokenizeWithAllOptions(alloc, source, lang, .{ .is_module = is_module, .annex_b = annex_b });
+fn tokenizeMaybe(alloc: std.mem.Allocator, source: []const u8, lang: es_parser.token.Language, is_module: bool, annex_b: bool) !es_parser.scalar_lexer.TokenList {
+    return es_parser.scalar_lexer.tokenizeScalarWithOptions(alloc, source, lang, .{ .is_module = is_module, .annex_b = annex_b });
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -95,7 +95,7 @@ pub fn main(init: std.process.Init) !void {
             .js;
 
         const parse_result = blk: {
-            var tokens = (tokenizeMaybe(file_alloc, source, lang, is_module, opts.annex_b) catch break :blk ParseResult{ .has_error = true, .first_error = "tokenize failed" }).tokens;
+            var tokens = tokenizeMaybe(file_alloc, source, lang, is_module, opts.annex_b) catch break :blk ParseResult{ .has_error = true, .first_error = "tokenize failed" };
             defer tokens.deinit(file_alloc);
             var tree = Parser.parseWithLanguageOpts(file_alloc, source, tokens.slice(), lang, is_module, opts.annex_b) catch break :blk ParseResult{ .has_error = true, .first_error = "parse OOM" };
             defer tree.deinit(file_alloc);

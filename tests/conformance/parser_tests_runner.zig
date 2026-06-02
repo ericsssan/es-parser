@@ -4,8 +4,8 @@ const Lexer = es_parser.Lexer;
 const Parser = es_parser.Parser;
 const Io = std.Io;
 
-fn tokenizeMaybe(alloc: std.mem.Allocator, source: []const u8, lang: es_parser.token.Language, is_module: bool) !Lexer.TokenizeResult {
-    return Lexer.tokenizeWithOptions(alloc, source, lang, is_module);
+fn tokenizeMaybe(alloc: std.mem.Allocator, source: []const u8, lang: es_parser.token.Language, is_module: bool) !es_parser.scalar_lexer.TokenList {
+    return es_parser.scalar_lexer.tokenizeScalarWithOptions(alloc, source, lang, .{ .is_module = is_module });
 }
 
 /// Fast runner for tc39/test262-parser-tests (directory-based classification).
@@ -115,7 +115,7 @@ pub fn main(init: std.process.Init) !void {
 
             const Result = enum { ok, has_errors, crashed };
             const result: Result = blk: {
-                var tokens = (tokenizeMaybe(file_alloc, source, .js, is_module) catch break :blk .crashed).tokens;
+                var tokens = tokenizeMaybe(file_alloc, source, .js, is_module) catch break :blk .crashed;
                 defer tokens.deinit(file_alloc);
                 var tree = Parser.parseWithLanguage(file_alloc, source, tokens.slice(), .js, is_module) catch break :blk .crashed;
                 defer tree.deinit(file_alloc);

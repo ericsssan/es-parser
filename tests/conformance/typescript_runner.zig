@@ -364,10 +364,10 @@ pub fn main(init: std.process.Init) !void {
                 // shebang (#!/...) following the directives lands at position 0 in the
                 // source the lexer sees — matching what TypeScript's test harness does.
                 const parse_text = stripTestHarnessDirectives(segment.text);
-                var toks = (Lexer.tokenizeWithOptions(file_alloc, parse_text, seg_lang, is_module) catch {
+                var toks = es_parser.scalar_lexer.tokenizeScalarWithOptions(file_alloc, parse_text, seg_lang, .{ .is_module = is_module }) catch {
                     if (first_error.len == 0) first_error = "tokenize failed";
                     break :parse_blk false;
-                }).tokens;
+                };
                 defer toks.deinit(file_alloc);
                 var tree = Parser.parseWithOptions(file_alloc, parse_text, toks.slice(), .{
                     .language = seg_lang,
