@@ -1217,13 +1217,13 @@ pub const Parser = struct {
         if (p.emit_scope_events) {
             const ref_idx_count = @max(estimated_node_count, p.nodes.capacity);
             p.ref_event_idx = try allocator.alloc(u32, ref_idx_count);
-            // In ReleaseFast, rely on the OS providing zero-initialized pages for
-            // large mmap-backed allocations (Zig's GeneralPurposeAllocator). The
-            // sentinel value 0 ("no event") matches the OS-zero fill. Debug/Safe
-            // modes always zero explicitly so tests pass with any allocator.
-            if (comptime @import("builtin").mode != .ReleaseFast) {
-                @memset(p.ref_event_idx, 0);
-            }
+            // Zero the sentinel ("no event" = 0) unconditionally. A prior
+            // optimization skipped this in ReleaseFast assuming OS-zeroed mmap
+            // pages, but that only holds for fresh whole-page allocations — an
+            // arena (or any allocator returning reused memory) hands back
+            // garbage, and reading an unwritten entry as an event index then
+            // wild-accesses the event stream (a ReleaseFast-only crash).
+            @memset(p.ref_event_idx, 0);
         }
         // Pre-size the incremental dup-detection scratch (JS mode only).
         if (p.emit_scope_events and !p.is_ts) {
@@ -1679,11 +1679,10 @@ pub const Parser = struct {
             if (self.ref_event_idx.len < self.nodes.capacity) {
                 const old_len = self.ref_event_idx.len;
                 self.ref_event_idx = try self.gpa.realloc(self.ref_event_idx, self.nodes.capacity);
-                // Same rationale as in parseInternal: new pages from gpa.realloc are
-                // OS-zero-initialized in ReleaseFast; zero explicitly in debug/safe.
-                if (comptime @import("builtin").mode != .ReleaseFast) {
-                    @memset(self.ref_event_idx[old_len..], 0);
-                }
+                // Always zero the grown tail: realloc does NOT zero new bytes
+                // (only fresh whole-page mmap does), so the ReleaseFast skip here
+                // left garbage on arena/reused allocators — see parseInternal.
+                @memset(self.ref_event_idx[old_len..], 0);
             }
             if (self.node_end_toks.len < self.nodes.capacity) {
                 self.node_end_toks = try self.gpa.realloc(self.node_end_toks, self.nodes.capacity);
