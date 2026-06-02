@@ -158,6 +158,30 @@ fn decodedIsKeyword(src: []const u8, start: u32, end: u32) bool {
     return ok and len <= 10 and raw_i >= end and token.keywords.get(buf[0..len]) != null;
 }
 
+/// SIMD scan of an ASCII identifier body: returns the offset of the first byte
+/// that is not `[A-Za-z0-9_$]` (which includes any 0x80+ byte and `\`). Scans
+/// 16 bytes per step; the hot path for the ~42%-of-tokens identifier case.
+inline fn asciiIdentEnd(src: []const u8, start: u32, n: u32) u32 {
+    const V = @Vector(16, u8);
+    var i = start;
+    while (i + 16 <= n) {
+        const chunk: V = src[i..][0..16].*;
+        const lower = chunk | @as(V, @splat(@as(u8, 0x20)));
+        const is_alpha = (lower >= @as(V, @splat(@as(u8, 'a')))) & (lower <= @as(V, @splat(@as(u8, 'z'))));
+        const is_digit = (chunk >= @as(V, @splat(@as(u8, '0')))) & (chunk <= @as(V, @splat(@as(u8, '9'))));
+        const is_us = (chunk == @as(V, @splat(@as(u8, '_')))) | (chunk == @as(V, @splat(@as(u8, '$'))));
+        const mask: u16 = @bitCast(is_alpha | is_digit | is_us);
+        if (mask != 0xFFFF) return i + @ctz(~mask);
+        i += 16;
+    }
+    while (i < n) : (i += 1) {
+        const c = src[i];
+        const l = c | 0x20;
+        if (!((l >= 'a' and l <= 'z') or (c >= '0' and c <= '9') or c == '_' or c == '$')) break;
+    }
+    return i;
+}
+
 /// Identifier byte-run identical to the main lexer's `ident` bitmap: consume
 /// ASCII ident chars and every 0x80+ byte, stopping only at an LS/PS (U+2028/
 /// U+2029) lead sequence. Codepoint validity is enforced afterwards.
@@ -516,10 +540,21 @@ pub fn tokenizeScalarWithOptions(
         var tag: Tag = undefined;
         var has_esc = false;
         if (c < 0x80 and isIdentStartByte(c)) {
-            const r = scanIdentRun(src, start, n, prev, is_ts);
-            tag = r.tag;
-            has_esc = r.has_escape;
-            i = r.end;
+            // Hot path: SIMD-scan the ASCII identifier body. If it stops on a
+            // plain delimiter (not `\` or a 0x80+ byte), it is a pure-ASCII
+            // identifier — no escape decoding or Unicode validation needed.
+            const e = asciiIdentEnd(src, start, n);
+            const stop: u8 = if (e < n) src[e] else 0;
+            if (stop == '\\' or stop >= 0x80) {
+                @branchHint(.cold);
+                const r = scanIdentRun(src, start, n, prev, is_ts);
+                tag = r.tag;
+                has_esc = r.has_escape;
+                i = r.end;
+            } else {
+                i = e;
+                tag = if (isPropertyAccess(prev)) .identifier else lexer.keywordLookup(src[start..e], is_ts);
+            }
         } else if (c >= 0x80) {
             // High-byte start (whitespace/BOM/LS/PS/truncation already filtered).
             const sl: u32 = @intCast(std.unicode.utf8ByteSequenceLength(c) catch 1);
