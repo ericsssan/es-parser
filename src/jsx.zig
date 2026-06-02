@@ -284,7 +284,7 @@ fn parseJsxHyphenatedIdent(p: *Parser) Error!NodeIndex {
         if (starts[minus_tok] != starts[last_tok] + lens[last_tok]) break;
         // The next token after `-` must be an identifier immediately adjacent.
         const next_tok_idx = minus_tok + 1;
-        if (next_tok_idx >= p.tokens.len) break;
+        if (!p.tokenExists(next_tok_idx)) break;
         const next_tag = p.tags_ptr[next_tok_idx];
         if ((next_tag != .identifier and !next_tag.isKeyword()) or
             starts[next_tok_idx] != starts[minus_tok] + lens[minus_tok]) break;

@@ -2742,7 +2742,7 @@ fn rescanSlashAsRegex(p: *Parser) Error!NodeIndex {
                 } else break;
             }
             // Advance tok_i past all tokens within the regex span
-            while (p.tok_i < p.tokens.len - 1 and p.tokenStart(p.tokIdx()) < idx) {
+            while (p.tokenExists(p.tok_i + 1) and p.tokenStart(p.tokIdx()) < idx) {
                 p.tok_i += 1;
             }
             // Validate flags: only g i m s u y d v are valid; no duplicates; u/v exclusive
@@ -5158,7 +5158,7 @@ fn parseClassExpression(p: *Parser) Error!NodeIndex {
             if (key_tag != .identifier) continue;
             const key_tok = p.node_main_token_ptr[key.toInt()];
             if (p.tokenTag(key_tok) != .hash) continue;
-            if (key_tok + 1 >= p.tokens.len) continue;
+            if (!p.tokenExists(key_tok + 1)) continue;
             const name_text = p.tokenText(key_tok + 1);
             const extra_idx = m_data.rhs.toInt();
             const is_static_member = if (extra_idx + 4 < p.extra_data.items.len)
@@ -5225,7 +5225,7 @@ fn parseClassExpression(p: *Parser) Error!NodeIndex {
         var write: usize = private_refs_start_ce;
         const outermost = (p.class_body_depth == 1);
         for (refs_slice) |hash_tok| {
-            if (hash_tok + 1 >= p.tokens.len) continue;
+            if (!p.tokenExists(hash_tok + 1)) continue;
             const name = p.tokenText(hash_tok + 1);
             const ref_len = Parser.decodeIdentForCompare(name, &ref_buf);
             const ref_norm = ref_buf[0..ref_len];
@@ -5558,7 +5558,7 @@ fn parseTemplateLiteralInner(p: *Parser, validate_escapes: bool) Error!NodeIndex
         // Validate escape sequences in untagged template
         if (validate_escapes) {
             const tok_start = p.tokenStart(tok);
-            const next_start = if (tok + 1 < p.tokens.len) p.tokenStart(tok + 1) else @as(u32, @intCast(p.source.len));
+            const next_start = if (p.tokenExists(tok + 1)) p.tokenStart(tok + 1) else @as(u32, @intCast(p.source.len));
             if (hasInvalidTemplateEscape(p.source, tok_start, next_start)) {
                 try p.emitError("Invalid escape sequence in template literal");
                 return p.makeErrorNode();
@@ -5586,7 +5586,7 @@ fn parseTemplateLiteralInner(p: *Parser, validate_escapes: bool) Error!NodeIndex
         // Validate escape sequences in untagged template head
         if (validate_escapes) {
             const tok_start = p.tokenStart(tok);
-            const next_start = if (tok + 1 < p.tokens.len) p.tokenStart(tok + 1) else @as(u32, @intCast(p.source.len));
+            const next_start = if (p.tokenExists(tok + 1)) p.tokenStart(tok + 1) else @as(u32, @intCast(p.source.len));
             if (hasInvalidTemplateEscape(p.source, tok_start, next_start)) {
                 try p.emitError("Invalid escape sequence in template literal");
                 return p.makeErrorNode();
@@ -5619,7 +5619,7 @@ fn parseTemplateLiteralInner(p: *Parser, validate_escapes: bool) Error!NodeIndex
             }
             if (validate_escapes) {
                 const tok_start = p.tokenStart(tok);
-                const next_start = if (tok + 1 < p.tokens.len) p.tokenStart(tok + 1) else @as(u32, @intCast(p.source.len));
+                const next_start = if (p.tokenExists(tok + 1)) p.tokenStart(tok + 1) else @as(u32, @intCast(p.source.len));
                 if (hasInvalidTemplateEscape(p.source, tok_start, next_start)) {
                     try p.emitError("Invalid escape sequence in template literal");
                     return p.makeErrorNode();
@@ -5637,7 +5637,7 @@ fn parseTemplateLiteralInner(p: *Parser, validate_escapes: bool) Error!NodeIndex
             const tok = p.advance();
             if (validate_escapes) {
                 const tok_start = p.tokenStart(tok);
-                const next_start = if (tok + 1 < p.tokens.len) p.tokenStart(tok + 1) else @as(u32, @intCast(p.source.len));
+                const next_start = if (p.tokenExists(tok + 1)) p.tokenStart(tok + 1) else @as(u32, @intCast(p.source.len));
                 if (hasInvalidTemplateEscape(p.source, tok_start, next_start)) {
                     try p.emitError("Invalid escape sequence in template literal");
                     return p.makeErrorNode();
@@ -6962,7 +6962,7 @@ fn parseBlockBodyWithStrictChecks(p: *Parser, params: ?SubRange, name: NodeIndex
         const saved = p.tok_i;
         _ = p.tok_i; // don't advance, just peek ahead
         var pos = saved + 1; // skip {
-        while (pos < p.tokens.len) {
+        while (p.tokenExists(pos)) {
             const tag = p.tags_ptr[pos];
             if (tag != .string_literal) break;
             const start = p.tok_starts_ptr[pos];
@@ -6976,7 +6976,7 @@ fn parseBlockBodyWithStrictChecks(p: *Parser, params: ?SubRange, name: NodeIndex
                 break;
             }
             pos += 1;
-            if (pos < p.tokens.len and p.tags_ptr[pos] == .semicolon) pos += 1;
+            if (p.tokenExists(pos) and p.tags_ptr[pos] == .semicolon) pos += 1;
         }
     }
     defer p.in_strict = prev_strict;
