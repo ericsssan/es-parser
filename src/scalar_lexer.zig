@@ -398,6 +398,331 @@ fn scanOp(src: []const u8, i: u32, n: u32) Op {
     };
 }
 
+/// One lexed token. Mirrors the `TokenList` element fields.
+pub const Token = struct {
+    tag: Tag,
+    start: u32,
+    len: u32,
+    has_newline_before: bool,
+    has_unicode_escape: bool = false,
+};
+
+/// Rewindable, on-demand token cursor. `next()` produces the same token stream
+/// as `tokenizeScalar`, one token at a time; `save()`/`restore()` snapshot the
+/// full lexer state (byte position + lexical context) so a parser can speculate
+/// and rewind without a materialized token array. This is the linchpin of fused
+/// (on-demand) lexing — the parser pulls tokens instead of pre-tokenizing.
+pub const Cursor = struct {
+    src: []const u8,
+    n: u32,
+    i: u32 = 0,
+    prev_kind: Tag = .eof,
+    saw_nl: bool = false,
+    at_line_start: bool = true,
+    tmpl_depth: u32 = 0,
+    brace_d: [16]u32 = @splat(0),
+    jsx_tag_depth: u32 = 0,
+    jsx_brace_nest: u32 = 0,
+    is_ts: bool,
+    is_jsx: bool,
+    annex_b: bool,
+    is_module: bool,
+    done: bool = false,
+
+    /// Full rewind snapshot. `src`/config are constant, so only mutable state.
+    pub const State = struct {
+        i: u32,
+        prev_kind: Tag,
+        saw_nl: bool,
+        at_line_start: bool,
+        tmpl_depth: u32,
+        brace_d: [16]u32,
+        jsx_tag_depth: u32,
+        jsx_brace_nest: u32,
+        done: bool,
+    };
+
+    pub fn init(src: []const u8, language: Language, opts: Lex.TokenizeOptions) Cursor {
+        return .{
+            .src = src,
+            .n = @intCast(src.len),
+            .is_ts = language.isTs(),
+            .is_jsx = language.isJsx(),
+            .annex_b = opts.annex_b,
+            .is_module = opts.is_module,
+        };
+    }
+
+    pub fn save(self: *const Cursor) State {
+        return .{
+            .i = self.i,
+            .prev_kind = self.prev_kind,
+            .saw_nl = self.saw_nl,
+            .at_line_start = self.at_line_start,
+            .tmpl_depth = self.tmpl_depth,
+            .brace_d = self.brace_d,
+            .jsx_tag_depth = self.jsx_tag_depth,
+            .jsx_brace_nest = self.jsx_brace_nest,
+            .done = self.done,
+        };
+    }
+
+    pub fn restore(self: *Cursor, s: State) void {
+        self.i = s.i;
+        self.prev_kind = s.prev_kind;
+        self.saw_nl = s.saw_nl;
+        self.at_line_start = s.at_line_start;
+        self.tmpl_depth = s.tmpl_depth;
+        self.brace_d = s.brace_d;
+        self.jsx_tag_depth = s.jsx_tag_depth;
+        self.jsx_brace_nest = s.jsx_brace_nest;
+        self.done = s.done;
+    }
+
+    /// Produce the next token, or null at end of stream (after the EOF token).
+    pub fn next(self: *Cursor) ?Token {
+        const src = self.src;
+        const n = self.n;
+        const is_ts = self.is_ts;
+        const is_jsx = self.is_jsx;
+        const annex_b = self.annex_b;
+        const is_module = self.is_module;
+
+        // Hashbang `#!...` only valid at byte 0.
+        if (self.i == 0 and n >= 2 and src[0] == '#' and src[1] == '!') {
+            self.i = lineTerminatorScan(src, 2, n);
+            self.at_line_start = false;
+            return .{ .tag = .hashbang, .start = 0, .len = self.i, .has_newline_before = false };
+        }
+
+        while (self.i < n) {
+            const c = src[self.i];
+            switch (c) {
+                ' ', '\t', 0x0B, 0x0C => { self.i += 1; continue; },
+                '\n' => { self.saw_nl = true; self.at_line_start = true; self.i += 1; continue; },
+                '\r' => { self.saw_nl = true; self.at_line_start = true; self.i += 1; continue; },
+                '<' => {
+                    if (annex_b and !is_module and self.i + 3 < n and src[self.i + 1] == '!' and src[self.i + 2] == '-' and src[self.i + 3] == '-') {
+                        self.i = lineTerminatorScan(src, self.i + 4, n);
+                        self.saw_nl = true;
+                        continue;
+                    }
+                },
+                '-' => {
+                    if (annex_b and !is_module and self.at_line_start and self.i + 2 < n and src[self.i + 1] == '-' and src[self.i + 2] == '>') {
+                        self.i = lineTerminatorScan(src, self.i + 3, n);
+                        self.saw_nl = true;
+                        continue;
+                    }
+                },
+                '/' => {
+                    if (self.i + 1 < n and src[self.i + 1] == '/') {
+                        const ce = lineTerminatorScan(src, self.i + 2, n);
+                        if (is_jsx and !(self.i > 0 and src[self.i - 1] == '/')) {
+                            var k = self.i + 2;
+                            while (k + 1 < ce) : (k += 1) {
+                                if (src[k] == '<' and src[k + 1] == '/') {
+                                    self.i += 2;
+                                    break;
+                                }
+                            } else {
+                                self.i = ce;
+                                self.saw_nl = true;
+                            }
+                            continue;
+                        }
+                        self.i = ce;
+                        self.saw_nl = true;
+                        continue;
+                    }
+                    if (self.i + 1 < n and src[self.i + 1] == '*') {
+                        const res = Lex.blockCommentEnd(src, self.i);
+                        if (res.has_nl) { self.saw_nl = true; self.at_line_start = true; }
+                        if (res.end >= n and !(n >= 2 and src[n - 2] == '*' and src[n - 1] == '/')) {
+                            if (is_jsx) {
+                                const t = Token{ .tag = .slash, .start = self.i, .len = 1, .has_newline_before = self.saw_nl };
+                                self.prev_kind = .slash;
+                                self.saw_nl = false;
+                                self.at_line_start = false;
+                                self.i += 1;
+                                return t;
+                            }
+                            if (!res.has_nl) {
+                                var q = self.i + 2;
+                                while (q < n) : (q += 1) {
+                                    const cc = src[q];
+                                    if (cc == '\n' or cc == '\r' or
+                                        (cc == 0xE2 and q + 2 < n and src[q + 1] == 0x80 and (src[q + 2] == 0xA8 or src[q + 2] == 0xA9)))
+                                    {
+                                        self.saw_nl = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            const t = Token{ .tag = .invalid, .start = self.i, .len = res.end - self.i, .has_newline_before = self.saw_nl };
+                            self.i = res.end;
+                            return t;
+                        }
+                        self.i = res.end;
+                        continue;
+                    }
+                },
+                else => {},
+            }
+            if (c >= 0x80) {
+                if (c == 0xE2 and self.i + 2 < n and src[self.i + 1] == 0x80 and (src[self.i + 2] == 0xA8 or src[self.i + 2] == 0xA9)) {
+                    self.saw_nl = true;
+                    self.at_line_start = true;
+                    self.i += 3;
+                    continue;
+                }
+                if (c == 0xEF and self.i + 2 < n and src[self.i + 1] == 0xBB and src[self.i + 2] == 0xBF) {
+                    self.i += 3;
+                    continue;
+                }
+                const cl: u32 = @intCast(std.unicode.utf8ByteSequenceLength(c) catch 1);
+                if (self.i + cl > n) {
+                    self.i += 1;
+                    continue;
+                }
+                const cp = std.unicode.utf8Decode(src[self.i .. self.i + cl]) catch 0;
+                if (lexer.isUnicodeWhitespace(@intCast(cp))) {
+                    self.i += cl;
+                    continue;
+                }
+            }
+            // ── produce one token ──────────────────────────────────────
+            const prev = self.prev_kind;
+            const start = self.i;
+            var tag: Tag = undefined;
+            var has_esc = false;
+            if (c < 0x80 and isIdentStartByte(c)) {
+                const e = asciiIdentEnd(src, start, n);
+                const stop: u8 = if (e < n) src[e] else 0;
+                if (stop == '\\' or stop >= 0x80) {
+                    @branchHint(.cold);
+                    const r = scanIdentRun(src, start, n, prev, is_ts);
+                    tag = r.tag;
+                    has_esc = r.has_escape;
+                    self.i = r.end;
+                } else {
+                    self.i = e;
+                    tag = if (isPropertyAccess(prev)) .identifier else lexer.keywordLookup(src[start..e], is_ts);
+                }
+            } else if (c >= 0x80) {
+                const sl: u32 = @intCast(std.unicode.utf8ByteSequenceLength(c) catch 1);
+                const start_cp = std.unicode.utf8Decode(src[start .. start + sl]) catch 0;
+                if (!uid.isIdStart(@intCast(start_cp))) {
+                    tag = .invalid;
+                    self.i = start + sl;
+                } else {
+                    tag = .identifier;
+                    self.i = scanHighIdentRun(src, start, n);
+                }
+            } else if (c == '\\') {
+                const r = scanEscapedIdentStart(src, start, n);
+                tag = r.tag;
+                has_esc = r.has_escape;
+                self.i = r.end;
+            } else if (c >= '0' and c <= '9') {
+                self.i = Lex.numberEnd(src, start);
+                const is_bn = self.i > start and src[self.i - 1] == 'n';
+                tag = if (!lexer.validateNumericLiteral(src, start, self.i) or (self.i < n and lexer.isIdentStartAtPos(src, self.i)))
+                    .invalid
+                else if (is_bn) .bigint_literal else .number_literal;
+            } else if (c == '.' and self.i + 1 < n and src[self.i + 1] >= '0' and src[self.i + 1] <= '9') {
+                self.i = Lex.numberEnd(src, start);
+                tag = if (!lexer.validateNumericLiteral(src, start, self.i) or (self.i < n and lexer.isIdentStartAtPos(src, self.i)))
+                    .invalid
+                else
+                    .number_literal;
+            } else if (c == '"' or c == '\'') {
+                tag = .string_literal;
+                const jsx_attr = is_jsx and prev == .equal and self.jsx_tag_depth > 0;
+                const jsx_text = is_jsx and (prev == .greater_than or prev == .identifier);
+                self.i = scanStringJsx(src, start, n, jsx_attr or jsx_text, jsx_attr);
+            } else if (c == '/' and Lex.regexAllowed(prev) and !(is_jsx and (prev == .less_than or prev == .greater_than))) {
+                tag = .regex_literal;
+                self.i = Lex.regexEnd(src, start);
+            } else if (c == '`') {
+                const res = Lex.templateChunkEnd(src, start);
+                self.i = res.end;
+                if (!res.terminated) {
+                    tag = .invalid;
+                } else if (res.has_expr) {
+                    tag = .template_head;
+                    if (self.tmpl_depth < self.brace_d.len) {
+                        self.brace_d[self.tmpl_depth] = 0;
+                        self.tmpl_depth += 1;
+                    }
+                } else tag = .template_no_sub;
+            } else if (c == '{') {
+                if (self.tmpl_depth > 0) self.brace_d[self.tmpl_depth - 1] += 1;
+                tag = .l_brace;
+                self.i += 1;
+            } else if (c == '}') {
+                if (self.tmpl_depth > 0 and self.brace_d[self.tmpl_depth - 1] == 0) {
+                    const res = Lex.templateChunkEnd(src, start);
+                    self.i = res.end;
+                    if (!res.terminated) {
+                        tag = .invalid;
+                    } else if (res.has_expr) {
+                        tag = .template_middle;
+                    } else {
+                        tag = .template_tail;
+                        self.tmpl_depth -= 1;
+                    }
+                } else {
+                    if (self.tmpl_depth > 0) self.brace_d[self.tmpl_depth - 1] -= 1;
+                    tag = .r_brace;
+                    self.i += 1;
+                }
+            } else if (c == '-' and self.at_line_start and (is_module or !annex_b) and
+                self.i + 2 < n and src[self.i + 1] == '-' and src[self.i + 2] == '>')
+            {
+                tag = .invalid;
+                self.i += 3;
+            } else {
+                const r = scanOp(src, self.i, n);
+                tag = r.tag;
+                self.i = r.end;
+            }
+            const t = Token{ .tag = tag, .start = start, .len = self.i - start, .has_newline_before = self.saw_nl, .has_unicode_escape = has_esc };
+            if (is_jsx) {
+                switch (tag) {
+                    .less_than => {
+                        if (Lex.regexAllowed(prev)) {
+                            const nb: u8 = if (self.i < n) src[self.i] else 0;
+                            const opens = nb == '>' or nb == '_' or nb == '$' or
+                                (nb >= 'a' and nb <= 'z') or (nb >= 'A' and nb <= 'Z') or nb >= 0x80;
+                            if (opens) self.jsx_tag_depth += 1;
+                        }
+                    },
+                    .l_brace => if (self.jsx_tag_depth > 0) {
+                        self.jsx_brace_nest += 1;
+                    },
+                    .r_brace => if (self.jsx_brace_nest > 0) {
+                        self.jsx_brace_nest -= 1;
+                    },
+                    .greater_than => if (self.jsx_tag_depth > 0 and self.jsx_brace_nest == 0) {
+                        self.jsx_tag_depth -= 1;
+                    },
+                    else => {},
+                }
+            }
+            self.prev_kind = if (isPropertyAccess(prev) and tag.isKeyword()) .identifier else tag;
+            self.saw_nl = false;
+            self.at_line_start = false;
+            return t;
+        }
+        if (!self.done) {
+            self.done = true;
+            return .{ .tag = .eof, .start = n, .len = 0, .has_newline_before = self.saw_nl };
+        }
+        return null;
+    }
+};
+
 /// Tokenize `src` into a `TokenList` using the default options, matching
 /// `Lexer.tokenizeWithLanguage`. `language` selects the TS keyword set and JSX.
 pub fn tokenizeScalar(alloc: std.mem.Allocator, src: []const u8, language: Language) !TokenList {
@@ -405,8 +730,8 @@ pub fn tokenizeScalar(alloc: std.mem.Allocator, src: []const u8, language: Langu
 }
 
 /// Tokenize `src` into a `TokenList`, matching `Lexer.tokenizeWithAllOptions`.
-/// `opts.is_module` / `opts.annex_b` gate Annex B HTML comments; the streaming
-/// publish fields are accepted but ignored (this tokenizer is not incremental).
+/// Now a thin driver over `Cursor` — proves the on-demand cursor produces the
+/// identical stream (validated by the differential harness).
 pub fn tokenizeScalarWithOptions(
     alloc: std.mem.Allocator,
     src: []const u8,
@@ -415,283 +740,16 @@ pub fn tokenizeScalarWithOptions(
 ) !TokenList {
     var toks: TokenList = .empty;
     try toks.ensureTotalCapacity(alloc, @max(src.len / 4 + 16, 64));
-    const n: u32 = @intCast(src.len);
-    const is_ts = language.isTs();
-    const is_jsx = language.isJsx();
-    var i: u32 = 0;
-    var saw_nl = false;
-    var at_line_start = true;
-    var prev_kind: Tag = .eof;
-    var tmpl_depth: u32 = 0;
-    var brace_d: [16]u32 = @splat(0);
-    // JSX opening-tag header depth and `{...}` nesting within it; used to
-    // classify a string as a JSX attribute value vs. an ordinary string.
-    var jsx_tag_depth: u32 = 0;
-    var jsx_brace_nest: u32 = 0;
-    // Annex B HTML comments (`<!--` / `-->`) are enabled only in non-module
-    // scripts with annex_b set.
-    const annex_b = opts.annex_b;
-    const is_module = opts.is_module;
-
-    // Hashbang `#!...` only valid at byte 0.
-    if (n >= 2 and src[0] == '#' and src[1] == '!') {
-        i = lineTerminatorScan(src, 2, n);
-        try toks.append(alloc, .{ .tag = .hashbang, .start = 0, .len = i, .has_newline_before = false });
-        at_line_start = false;
-    }
-
-    while (i < n) {
-        const c = src[i];
-        switch (c) {
-            ' ', '\t', 0x0B, 0x0C => { i += 1; continue; },
-            '\n' => { saw_nl = true; at_line_start = true; i += 1; continue; },
-            '\r' => { saw_nl = true; at_line_start = true; i += 1; continue; },
-            '<' => {
-                // Annex B HTML open comment `<!--` (non-module scripts).
-                if (annex_b and !is_module and i + 3 < n and src[i + 1] == '!' and src[i + 2] == '-' and src[i + 3] == '-') {
-                    i = lineTerminatorScan(src, i + 4, n);
-                    saw_nl = true;
-                    continue;
-                }
-            },
-            '-' => {
-                // Annex B HTML close comment `-->` (only at logical line start).
-                if (annex_b and !is_module and at_line_start and i + 2 < n and src[i + 1] == '-' and src[i + 2] == '>') {
-                    i = lineTerminatorScan(src, i + 3, n);
-                    saw_nl = true;
-                    continue;
-                }
-            },
-            '/' => {
-                if (i + 1 < n and src[i + 1] == '/') {
-                    const ce = lineTerminatorScan(src, i + 2, n);
-                    // JSX: a `//` inside JSX text content (where the line also
-                    // contains `</`) is literal text, not a comment. Skip both
-                    // slashes so the rest of the line stays visible.
-                    if (is_jsx and !(i > 0 and src[i - 1] == '/')) {
-                        var k = i + 2;
-                        while (k + 1 < ce) : (k += 1) {
-                            if (src[k] == '<' and src[k + 1] == '/') {
-                                i += 2;
-                                break;
-                            }
-                        } else {
-                            i = ce;
-                            saw_nl = true;
-                        }
-                        continue;
-                    }
-                    i = ce;
-                    saw_nl = true;
-                    continue;
-                }
-                if (i + 1 < n and src[i + 1] == '*') {
-                    const res = Lex.blockCommentEnd(src, i);
-                    if (res.has_nl) { saw_nl = true; at_line_start = true; }
-                    if (res.end >= n and !(n >= 2 and src[n - 2] == '*' and src[n - 1] == '/')) {
-                        // JSX: an unterminated `/*` in JSX text is a literal `/`,
-                        // not an error. Emit it as a slash and resume after it.
-                        if (is_jsx) {
-                            if (toks.len >= toks.capacity) try toks.ensureTotalCapacity(alloc, toks.capacity * 2 + 16);
-                            toks.appendAssumeCapacity(.{ .tag = .slash, .start = i, .len = 1, .has_newline_before = saw_nl });
-                            prev_kind = .slash;
-                            saw_nl = false;
-                            at_line_start = false;
-                            i += 1;
-                            continue;
-                        }
-                        // `Lex.blockCommentEnd`'s scalar tail can miss a trailing
-                        // newline byte; rescan the body so an unterminated comment's
-                        // newline still propagates to the following token.
-                        if (!res.has_nl) {
-                            var q = i + 2;
-                            while (q < n) : (q += 1) {
-                                const cc = src[q];
-                                if (cc == '\n' or cc == '\r' or
-                                    (cc == 0xE2 and q + 2 < n and src[q + 1] == 0x80 and (src[q + 2] == 0xA8 or src[q + 2] == 0xA9)))
-                                {
-                                    saw_nl = true;
-                                    break;
-                                }
-                            }
-                        }
-                        // Unterminated block comment → single invalid token, then stop.
-                        if (toks.len >= toks.capacity) try toks.ensureTotalCapacity(alloc, toks.capacity * 2 + 16);
-                        toks.appendAssumeCapacity(.{ .tag = .invalid, .start = i, .len = res.end - i, .has_newline_before = saw_nl });
-                        i = res.end;
-                        // Note: saw_nl is intentionally left set — the main lexer
-                        // breaks here without clearing it, so a trailing EOF inherits
-                        // any newline seen inside the unterminated comment.
-                        continue;
-                    }
-                    i = res.end;
-                    continue;
-                }
-            },
-            else => {},
-        }
-        // High-byte line terminators / whitespace / BOM.
-        if (c >= 0x80) {
-            if (c == 0xE2 and i + 2 < n and src[i + 1] == 0x80 and (src[i + 2] == 0xA8 or src[i + 2] == 0xA9)) {
-                saw_nl = true;
-                at_line_start = true;
-                i += 3;
-                continue;
-            }
-            if (c == 0xEF and i + 2 < n and src[i + 1] == 0xBB and src[i + 2] == 0xBF) {
-                i += 3;
-                continue;
-            }
-            const cl: u32 = @intCast(std.unicode.utf8ByteSequenceLength(c) catch 1);
-            if (i + cl > n) {
-                // Truncated UTF-8 sequence at EOF: skip one byte.
-                i += 1;
-                continue;
-            }
-            const cp = std.unicode.utf8Decode(src[i .. i + cl]) catch 0;
-            if (lexer.isUnicodeWhitespace(@intCast(cp))) {
-                i += cl;
-                continue;
-            }
-        }
-        const prev = prev_kind;
-        const start = i;
-        var tag: Tag = undefined;
-        var has_esc = false;
-        if (c < 0x80 and isIdentStartByte(c)) {
-            // Hot path: SIMD-scan the ASCII identifier body. If it stops on a
-            // plain delimiter (not `\` or a 0x80+ byte), it is a pure-ASCII
-            // identifier — no escape decoding or Unicode validation needed.
-            const e = asciiIdentEnd(src, start, n);
-            const stop: u8 = if (e < n) src[e] else 0;
-            if (stop == '\\' or stop >= 0x80) {
-                @branchHint(.cold);
-                const r = scanIdentRun(src, start, n, prev, is_ts);
-                tag = r.tag;
-                has_esc = r.has_escape;
-                i = r.end;
-            } else {
-                i = e;
-                tag = if (isPropertyAccess(prev)) .identifier else lexer.keywordLookup(src[start..e], is_ts);
-            }
-        } else if (c >= 0x80) {
-            // High-byte start (whitespace/BOM/LS/PS/truncation already filtered).
-            const sl: u32 = @intCast(std.unicode.utf8ByteSequenceLength(c) catch 1);
-            const start_cp = std.unicode.utf8Decode(src[start .. start + sl]) catch 0;
-            if (!uid.isIdStart(@intCast(start_cp))) {
-                tag = .invalid;
-                i = start + sl;
-            } else {
-                tag = .identifier;
-                i = scanHighIdentRun(src, start, n);
-            }
-        } else if (c == '\\') {
-            const r = scanEscapedIdentStart(src, start, n);
-            tag = r.tag;
-            has_esc = r.has_escape;
-            i = r.end;
-        } else if (c >= '0' and c <= '9') {
-            i = Lex.numberEnd(src, start);
-            const is_bn = i > start and src[i - 1] == 'n';
-            tag = if (!lexer.validateNumericLiteral(src, start, i) or (i < n and lexer.isIdentStartAtPos(src, i)))
-                .invalid
-            else if (is_bn) .bigint_literal else .number_literal;
-        } else if (c == '.' and i + 1 < n and src[i + 1] >= '0' and src[i + 1] <= '9') {
-            i = Lex.numberEnd(src, start);
-            tag = if (!lexer.validateNumericLiteral(src, start, i) or (i < n and lexer.isIdentStartAtPos(src, i)))
-                .invalid
-            else
-                .number_literal;
-        } else if (c == '"' or c == '\'') {
-            tag = .string_literal;
-            // JSX attribute value (`<div id="x">`, prev `=` inside a tag header):
-            // no escapes, terminate at `<`. JSX text content (prev `>` or an
-            // identifier): terminate at `<` but still a string. Otherwise plain JS.
-            const jsx_attr = is_jsx and prev == .equal and jsx_tag_depth > 0;
-            const jsx_text = is_jsx and (prev == .greater_than or prev == .identifier);
-            i = scanStringJsx(src, start, n, jsx_attr or jsx_text, jsx_attr);
-        } else if (c == '/' and Lex.regexAllowed(prev) and !(is_jsx and (prev == .less_than or prev == .greater_than))) {
-            tag = .regex_literal;
-            i = Lex.regexEnd(src, start);
-        } else if (c == '`') {
-            const res = Lex.templateChunkEnd(src, start);
-            i = res.end;
-            if (!res.terminated) {
-                tag = .invalid;
-            } else if (res.has_expr) {
-                tag = .template_head;
-                if (tmpl_depth < brace_d.len) {
-                    brace_d[tmpl_depth] = 0;
-                    tmpl_depth += 1;
-                }
-            } else tag = .template_no_sub;
-        } else if (c == '{') {
-            if (tmpl_depth > 0) brace_d[tmpl_depth - 1] += 1;
-            tag = .l_brace;
-            i += 1;
-        } else if (c == '}') {
-            if (tmpl_depth > 0 and brace_d[tmpl_depth - 1] == 0) {
-                const res = Lex.templateChunkEnd(src, start);
-                i = res.end;
-                if (!res.terminated) {
-                    tag = .invalid;
-                } else if (res.has_expr) {
-                    tag = .template_middle;
-                } else {
-                    tag = .template_tail;
-                    tmpl_depth -= 1;
-                }
-            } else {
-                if (tmpl_depth > 0) brace_d[tmpl_depth - 1] -= 1;
-                tag = .r_brace;
-                i += 1;
-            }
-        } else if (c == '-' and at_line_start and (is_module or !annex_b) and
-            i + 2 < n and src[i + 1] == '-' and src[i + 2] == '>')
-        {
-            // A line-start `-->` outside Annex B (module, or annex_b disabled)
-            // is not an HTML close comment — it is a single invalid token.
-            tag = .invalid;
-            i += 3;
-        } else {
-            const r = scanOp(src, i, n);
-            tag = r.tag;
-            i = r.end;
-        }
+    var cur = Cursor.init(src, language, opts);
+    while (cur.next()) |t| {
         if (toks.len >= toks.capacity) try toks.ensureTotalCapacity(alloc, toks.capacity * 2 + 16);
-        toks.appendAssumeCapacity(.{ .tag = tag, .start = start, .len = i - start, .has_newline_before = saw_nl, .has_unicode_escape = has_esc });
-
-        // Maintain JSX opening-tag depth. `<` opens a JSX element when in
-        // expression/child position (regexAllowed) and followed by a tag-name
-        // start or `>` (fragment); `{`/`}` nest inside the tag header; `>`
-        // closes the header.
-        if (is_jsx) {
-            switch (tag) {
-                .less_than => {
-                    if (Lex.regexAllowed(prev)) {
-                        const nb: u8 = if (i < n) src[i] else 0;
-                        const opens = nb == '>' or nb == '_' or nb == '$' or
-                            (nb >= 'a' and nb <= 'z') or (nb >= 'A' and nb <= 'Z') or nb >= 0x80;
-                        if (opens) jsx_tag_depth += 1;
-                    }
-                },
-                .l_brace => if (jsx_tag_depth > 0) {
-                    jsx_brace_nest += 1;
-                },
-                .r_brace => if (jsx_brace_nest > 0) {
-                    jsx_brace_nest -= 1;
-                },
-                .greater_than => if (jsx_tag_depth > 0 and jsx_brace_nest == 0) {
-                    jsx_tag_depth -= 1;
-                },
-                else => {},
-            }
-        }
-
-        prev_kind = if (isPropertyAccess(prev) and tag.isKeyword()) .identifier else tag;
-        saw_nl = false;
-        at_line_start = false;
+        toks.appendAssumeCapacity(.{
+            .tag = t.tag,
+            .start = t.start,
+            .len = t.len,
+            .has_newline_before = t.has_newline_before,
+            .has_unicode_escape = t.has_unicode_escape,
+        });
     }
-    try toks.append(alloc, .{ .tag = .eof, .start = n, .len = 0, .has_newline_before = saw_nl });
     return toks;
 }
