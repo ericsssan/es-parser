@@ -11,9 +11,9 @@
 //! suppression in JSX context), and the `has_newline_before` /
 //! `has_unicode_escape` per-token flags.
 //!
-//! Options track the `tokenizeWithLanguage` defaults (`annex_b = true`,
-//! `is_module = false`); the `language` argument selects the TS keyword set
-//! and JSX lexing.
+//! The `language` argument selects the TS keyword set and JSX lexing; a
+//! `TokenizeOptions` (via `tokenizeScalarWithOptions`) gates Annex B HTML
+//! comments through `is_module` / `annex_b`, matching `tokenizeWithAllOptions`.
 //!
 //! Token streams are byte-for-byte identical to the bitmap lexer across the
 //! conformance corpus, except on inputs containing invalid UTF-8 where the
@@ -355,9 +355,21 @@ fn scanOp(src: []const u8, i: u32, n: u32) Op {
     };
 }
 
-/// Tokenize `src` into a `TokenList`. `language` selects the TS keyword set and
-/// JSX lexing, matching `Lexer.tokenizeWithLanguage`.
+/// Tokenize `src` into a `TokenList` using the default options, matching
+/// `Lexer.tokenizeWithLanguage`. `language` selects the TS keyword set and JSX.
 pub fn tokenizeScalar(alloc: std.mem.Allocator, src: []const u8, language: Language) !TokenList {
+    return tokenizeScalarWithOptions(alloc, src, language, .{});
+}
+
+/// Tokenize `src` into a `TokenList`, matching `Lexer.tokenizeWithAllOptions`.
+/// `opts.is_module` / `opts.annex_b` gate Annex B HTML comments; the streaming
+/// publish fields are accepted but ignored (this tokenizer is not incremental).
+pub fn tokenizeScalarWithOptions(
+    alloc: std.mem.Allocator,
+    src: []const u8,
+    language: Language,
+    opts: Lex.TokenizeOptions,
+) !TokenList {
     var toks: TokenList = .empty;
     try toks.ensureTotalCapacity(alloc, @max(src.len / 4 + 16, 64));
     const n: u32 = @intCast(src.len);
@@ -373,10 +385,10 @@ pub fn tokenizeScalar(alloc: std.mem.Allocator, src: []const u8, language: Langu
     // classify a string as a JSX attribute value vs. an ordinary string.
     var jsx_tag_depth: u32 = 0;
     var jsx_brace_nest: u32 = 0;
-    // Matches the `tokenizeWithLanguage` default options: Annex B HTML comments
-    // (`<!--` / `-->`) are enabled in non-module scripts.
-    const annex_b = true;
-    const is_module = false;
+    // Annex B HTML comments (`<!--` / `-->`) are enabled only in non-module
+    // scripts with annex_b set.
+    const annex_b = opts.annex_b;
+    const is_module = opts.is_module;
 
     // Hashbang `#!...` only valid at byte 0.
     if (n >= 2 and src[0] == '#' and src[1] == '!') {
@@ -580,6 +592,13 @@ pub fn tokenizeScalar(alloc: std.mem.Allocator, src: []const u8, language: Langu
                 tag = .r_brace;
                 i += 1;
             }
+        } else if (c == '-' and at_line_start and (is_module or !annex_b) and
+            i + 2 < n and src[i + 1] == '-' and src[i + 2] == '>')
+        {
+            // A line-start `-->` outside Annex B (module, or annex_b disabled)
+            // is not an HTML close comment — it is a single invalid token.
+            tag = .invalid;
+            i += 3;
         } else {
             const r = scanOp(src, i, n);
             tag = r.tag;
