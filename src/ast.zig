@@ -944,7 +944,51 @@ pub const Ast = struct {
         const end = start + self.tokens.items(.len)[tok];
         return .{ .start = start, .end = end };
     }
+
+    /// Compute authoritative per-node byte-spans (subtree min-start .. max-end).
+    /// Caller owns the returned slices. This is the Phase-1 foundation of the
+    /// byte-span-AST migration: it gives every node a real `{start,end}` derived
+    /// from the parser's existing token data, so later phases can store it on the
+    /// node and drop the token-index indirection (enabling token-array discard /
+    /// fused lexing).
+    ///
+    /// `main_token` alone is NOT the node's start — it is the operator for infix
+    /// nodes — so the start must be the minimum over the subtree. `node_end_toks`
+    /// is authoritative for the end. We seed each node from its own token span,
+    /// then fold each node's span into its parent. The parser creates a node only
+    /// after its children, so a low→high pass propagates fully.
+    pub fn computeByteSpans(self: *const Ast, allocator: std.mem.Allocator) !struct { start: []u32, end: []u32 } {
+        const n = self.nodes.len;
+        const starts_t = self.tokens.items(.start);
+        const lens_t = self.tokens.items(.len);
+        const main_toks = self.nodes.items(.main_token);
+        const lo = try allocator.alloc(u32, n);
+        errdefer allocator.free(lo);
+        const hi = try allocator.alloc(u32, n);
+        errdefer allocator.free(hi);
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            const mt = main_toks[i];
+            const s = if (mt < starts_t.len) starts_t[mt] else 0;
+            lo[i] = s;
+            const et = if (i < self.node_end_toks.len) self.node_end_toks[i] else mt;
+            hi[i] = if (et < starts_t.len) starts_t[et] + lens_t[et] else s;
+            if (hi[i] < lo[i]) hi[i] = lo[i];
+        }
+        // Fold each node's span into its parent (parent index > child index).
+        i = 0;
+        while (i < n) : (i += 1) {
+            if (i >= self.parents.len) break;
+            const p = self.parents[i];
+            if (p == parent_none or p >= n) continue;
+            if (lo[i] < lo[p]) lo[p] = lo[i];
+            if (hi[i] > hi[p]) hi[p] = hi[i];
+        }
+        return .{ .start = lo, .end = hi };
+    }
 };
+
+const parent_none: u32 = std.math.maxInt(u32);
 
 // ── Helpers ────────────────────────────────────────────────
 
