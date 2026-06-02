@@ -93,6 +93,13 @@ pub const SemanticAnalyzer = struct {
         /// Build the per-symbol ref-range index (counting sort over all refs).
         /// Skip when no active rule calls symbols.getRefRange().
         build_ref_ranges: bool = true,
+        /// Build the control-flow graph + reachability (code paths). Defaults
+        /// on to preserve behavior; set false when no active rule needs flow
+        /// analysis — the CFG build is ~half of analyze, so skipping it is the
+        /// largest single saving in the pipeline. With it off, node_reachable /
+        /// loop_exit_reachable are empty (consumers bounds-check → all-alive)
+        /// and code_path_result is null.
+        need_cfg: bool = true,
     };
 
     /// Analyze an AST that was parsed with scope-event emission enabled.
@@ -126,10 +133,32 @@ pub const SemanticAnalyzer = struct {
         // means events were never emitted — fail loudly instead of silently
         // returning an empty result.
         if (ast.scope_events.len == 0) return Error.MissingScopeEvents;
-        var result = try event_resolver.resolveFull(allocator, ast, ast.scope_events, .{
+        const ropts = event_resolver.Options{
             .skip_ref_ranges = !opts.build_ref_ranges,
             .globals = opts.globals,
-        });
+        };
+        var result = if (opts.need_cfg)
+            try event_resolver.resolveFull(allocator, ast, ast.scope_events, ropts)
+        else blk: {
+            // Lazy CFG: skip the control-flow graph + reachability build (~half
+            // of analyze). Run the scope/symbol/reference walk only and present
+            // it as a SemanticResult with empty reachability (all-alive) and no
+            // code paths. Callers must only set need_cfg=false when no active
+            // rule needs flow analysis.
+            const sp = try event_resolver.resolveFullScope(allocator, ast, ast.scope_events, ropts);
+            // ref_event_to_id is only used to stitch CFG seg ids; unused here.
+            if (sp.ref_event_to_id.len != 0) allocator.free(sp.ref_event_to_id);
+            break :blk SemanticResult{
+                .scopes = sp.scopes,
+                .symbols = sp.symbols,
+                .references = sp.references,
+                .ref_by_sym = sp.ref_by_sym,
+                .diagnostics = &.{},
+                .node_reachable = &.{},
+                .loop_exit_reachable = &.{},
+                .code_path_result = null,
+            };
+        };
         if (opts.build_parents) {
             if (ast.parents.len > 0) {
                 result.parent_indices = try allocator.dupe(u32, ast.parents);
@@ -137,7 +166,9 @@ pub const SemanticAnalyzer = struct {
                 result.parent_indices = try parent_builder.buildParentsOnly(ast, allocator);
             }
         }
-        computeLoopBodyExitability(ast, result.loop_exit_reachable, result.node_reachable);
+        // Loop-exit reachability is derived from the CFG; only meaningful when
+        // it was built.
+        if (opts.need_cfg) computeLoopBodyExitability(ast, result.loop_exit_reachable, result.node_reachable);
         return result;
     }
 };
