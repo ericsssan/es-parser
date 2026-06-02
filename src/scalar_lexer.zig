@@ -491,7 +491,6 @@ pub const Cursor = struct {
     saw_nl: bool = false,
     at_line_start: bool = true,
     tmpl_depth: u32 = 0,
-    brace_d: [16]u32 = @splat(0),
     jsx_tag_depth: u32 = 0,
     jsx_brace_nest: u32 = 0,
     is_ts: bool,
@@ -499,15 +498,19 @@ pub const Cursor = struct {
     annex_b: bool,
     is_module: bool,
     done: bool = false,
+    // NOTE: the template `{`-nesting array lives OUTSIDE the struct (passed to
+    // `next` by pointer). Keeping it out lets a caller copy the Cursor into a
+    // local whose scalar fields the compiler can hold in registers across the
+    // hot fill loop — an in-struct `[16]u32` blocks that scalar-replacement.
 
-    /// Full rewind snapshot. `src`/config are constant, so only mutable state.
+    /// Full rewind snapshot. `src`/config are constant, so only mutable scalar
+    /// state. The template brace-depth array is the caller's to snapshot.
     pub const State = struct {
         i: u32,
         prev_kind: Tag,
         saw_nl: bool,
         at_line_start: bool,
         tmpl_depth: u32,
-        brace_d: [16]u32,
         jsx_tag_depth: u32,
         jsx_brace_nest: u32,
         done: bool,
@@ -531,7 +534,6 @@ pub const Cursor = struct {
             .saw_nl = self.saw_nl,
             .at_line_start = self.at_line_start,
             .tmpl_depth = self.tmpl_depth,
-            .brace_d = self.brace_d,
             .jsx_tag_depth = self.jsx_tag_depth,
             .jsx_brace_nest = self.jsx_brace_nest,
             .done = self.done,
@@ -544,14 +546,13 @@ pub const Cursor = struct {
         self.saw_nl = s.saw_nl;
         self.at_line_start = s.at_line_start;
         self.tmpl_depth = s.tmpl_depth;
-        self.brace_d = s.brace_d;
         self.jsx_tag_depth = s.jsx_tag_depth;
         self.jsx_brace_nest = s.jsx_brace_nest;
         self.done = s.done;
     }
 
     /// Produce the next token, or null at end of stream (after the EOF token).
-    pub fn next(self: *Cursor) ?Token {
+    pub inline fn next(self: *Cursor, brace_d: *[16]u32) ?Token {
         const src = self.src;
         const n = self.n;
         const is_ts = self.is_ts;
@@ -722,17 +723,17 @@ pub const Cursor = struct {
                     tag = .invalid;
                 } else if (res.has_expr) {
                     tag = .template_head;
-                    if (self.tmpl_depth < self.brace_d.len) {
-                        self.brace_d[self.tmpl_depth] = 0;
+                    if (self.tmpl_depth < brace_d.len) {
+                        brace_d[self.tmpl_depth] = 0;
                         self.tmpl_depth += 1;
                     }
                 } else tag = .template_no_sub;
             } else if (c == '{') {
-                if (self.tmpl_depth > 0) self.brace_d[self.tmpl_depth - 1] += 1;
+                if (self.tmpl_depth > 0) brace_d[self.tmpl_depth - 1] += 1;
                 tag = .l_brace;
                 self.i += 1;
             } else if (c == '}') {
-                if (self.tmpl_depth > 0 and self.brace_d[self.tmpl_depth - 1] == 0) {
+                if (self.tmpl_depth > 0 and brace_d[self.tmpl_depth - 1] == 0) {
                     const res = Lex.templateChunkEnd(src, start);
                     self.i = res.end;
                     if (!res.terminated) {
@@ -744,7 +745,7 @@ pub const Cursor = struct {
                         self.tmpl_depth -= 1;
                     }
                 } else {
-                    if (self.tmpl_depth > 0) self.brace_d[self.tmpl_depth - 1] -= 1;
+                    if (self.tmpl_depth > 0) brace_d[self.tmpl_depth - 1] -= 1;
                     tag = .r_brace;
                     self.i += 1;
                 }

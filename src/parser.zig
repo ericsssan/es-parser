@@ -21,6 +21,9 @@ const scalar_lexer = @import("scalar_lexer.zig");
 pub const CursorSource = struct {
     cursor: *scalar_lexer.Cursor,
     buf: *TokenList,
+    /// Template `{`-nesting depths, owned by the caller (kept out of the Cursor
+    /// so the fill loop's local cursor copy registerizes — see `fillTokens`).
+    brace_d: *[16]u32,
 };
 const scope_events_mod = @import("scope_events.zig");
 const ScopeEventStream = scope_events_mod.EventStream;
@@ -1031,6 +1034,7 @@ pub const Parser = struct {
         errdefer buf.deinit(allocator);
         try buf.ensureTotalCapacity(allocator, source.len / 3 + 64);
         var cursor = scalar_lexer.Cursor.init(source, language, .{ .is_module = is_module_file, .annex_b = annex_b });
+        var brace_d: [16]u32 = @splat(0);
         const tree = try parseInternal(
             allocator,
             source,
@@ -1044,7 +1048,7 @@ pub const Parser = struct {
             null,
             annex_b,
             false,
-            .{ .cursor = &cursor, .buf = &buf },
+            .{ .cursor = &cursor, .buf = &buf, .brace_d = &brace_d },
         );
         return .{ .ast = tree, .tokens = buf };
     }
@@ -1419,12 +1423,32 @@ pub const Parser = struct {
     fn fillTokens(self: *Parser, want: usize) void {
         const cs = self.cursor_src.?;
         const target = want + 256;
-        while (self.parsed_len <= target) {
-            const t = cs.cursor.next() orelse break;
-            if (cs.buf.len >= cs.buf.capacity) {
-                cs.buf.ensureTotalCapacity(self.gpa, cs.buf.capacity * 2 + 256) catch break;
-                self.refreshTokPtrs();
+        if (cs.buf.len > target) return;
+        // Pre-grow once so the hot loop needs no per-token capacity check, then
+        // drive the cursor from a LOCAL copy. The local lets the compiler keep
+        // the cursor's hot state (i/prev_kind/saw_nl/at_line_start) in registers
+        // across the inlined next() — the per-token reload through cs.cursor was
+        // the fused path's overhead vs. the materialized direct loop. Sync back
+        // at the batch boundary, which is exactly where the next fill resumes.
+        cs.buf.ensureTotalCapacity(self.gpa, target + 1) catch {
+            // Allocation failed: fall back to the incremental grow path.
+            while (self.parsed_len <= target) {
+                const t = cs.cursor.next(cs.brace_d) orelse break;
+                if (cs.buf.len >= cs.buf.capacity) {
+                    cs.buf.ensureTotalCapacity(self.gpa, cs.buf.capacity * 2 + 256) catch break;
+                    self.refreshTokPtrs();
+                }
+                cs.buf.appendAssumeCapacity(.{ .tag = t.tag, .start = t.start, .len = t.len, .has_newline_before = t.has_newline_before, .has_unicode_escape = t.has_unicode_escape });
+                self.parsed_len = cs.buf.len;
             }
+            return;
+        };
+        self.refreshTokPtrs();
+        var lc = cs.cursor.*;
+        const bd = cs.brace_d;
+        var len = cs.buf.len;
+        while (len <= target) {
+            const t = lc.next(bd) orelse break;
             cs.buf.appendAssumeCapacity(.{
                 .tag = t.tag,
                 .start = t.start,
@@ -1432,8 +1456,10 @@ pub const Parser = struct {
                 .has_newline_before = t.has_newline_before,
                 .has_unicode_escape = t.has_unicode_escape,
             });
-            self.parsed_len = cs.buf.len;
+            len += 1;
         }
+        cs.cursor.* = lc;
+        self.parsed_len = cs.buf.len;
     }
 
     /// Streaming slow-path: refresh the visible token count from the lex
