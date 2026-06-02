@@ -741,6 +741,17 @@ pub const Ast = struct {
     parents: []const u32 = &.{},
     parents_cap: u32 = 0,
 
+    /// Phase 2 of the byte-span-AST migration: authoritative per-node subtree
+    /// byte spans (`node_start_bytes[i] .. node_end_bytes[i]`), populated by
+    /// `populateByteSpans` when requested. Empty until populated — node spans
+    /// are otherwise derived from token indices. These let consumers (and,
+    /// eventually, Ez) read node ranges without the token array, the
+    /// precondition for discarding it and fusing the lexer.
+    node_start_bytes: []const u32 = &.{},
+    node_start_bytes_cap: u32 = 0,
+    node_end_bytes: []const u32 = &.{},
+    node_end_bytes_cap: u32 = 0,
+
     pub const NodeList = std.MultiArrayList(Node);
     pub const TokenList = std.MultiArrayList(struct {
         tag: TokenTag,
@@ -783,6 +794,8 @@ pub const Ast = struct {
         freeCapped(allocator, self.scope_events, self.scope_events_cap);
         freeCapped(allocator, self.node_end_toks, self.node_end_toks_cap);
         freeCapped(allocator, self.parents, self.parents_cap);
+        freeCapped(allocator, self.node_start_bytes, self.node_start_bytes_cap);
+        freeCapped(allocator, self.node_end_bytes, self.node_end_bytes_cap);
         self.* = undefined;
     }
 
@@ -943,6 +956,29 @@ pub const Ast = struct {
         const start = self.tokenStart(tok);
         const end = start + self.tokens.items(.len)[tok];
         return .{ .start = start, .end = end };
+    }
+
+    /// Populate `node_start_bytes` / `node_end_bytes` with authoritative subtree
+    /// byte spans (idempotent — no-op if already populated). Requires the token
+    /// array to still be present. After this, `nodeByteSpan` is O(1) and the
+    /// spans persist on the Ast independent of the tokens.
+    pub fn populateByteSpans(self: *Ast, allocator: std.mem.Allocator) !void {
+        if (self.node_start_bytes.len == self.nodes.len and self.nodes.len != 0) return;
+        const spans = try self.computeByteSpans(allocator);
+        self.node_start_bytes = spans.start;
+        self.node_start_bytes_cap = @intCast(spans.start.len);
+        self.node_end_bytes = spans.end;
+        self.node_end_bytes_cap = @intCast(spans.end.len);
+    }
+
+    /// O(1) authoritative subtree byte-span of a node. Requires
+    /// `populateByteSpans` to have been called.
+    pub fn nodeByteSpan(self: *const Ast, index: NodeIndex) Span {
+        const i = index.toInt();
+        if (i < self.node_start_bytes.len) {
+            return .{ .start = self.node_start_bytes[i], .end = self.node_end_bytes[i] };
+        }
+        return self.nodeSpan(index); // not populated — fall back to main-token span
     }
 
     /// Compute authoritative per-node byte-spans (subtree min-start .. max-end).
