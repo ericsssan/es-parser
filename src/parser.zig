@@ -2766,11 +2766,16 @@ pub const Parser = struct {
             var var_names_n: usize = 0;
             const allow_fn_dup = !self.is_module and !self.in_strict and self.annex_b;
             for (evs) |ev| {
-                // Guard against corrupt enum bytes: reading past the live event count
-                // can land on uninitialized memory whose tag byte is not a valid
-                // EventKind. Skip such events instead of panicking the runner.
+                // Guard against corrupt events: reading past the live event count
+                // can land on uninitialized memory (an arena/GPA hands back dirty
+                // reused blocks; only page_allocator zero-fills). Skip an event
+                // whose kind byte isn't a valid EventKind OR whose node index is
+                // out of range — the latter otherwise feeds a garbage index into
+                // node_main_token_ptr[...] below → tok_starts_ptr[huge] → segfault
+                // (ReleaseFast only; the value is benign zero under zeroed pages).
                 const ev_kind_int = @intFromEnum(ev.kind);
                 if (ev_kind_int >= @typeInfo(ScopeEventKind).@"enum".fields.len) continue;
+                if (@as(usize, @intCast(ev.node)) >= self.nodes.len) continue;
                 switch (ev.kind) {
                     .scope_open => if (ev.aux != @intFromEnum(ScopeKindU8.elided)) { depth += 1; },
                     .scope_close => depth -= 1,
