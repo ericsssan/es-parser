@@ -6,11 +6,14 @@
 //! scalar inner loops (no bitmaps). Handles the full grammar the bitmap lexer
 //! does: ASCII and Unicode identifiers, `\u`-escaped identifiers and escaped
 //! keywords, numeric/bigint literals, strings, regex-vs-division, template
-//! literals (with nested `${}`), line/block/HTML (Annex B) comments, and the
-//! `has_newline_before` / `has_unicode_escape` per-token flags.
+//! literals (with nested `${}`), line/block/HTML (Annex B) comments, JSX
+//! lexing (attribute/text strings, tag-depth tracking, regex and comment
+//! suppression in JSX context), and the `has_newline_before` /
+//! `has_unicode_escape` per-token flags.
 //!
 //! Options track the `tokenizeWithLanguage` defaults (`annex_b = true`,
-//! `is_module = false`); JSX-specific lexing is not yet handled.
+//! `is_module = false`); the `language` argument selects the TS keyword set
+//! and JSX lexing.
 //!
 //! Token streams are byte-for-byte identical to the bitmap lexer across the
 //! conformance corpus, except on inputs containing invalid UTF-8 where the
@@ -19,12 +22,49 @@
 const std = @import("std");
 const token = @import("token.zig");
 const Tag = token.Tag;
+const Language = token.Language;
 const lexer = @import("lexer.zig");
 const Lex = @import("lexer_helpers.zig");
 const uid = @import("unicode_id.zig");
 const Ast = @import("ast.zig");
 
 pub const TokenList = Ast.Ast.TokenList;
+
+/// Scan a string literal starting at `open`. In JSX context (`is_jsx`) the
+/// string terminates at `<` and may span newlines; JSX attribute strings
+/// (`jsx_no_escape`) treat `\` as a literal byte. Mirrors `stringEndBMOptFull`.
+fn scanStringJsx(src: []const u8, open: u32, n: u32, is_jsx: bool, jsx_no_escape: bool) u32 {
+    const quote = src[open];
+    var i = open + 1;
+    while (i < n) {
+        const c = src[i];
+        if (c == quote) return i + 1;
+        if (is_jsx and c == '<') return i;
+        if (is_jsx and (c == '\n' or c == '\r')) {
+            i += 1;
+            continue;
+        }
+        if (c == '\\') {
+            if (jsx_no_escape) {
+                i += 1;
+                continue;
+            }
+            if (i + 2 < n and src[i + 1] == '\r' and src[i + 2] == '\n') {
+                i += 3;
+            } else if (i + 3 < n and src[i + 1] == 0xE2 and src[i + 2] == 0x80 and (src[i + 3] == 0xA8 or src[i + 3] == 0xA9)) {
+                i += 4;
+            } else {
+                i += 2;
+            }
+            continue;
+        }
+        if (c == '\n' or c == '\r') return i;
+        i += 1;
+    }
+    // An escape near EOF can advance `i` past `n`; the bitmap scanner reports
+    // the same overshoot, so match it rather than clamping to `n`.
+    return @max(i, n);
+}
 
 inline fn isPropertyAccess(t: Tag) bool {
     return t == .dot or t == .question_dot;
@@ -315,17 +355,24 @@ fn scanOp(src: []const u8, i: u32, n: u32) Op {
     };
 }
 
-/// Tokenize `src` into a `TokenList`. `is_ts` selects the TS keyword set.
-pub fn tokenizeScalar(alloc: std.mem.Allocator, src: []const u8, is_ts: bool) !TokenList {
+/// Tokenize `src` into a `TokenList`. `language` selects the TS keyword set and
+/// JSX lexing, matching `Lexer.tokenizeWithLanguage`.
+pub fn tokenizeScalar(alloc: std.mem.Allocator, src: []const u8, language: Language) !TokenList {
     var toks: TokenList = .empty;
     try toks.ensureTotalCapacity(alloc, @max(src.len / 4 + 16, 64));
     const n: u32 = @intCast(src.len);
+    const is_ts = language.isTs();
+    const is_jsx = language.isJsx();
     var i: u32 = 0;
     var saw_nl = false;
     var at_line_start = true;
     var prev_kind: Tag = .eof;
     var tmpl_depth: u32 = 0;
     var brace_d: [16]u32 = @splat(0);
+    // JSX opening-tag header depth and `{...}` nesting within it; used to
+    // classify a string as a JSX attribute value vs. an ordinary string.
+    var jsx_tag_depth: u32 = 0;
+    var jsx_brace_nest: u32 = 0;
     // Matches the `tokenizeWithLanguage` default options: Annex B HTML comments
     // (`<!--` / `-->`) are enabled in non-module scripts.
     const annex_b = true;
@@ -362,7 +409,24 @@ pub fn tokenizeScalar(alloc: std.mem.Allocator, src: []const u8, is_ts: bool) !T
             },
             '/' => {
                 if (i + 1 < n and src[i + 1] == '/') {
-                    i = lineTerminatorScan(src, i + 2, n);
+                    const ce = lineTerminatorScan(src, i + 2, n);
+                    // JSX: a `//` inside JSX text content (where the line also
+                    // contains `</`) is literal text, not a comment. Skip both
+                    // slashes so the rest of the line stays visible.
+                    if (is_jsx and !(i > 0 and src[i - 1] == '/')) {
+                        var k = i + 2;
+                        while (k + 1 < ce) : (k += 1) {
+                            if (src[k] == '<' and src[k + 1] == '/') {
+                                i += 2;
+                                break;
+                            }
+                        } else {
+                            i = ce;
+                            saw_nl = true;
+                        }
+                        continue;
+                    }
+                    i = ce;
                     saw_nl = true;
                     continue;
                 }
@@ -370,6 +434,17 @@ pub fn tokenizeScalar(alloc: std.mem.Allocator, src: []const u8, is_ts: bool) !T
                     const res = Lex.blockCommentEnd(src, i);
                     if (res.has_nl) { saw_nl = true; at_line_start = true; }
                     if (res.end >= n and !(n >= 2 and src[n - 2] == '*' and src[n - 1] == '/')) {
+                        // JSX: an unterminated `/*` in JSX text is a literal `/`,
+                        // not an error. Emit it as a slash and resume after it.
+                        if (is_jsx) {
+                            if (toks.len >= toks.capacity) try toks.ensureTotalCapacity(alloc, toks.capacity * 2 + 16);
+                            toks.appendAssumeCapacity(.{ .tag = .slash, .start = i, .len = 1, .has_newline_before = saw_nl });
+                            prev_kind = .slash;
+                            saw_nl = false;
+                            at_line_start = false;
+                            i += 1;
+                            continue;
+                        }
                         // `Lex.blockCommentEnd`'s scalar tail can miss a trailing
                         // newline byte; rescan the body so an unterminated comment's
                         // newline still propagates to the following token.
@@ -463,8 +538,13 @@ pub fn tokenizeScalar(alloc: std.mem.Allocator, src: []const u8, is_ts: bool) !T
                 .number_literal;
         } else if (c == '"' or c == '\'') {
             tag = .string_literal;
-            i = Lex.stringEnd(src, start);
-        } else if (c == '/' and Lex.regexAllowed(prev)) {
+            // JSX attribute value (`<div id="x">`, prev `=` inside a tag header):
+            // no escapes, terminate at `<`. JSX text content (prev `>` or an
+            // identifier): terminate at `<` but still a string. Otherwise plain JS.
+            const jsx_attr = is_jsx and prev == .equal and jsx_tag_depth > 0;
+            const jsx_text = is_jsx and (prev == .greater_than or prev == .identifier);
+            i = scanStringJsx(src, start, n, jsx_attr or jsx_text, jsx_attr);
+        } else if (c == '/' and Lex.regexAllowed(prev) and !(is_jsx and (prev == .less_than or prev == .greater_than))) {
             tag = .regex_literal;
             i = Lex.regexEnd(src, start);
         } else if (c == '`') {
@@ -507,6 +587,34 @@ pub fn tokenizeScalar(alloc: std.mem.Allocator, src: []const u8, is_ts: bool) !T
         }
         if (toks.len >= toks.capacity) try toks.ensureTotalCapacity(alloc, toks.capacity * 2 + 16);
         toks.appendAssumeCapacity(.{ .tag = tag, .start = start, .len = i - start, .has_newline_before = saw_nl, .has_unicode_escape = has_esc });
+
+        // Maintain JSX opening-tag depth. `<` opens a JSX element when in
+        // expression/child position (regexAllowed) and followed by a tag-name
+        // start or `>` (fragment); `{`/`}` nest inside the tag header; `>`
+        // closes the header.
+        if (is_jsx) {
+            switch (tag) {
+                .less_than => {
+                    if (Lex.regexAllowed(prev)) {
+                        const nb: u8 = if (i < n) src[i] else 0;
+                        const opens = nb == '>' or nb == '_' or nb == '$' or
+                            (nb >= 'a' and nb <= 'z') or (nb >= 'A' and nb <= 'Z') or nb >= 0x80;
+                        if (opens) jsx_tag_depth += 1;
+                    }
+                },
+                .l_brace => if (jsx_tag_depth > 0) {
+                    jsx_brace_nest += 1;
+                },
+                .r_brace => if (jsx_brace_nest > 0) {
+                    jsx_brace_nest -= 1;
+                },
+                .greater_than => if (jsx_tag_depth > 0 and jsx_brace_nest == 0) {
+                    jsx_tag_depth -= 1;
+                },
+                else => {},
+            }
+        }
+
         prev_kind = if (isPropertyAccess(prev) and tag.isKeyword()) .identifier else tag;
         saw_nl = false;
         at_line_start = false;
