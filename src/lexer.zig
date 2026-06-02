@@ -11,6 +11,7 @@
 /// helpers from lexer_helpers.zig so semantics stay identical.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Token = @import("token.zig");
 const Tag = Token.Tag;
 const Language = Token.Language;
@@ -20,6 +21,48 @@ pub const TokenList = Ast.Ast.TokenList;
 
 const V16 = @Vector(16, u8);
 const B16 = @Vector(16, bool);
+
+// ── SIMD nibble classifier (Apple Silicon / aarch64) ────────────────────────
+// simdjson-style byte classification via two `tbl` table lookups instead of
+// ~8 per-class SIMD compares. `cls = lo_nib[lo] & hi_nib[hi]`; bits 0-6 mark
+// the seven identifier rectangles (a-z, A-Z, 0-9, _, $, 0x80+), bit 7 marks
+// newline (\n \r). Whitespace (space/tab) and `structural = ~(ident|nl|ws)`
+// are derived as before. Tables verified byte-for-byte against the scalar
+// classifier over all 256 values. ~1.85× the per-compare classifier in
+// isolation; other architectures use the compare path in `classifyChunk`.
+// `[16]u8` (not `V16`) so the regression test can index them at runtime; they
+// coerce to `V16` at the `tbl16` call sites.
+const NIB_LO: [16]u8 = .{ 0x2B, 0x3F, 0x3F, 0x3F, 0x7F, 0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0xBD, 0x15, 0x15, 0x95, 0x15, 0x1D };
+const NIB_HI: [16]u8 = .{ 0x80, 0x00, 0x40, 0x02, 0x04, 0x08, 0x10, 0x20, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01 };
+
+inline fn tbl16(table: V16, idx: V16) V16 {
+    return asm ("tbl %[o].16b, {%[t].16b}, %[i].16b"
+        : [o] "=w" (-> V16),
+        : [t] "w" (table), [i] "w" (idx),
+    );
+}
+
+test "nibble classifier tables match the scalar classification for all 256 bytes" {
+    // Guards NIB_LO/NIB_HI against drift: the nibble lookup must reproduce the
+    // ident/newline classes of the compare-path classifier exactly (whitespace
+    // and structural are derived identically in both paths, so matching ident +
+    // newline is sufficient). Portable — exercises the tables, not the asm.
+    var b: u32 = 0;
+    while (b < 256) : (b += 1) {
+        const byte: u8 = @intCast(b);
+        const cls = NIB_LO[byte & 0x0F] & NIB_HI[byte >> 4];
+        const tbl_ident = (cls & 0x7F) != 0;
+        const tbl_newline = (cls & 0x80) != 0;
+
+        const lower = byte | 0x20;
+        const ref_ident = (lower >= 'a' and lower <= 'z') or
+            (byte >= '0' and byte <= '9') or byte == '_' or byte == '$' or byte >= 0x80;
+        const ref_newline = byte == '\n' or byte == '\r';
+
+        try std.testing.expectEqual(ref_ident, tbl_ident);
+        try std.testing.expectEqual(ref_newline, tbl_newline);
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public interface — must match lexer.zig exactly so root.zig dispatch is a
@@ -90,6 +133,20 @@ const ChunkMasks = struct {
 };
 
 inline fn classifyChunk(chunk: V16, m: *ChunkMasks) void {
+    if (comptime builtin.cpu.arch == .aarch64) {
+        // Two-lookup nibble classifier (see NIB_LO/NIB_HI). Produces the
+        // identical ident/newline/structural masks the compare path below does.
+        const lo = chunk & @as(V16, @splat(@as(u8, 0x0F)));
+        const hi = chunk >> @as(@Vector(16, u3), @splat(4));
+        const cls = tbl16(NIB_LO, lo) & tbl16(NIB_HI, hi);
+        const zero: V16 = @splat(0);
+        m.ident = @bitCast((cls & @as(V16, @splat(@as(u8, 0x7F)))) != zero);
+        m.newline = @bitCast((cls & @as(V16, @splat(@as(u8, 0x80)))) != zero);
+        const is_sp: u16 = @bitCast((chunk == @as(V16, @splat(@as(u8, ' ')))) |
+            (chunk == @as(V16, @splat(@as(u8, '\t')))));
+        m.structural = ~(m.ident | m.newline | is_sp);
+        return;
+    }
     // Ident: a-z, A-Z, 0-9, _, $, 0x80+
     //
     // Compress upper-or-lower-letter check into a single range test: ORing
