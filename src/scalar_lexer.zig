@@ -149,30 +149,32 @@ const IdentResult = struct { end: u32, tag: Tag, has_escape: bool };
 
 /// Decode an identifier's raw text (resolving `\u` escapes) and report whether
 /// it spells a reserved word — mirrors the main lexer's keyword check.
+///
+/// Reserved words are 2–10 lowercase ASCII letters, so bail the moment a decoded
+/// character can't belong to one (anything outside `a`–`z`) or the length passes
+/// 10. The hot escaped-identifier case (digits, `_`, `$`, uppercase, or long
+/// names) exits after a few characters without finishing the decode or touching
+/// the keyword map — the keyword check is the dominant cost on escape-heavy code.
 fn decodedIsKeyword(src: []const u8, start: u32, end: u32) bool {
-    var buf: [16]u8 = undefined;
+    var buf: [10]u8 = undefined;
     var len: usize = 0;
     var raw_i: u32 = start;
-    var ok = true;
-    while (raw_i < end and len < buf.len) {
-        const rc = src[raw_i];
-        if (rc == '\\' and raw_i + 1 < end and src[raw_i + 1] == 'u') {
+    while (raw_i < end) {
+        var dc: u32 = undefined;
+        if (src[raw_i] == '\\' and raw_i + 1 < end and src[raw_i + 1] == 'u') {
             const esc = parseUnicodeEscape(src, raw_i, end);
-            if (esc.cp < 0x80) {
-                buf[len] = @intCast(esc.cp);
-                len += 1;
-            } else ok = false;
+            dc = esc.cp;
             raw_i = esc.end;
-        } else if (rc < 0x80) {
-            buf[len] = rc;
-            len += 1;
-            raw_i += 1;
         } else {
-            ok = false;
+            dc = src[raw_i];
             raw_i += 1;
         }
+        if (dc < 'a' or dc > 'z') return false; // not a reserved-word character
+        if (len == buf.len) return false; // longer than any reserved word
+        buf[len] = @intCast(dc);
+        len += 1;
     }
-    return ok and len <= 10 and raw_i >= end and token.keywords.get(buf[0..len]) != null;
+    return token.keywords.get(buf[0..len]) != null;
 }
 
 /// SIMD scan of an ASCII identifier body: returns the offset of the first byte
