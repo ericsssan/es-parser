@@ -2681,7 +2681,10 @@ pub fn parsePrimaryExpression(p: *Parser) Error!NodeIndex {
         .slash, .slash_equal => return try rescanSlashAsRegex(p),
         else => {
             if (tag.isTsContextualKeyword()) {
-                return try parseIdentifierRef(p);
+                // A contextual keyword in expression position is an identifier,
+                // and like any identifier it can be a single-parameter arrow
+                // head (`type => …`, `as => …`), so allow the arrow path.
+                return try parseIdentifierOrArrow(p);
             }
             try p.emitError("Expected expression");
             _ = p.advance(); // skip unexpected token to guarantee forward progress
