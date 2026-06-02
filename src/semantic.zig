@@ -289,7 +289,7 @@ fn isInfiniteEmptyLoop(
             const ci = @intFromEnum(cond);
             if (ci >= tags.len) return false;
             if (tags[ci] != .boolean_literal) return false;
-            if (ast.tokenTag(ast.nodeMainToken(cond)) != .kw_true) return false;
+            if (!std.mem.eql(u8, ast.nodeName(cond), "true")) return false;
             return emptyBody(tags, datas, data.rhs);
         },
         .do_while_stmt => {
@@ -298,7 +298,7 @@ fn isInfiniteEmptyLoop(
             const ci = @intFromEnum(cond);
             if (ci >= tags.len) return false;
             if (tags[ci] != .boolean_literal) return false;
-            if (ast.tokenTag(ast.nodeMainToken(cond)) != .kw_true) return false;
+            if (!std.mem.eql(u8, ast.nodeName(cond), "true")) return false;
             return emptyBody(tags, datas, data.lhs);
         },
         .for_stmt => {
@@ -462,7 +462,7 @@ fn bodyAlwaysExits(
             const ci = @intFromEnum(cond);
             if (ci >= tags.len) break :blk false;
             if (tags[ci] != .boolean_literal) break :blk false;
-            if (ast.tokenTag(ast.nodeMainToken(cond)) != .kw_true) break :blk false;
+            if (!std.mem.eql(u8, ast.nodeName(cond), "true")) break :blk false;
             break :blk bodyHasNoBreakEscape(ast, tags, datas, data.rhs, false, d);
         },
         .do_while_stmt => blk: {
@@ -471,7 +471,7 @@ fn bodyAlwaysExits(
             const ci = @intFromEnum(cond);
             if (ci >= tags.len) break :blk false;
             if (tags[ci] != .boolean_literal) break :blk false;
-            if (ast.tokenTag(ast.nodeMainToken(cond)) != .kw_true) break :blk false;
+            if (!std.mem.eql(u8, ast.nodeName(cond), "true")) break :blk false;
             break :blk bodyHasNoBreakEscape(ast, tags, datas, data.lhs, false, d);
         },
         .for_stmt => blk: {

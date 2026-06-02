@@ -752,6 +752,17 @@ pub const Ast = struct {
     node_end_bytes: []const u32 = &.{},
     node_end_bytes_cap: u32 = 0,
 
+    /// Per-node *name* byte range (`source[name_start..name_start+name_len]`):
+    /// the slice consumers resolve identifiers/labels by. Usually the node's
+    /// main_token span, but resolved through node-tag conventions (e.g.
+    /// `ts_enum_decl` keeps its name token in `extra_data`, not `main_token`).
+    /// Populated by `populateNameBytes`; lets the binder read names without the
+    /// token array (Milestone A of dropping it). `name_len == 0` ⇒ unnamed node.
+    node_name_starts: []const u32 = &.{},
+    node_name_starts_cap: u32 = 0,
+    node_name_lens: []const u32 = &.{},
+    node_name_lens_cap: u32 = 0,
+
     pub const NodeList = std.MultiArrayList(Node);
     pub const TokenList = std.MultiArrayList(struct {
         tag: TokenTag,
@@ -796,6 +807,8 @@ pub const Ast = struct {
         freeCapped(allocator, self.parents, self.parents_cap);
         freeCapped(allocator, self.node_start_bytes, self.node_start_bytes_cap);
         freeCapped(allocator, self.node_end_bytes, self.node_end_bytes_cap);
+        freeCapped(allocator, self.node_name_starts, self.node_name_starts_cap);
+        freeCapped(allocator, self.node_name_lens, self.node_name_lens_cap);
         self.* = undefined;
     }
 
@@ -979,6 +992,63 @@ pub const Ast = struct {
             return .{ .start = self.node_start_bytes[i], .end = self.node_end_bytes[i] };
         }
         return self.nodeSpan(index); // not populated — fall back to main-token span
+    }
+
+    /// Populate `node_name_starts` / `node_name_lens` (idempotent). For each node
+    /// records the byte slice of its *name* token — the same token the binder
+    /// reads today (main_token, except `ts_enum_decl` whose name lives in
+    /// `extra_data`), precomputed so the binder needs no token array. Requires
+    /// the token array to still be present.
+    pub fn populateNameBytes(self: *Ast, allocator: std.mem.Allocator) !void {
+        if (self.node_name_starts.len == self.nodes.len and self.nodes.len != 0) return;
+        const n = self.nodes.len;
+        const starts_t = self.tokens.items(.start);
+        const lens_t = self.tokens.items(.len);
+        const main_toks = self.nodes.items(.main_token);
+        const tags = self.nodes.items(.tag);
+        const datas = self.nodes.items(.data);
+        const ns = try allocator.alloc(u32, n);
+        errdefer allocator.free(ns);
+        const nl = try allocator.alloc(u32, n);
+        errdefer allocator.free(nl);
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            var nt: u32 = main_toks[i];
+            if (tags[i] == .ts_enum_decl) {
+                const extra_idx = @intFromEnum(datas[i].lhs);
+                if (extra_idx < self.extra_data.len) nt = self.extra_data[extra_idx];
+            }
+            if (nt < starts_t.len) {
+                ns[i] = starts_t[nt];
+                nl[i] = lens_t[nt];
+            } else {
+                ns[i] = 0;
+                nl[i] = 0;
+            }
+        }
+        self.node_name_starts = ns;
+        self.node_name_starts_cap = @intCast(n);
+        self.node_name_lens = nl;
+        self.node_name_lens_cap = @intCast(n);
+    }
+
+    /// The source text of a node's name. O(1) from `node_name_starts` when
+    /// populated (no token array needed); otherwise falls back to the token.
+    pub inline fn nodeName(self: *const Ast, index: NodeIndex) []const u8 {
+        const i = index.toInt();
+        if (i < self.node_name_starts.len) {
+            const s = self.node_name_starts[i];
+            const end = @min(s + self.node_name_lens[i], @as(u32, @intCast(self.source.len)));
+            return self.source[s..end];
+        }
+        // Fallback (columns not populated, e.g. streaming): select the name token
+        // exactly as populateNameBytes would, then read it from the token array.
+        var nt = self.nodeMainToken(index);
+        if (self.nodes.items(.tag)[i] == .ts_enum_decl) {
+            const extra_idx = @intFromEnum(self.nodes.items(.data)[i].lhs);
+            if (extra_idx < self.extra_data.len) nt = self.extra_data[extra_idx];
+        }
+        return self.tokenText(nt);
     }
 
     /// Compute authoritative per-node byte-spans (subtree min-start .. max-end).

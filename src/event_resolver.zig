@@ -482,12 +482,8 @@ fn resolveFullImpl(
     // Reconstruct slices using the upper-bound hint for .len so bounds
     // checks pass; per-event read of node[idx] is happens-after the
     // event's release-store, so the data is committed.
-    const tok_starts = if (opts.streaming) |s| ast.tokens.items(.start).ptr[0..s.node_count_hint] else ast.tokens.items(.start);
-    const tok_lens = if (opts.streaming) |s| ast.tokens.items(.len).ptr[0..s.node_count_hint] else ast.tokens.items(.len);
-    const node_main_tokens = if (opts.streaming) |s| ast.nodes.items(.main_token).ptr[0..s.node_count_hint] else ast.nodes.items(.main_token);
     const node_tags = if (opts.streaming) |s| ast.nodes.items(.tag).ptr[0..s.node_count_hint] else ast.nodes.items(.tag);
     const node_datas = if (opts.streaming) |s| ast.nodes.items(.data).ptr[0..s.node_count_hint] else ast.nodes.items(.data);
-    const source = ast.source;
     // Pending label text set by label_open (aux=1) before the loop_open it wraps.
     var pending_label: []const u8 = "";
 
@@ -689,15 +685,13 @@ fn resolveFullImpl(
                 1 => if (do_cfg) try cpb.makeThrow(term_node),
                 2 => if (term_i < node_tags.len and node_tags[term_i] == .break_label) blk: {
                     const lbl_n = node_datas[term_i].lhs;
-                    const lt = node_main_tokens[@intFromEnum(lbl_n)];
-                    const lbl = source[tok_starts[lt] .. tok_starts[lt] + tok_lens[lt]];
+                    const lbl = ast.nodeName(lbl_n);
                     if (do_cfg) try cpb.makeBreakLabeled(lbl, term_node);
                     break :blk;
                 } else if (do_cfg) try cpb.makeBreak(term_node),
                 3 => if (term_i < node_tags.len and node_tags[term_i] == .continue_label) blk: {
                     const lbl_n = node_datas[term_i].lhs;
-                    const lt = node_main_tokens[@intFromEnum(lbl_n)];
-                    const lbl = source[tok_starts[lt] .. tok_starts[lt] + tok_lens[lt]];
+                    const lbl = ast.nodeName(lbl_n);
                     if (do_cfg) try cpb.makeContinueLabeled(lbl, term_node);
                     break :blk;
                 } else if (do_cfg) try cpb.makeContinue(term_node),
@@ -777,16 +771,9 @@ fn resolveFullImpl(
                 break :blk sp - 1;
             };
             const scope_id = stack[target_depth];
-            // For enum declarations the main_token of the ts_enum_decl node is the
-            // `enum` keyword, not the name.  The name token lives in EnumData.name
-            // (first u32 of extra_data starting at node_datas[e.node].lhs).
-            const main_tok = if (kind == .enum_decl) blk: {
-                const extra_idx = @intFromEnum(node_datas[e.node].lhs);
-                break :blk ast.extra_data[extra_idx];
-            } else node_main_tokens[e.node];
-            const start = tok_starts[main_tok];
-            const len = tok_lens[main_tok];
-            const name = source[start .. start + len];
+            // Name byte-range is precomputed per node (handles the `ts_enum_decl`
+            // case where the name lives in EnumData, not main_token).
+            const name = ast.nodeName(@enumFromInt(e.node));
             const name_hash = std.hash.Wyhash.hash(0, name);
             const flags = symbol_mod.flagsFromBindingKind(kind);
             const decl_node: NodeIndex = @enumFromInt(e.node);
@@ -856,12 +843,7 @@ fn resolveFullImpl(
             if (phase == .scope_only) try ref_event_to_id.append(allocator, ref_id);
 
             if (skip_resolve) continue;
-            const main_tok = node_main_tokens[e.node];
-            const name_hash = blk: {
-                const start = tok_starts[main_tok];
-                const len = tok_lens[main_tok];
-                break :blk std.hash.Wyhash.hash(0, source[start .. start + len]);
-            };
+            const name_hash = std.hash.Wyhash.hash(0, ast.nodeName(@enumFromInt(e.node)));
 
             // O(1) resolve via the scope_map (name_hash → sym_id for all visible names).
             if (sp == 0) {
@@ -972,7 +954,7 @@ fn resolveFullImpl(
                     if (cond == .none) break :blk false;
                     if (node_tags[@intFromEnum(cond)] != .boolean_literal) break :blk true;
                     // while(true): condition is always truthy — no skip path
-                    break :blk ast.tokenTag(ast.nodeMainToken(cond)) != .kw_true;
+                    break :blk !std.mem.eql(u8, ast.nodeName(cond), "true");
                 },
                 else => true, // for-in, for-of always have a skip path
             };
@@ -1062,11 +1044,7 @@ fn resolveFullImpl(
         // ── Labeled statements (break/continue targets) ─────────
         .label_open => {
             if (e.aux == 1) { // loop label — extract text for upcoming loop_open
-                const label_n: NodeIndex = @enumFromInt(e.node);
-                const lt = node_main_tokens[@intFromEnum(label_n)];
-                const start = tok_starts[lt];
-                const len = tok_lens[lt];
-                pending_label = source[start .. start + len];
+                pending_label = ast.nodeName(@enumFromInt(e.node));
             }
         },
         .label_close => {
