@@ -2,6 +2,8 @@
 // Source: https://www.unicode.org/Public/17.0.0/ucd/DerivedCoreProperties.txt
 // Do not edit by hand — regenerate via tools/gen_unicode_id.py
 
+const std = @import("std");
+
 const Range = struct { start: u32, end: u32 };
 
 pub const id_start_ranges = [_]Range{
@@ -2204,7 +2206,32 @@ pub const id_continue_ranges = [_]Range{
     .{ .start = 0xE0100, .end = 0xE01EF },
 };
 
+/// O(1) BMP membership bitmaps, built at comptime from the range tables above.
+/// Identifier codepoints are overwhelmingly in the BMP (< 0x10000); classifying
+/// them with a single load + shift + mask replaces the ~10-branch binary search
+/// over ~600 ranges that dominated the Unicode-identifier lex path. Astral
+/// codepoints (rare) fall back to `rangeContains`. 8 KiB per bitmap (.rodata).
+const bmp_id_start_bits = buildBmpBitmap(&id_start_ranges);
+const bmp_id_continue_bits = buildBmpBitmap(&id_continue_ranges);
+
+fn buildBmpBitmap(ranges: []const Range) [0x10000 / 8]u8 {
+    @setEvalBranchQuota(4_000_000);
+    var bm: [0x10000 / 8]u8 = @splat(0);
+    for (ranges) |r| {
+        if (r.start >= 0x10000) continue;
+        var cp = r.start;
+        const end = @min(r.end, 0xFFFF);
+        while (cp <= end) : (cp += 1) bm[cp >> 3] |= @as(u8, 1) << @as(u3, @intCast(cp & 7));
+    }
+    return bm;
+}
+
+inline fn bmpBit(bm: *const [0x10000 / 8]u8, cp: u32) bool {
+    return (bm[cp >> 3] >> @as(u3, @intCast(cp & 7))) & 1 != 0;
+}
+
 pub fn isIdStart(cp: u32) bool {
+    if (cp < 0x10000) return bmpBit(&bmp_id_start_bits, cp);
     return rangeContains(&id_start_ranges, cp);
 }
 
@@ -2212,6 +2239,7 @@ pub fn isIdStart(cp: u32) bool {
 /// ECMAScript spec but classified as Cf — not in UCD ID_Continue.
 pub fn isIdContinueJS(cp: u32) bool {
     if (cp == 0x200C or cp == 0x200D) return true;
+    if (cp < 0x10000) return bmpBit(&bmp_id_continue_bits, cp);
     return rangeContains(&id_continue_ranges, cp);
 }
 
@@ -2232,3 +2260,12 @@ fn rangeContains(ranges: []const Range, cp: u32) bool {
     return false;
 }
 
+
+test "BMP bitmap classification matches range search exhaustively" {
+    var cp: u32 = 0;
+    while (cp < 0x10000) : (cp += 1) {
+        try std.testing.expectEqual(rangeContains(&id_start_ranges, cp), isIdStart(cp));
+        const cont = (cp == 0x200C or cp == 0x200D) or rangeContains(&id_continue_ranges, cp);
+        try std.testing.expectEqual(cont, isIdContinueJS(cp));
+    }
+}
