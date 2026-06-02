@@ -2080,8 +2080,12 @@ fn containsNodeTag(p: *Parser, node: NodeIndex, target: ast.Node.Tag) bool {
     return false;
 }
 
-fn containsAwaitIdentifier(p: *Parser, node: NodeIndex) bool {
-    if (node == .none) return false;
+fn containsAwaitIdentifier(p: *Parser, node: NodeIndex, depth: u32) bool {
+    // Depth guard: a defensive bound against following a non-node value as a
+    // NodeIndex (the SubRange tags below are the known case, handled directly,
+    // but the bound also covers any other tag whose lhs/rhs isn't a node).
+    // Real parameter ASTs nest far shallower than this.
+    if (node == .none or depth > 256) return false;
     const idx = node.toInt();
     const tag = p.node_tags_ptr[idx];
     const data = p.node_data_ptr[idx];
@@ -2110,33 +2114,33 @@ fn containsAwaitIdentifier(p: *Parser, node: NodeIndex) bool {
             var i: u32 = params_start;
             while (i < params_end) : (i += 1) {
                 const child = NodeIndex.fromInt(p.extra_data.items[i]);
-                if (containsAwaitIdentifier(p, child)) return true;
+                if (containsAwaitIdentifier(p, child, depth + 1)) return true;
             }
             return false;
         },
         // For property nodes the key (data.lhs) is just a name — reserved
         // words allowed there. Only the value (data.rhs) is an expression.
-        .property, .computed_property => return containsAwaitIdentifier(p, data.rhs),
-        else => {},
-    }
-    // Children via lhs / rhs.
-    if (data.lhs != .none and containsAwaitIdentifier(p, data.lhs)) return true;
-    // For nodes whose data.{lhs,rhs} is a SubRange (start/end indices into extra_data),
-    // walk the range. We detect by tag.
-    switch (tag) {
+        .property, .computed_property => return containsAwaitIdentifier(p, data.rhs, depth + 1),
+        // SubRange tags: data.{lhs,rhs} are start/end indices into extra_data,
+        // NOT node indices — walk the range. This MUST be handled here (with a
+        // `return`), before the generic lhs/rhs follow below, which would read
+        // the start index as a node and can recurse without bound (e.g. on
+        // `async ([...x]) => {}`).
         .array_literal, .array_pattern, .object_literal, .object_pattern,
         .var_decl, .let_decl, .const_decl, .sequence_expr,
         => {
             var i = data.lhs.toInt();
             while (i < data.rhs.toInt()) : (i += 1) {
                 const child = NodeIndex.fromInt(p.extra_data.items[i]);
-                if (containsAwaitIdentifier(p, child)) return true;
+                if (containsAwaitIdentifier(p, child, depth + 1)) return true;
             }
             return false;
         },
         else => {},
     }
-    if (data.rhs != .none and containsAwaitIdentifier(p, data.rhs)) return true;
+    // Generic children: for the remaining tags lhs/rhs are node indices.
+    if (data.lhs != .none and containsAwaitIdentifier(p, data.lhs, depth + 1)) return true;
+    if (data.rhs != .none and containsAwaitIdentifier(p, data.rhs, depth + 1)) return true;
     return false;
 }
 
@@ -3254,7 +3258,7 @@ fn parseAsyncParenArrowOrCall(p: *Parser, async_tok: TokenIndex) Error!NodeIndex
                 };
             }
             // Async arrow params cannot reference 'await' anywhere in defaults.
-            if (!p.is_ts and containsAwaitIdentifier(p, param_node)) {
+            if (!p.is_ts and containsAwaitIdentifier(p, param_node, 0)) {
                 try p.emitError("'await' is not allowed in async arrow parameter list");
                 return error.ParseError;
             }
