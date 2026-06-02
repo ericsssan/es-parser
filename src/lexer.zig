@@ -1415,6 +1415,7 @@ pub fn tokenizeWithBufAndBitmaps(
                         }
                     },
                     0x80...0xFF => {
+                        @branchHint(.cold);
                         var skip_to: u32 = 0;
                         if (byte == 0xE2 and p + 2 < n and src[p + 1] == 0x80 and (src[p + 2] == 0xA8 or src[p + 2] == 0xA9)) {
                             saw_nl = true;
@@ -1455,6 +1456,7 @@ pub fn tokenizeWithBufAndBitmaps(
                                         }
                                     },
                                     0x80...0xFF => {
+                                        @branchHint(.cold);
                                         te = identEndFromBitmap(bm.ident, sw, sb, sw * 64, n);
                                         tt = .identifier;
                                     },
@@ -1848,6 +1850,7 @@ pub fn tokenizeWithBufAndBitmaps(
                             }
                         },
                         0x80...0xFF => {
+                            @branchHint(.cold);
                             // Check for Unicode whitespace (Zs) — silently skip.
                             const t_cl: u32 = @intCast(std.unicode.utf8ByteSequenceLength(tail_byte) catch 1);
                             if (end + t_cl <= n) {
@@ -2375,6 +2378,7 @@ pub fn tokenizeWithBufAndBitmaps(
                     is_escaped = true;
                 },
                 0x80...0xFF => {
+                    @branchHint(.cold);
                     if (byte == 0xE2 and next1 == 0x80 and (next2 == 0xA8 or next2 == 0xA9)) {
                         saw_nl = true;
                         at_line_start = true;
@@ -2505,6 +2509,7 @@ pub fn tokenizeWithBufAndBitmaps(
                         }
                     },
                     0x80...0xFF => {
+                        @branchHint(.cold);
                         // Check for Unicode whitespace (Zs) — silently skip.
                         const t_cl2: u32 = @intCast(std.unicode.utf8ByteSequenceLength(tail_byte) catch 1);
                         if (end + t_cl2 <= n) {
