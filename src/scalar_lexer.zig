@@ -167,34 +167,54 @@ inline fn cpIsIdContinue(cp: u32) bool {
 
 const IdentResult = struct { end: u32, tag: Tag, has_escape: bool };
 
-/// Decode an identifier's raw text (resolving `\u` escapes) and report whether
-/// it spells a reserved word — mirrors the main lexer's keyword check.
+/// Accumulates the decoded codepoints of an escaped identifier to test whether
+/// it spells a reserved word — fed incrementally by the ident scanners during
+/// their single validation pass, so the keyword check needs no second decode.
 ///
-/// Reserved words are 2–10 lowercase ASCII letters, so bail the moment a decoded
-/// character can't belong to one (anything outside `a`–`z`) or the length passes
-/// 10. The hot escaped-identifier case (digits, `_`, `$`, uppercase, or long
-/// names) exits after a few characters without finishing the decode or touching
-/// the keyword map — the keyword check is the dominant cost on escape-heavy code.
+/// Reserved words are 2–10 lowercase ASCII letters, so `ok` goes false the moment
+/// a decoded codepoint can't belong to one (outside `a`–`z`) or the length passes
+/// 10; once false the scanners stop feeding it. This mirrors the old
+/// `decodedIsKeyword`'s early-bail (digits, `_`, `$`, uppercase, high bytes, or
+/// over-long names exit immediately without touching the keyword map).
+const KwAcc = struct {
+    buf: [10]u8 = undefined,
+    len: u8 = 0,
+    ok: bool = true,
+
+    inline fn push(self: *KwAcc, dc: u32) void {
+        if (!self.ok) return;
+        if (dc < 'a' or dc > 'z' or self.len == self.buf.len) {
+            self.ok = false;
+            return;
+        }
+        self.buf[self.len] = @intCast(dc);
+        self.len += 1;
+    }
+
+    inline fn isKeyword(self: *const KwAcc) bool {
+        return self.ok and token.keywords.get(self.buf[0..self.len]) != null;
+    }
+};
+
+/// Whether the identifier text `src[start..end]` (resolving `\u` escapes) spells
+/// a reserved word. The scanners normally feed a `KwAcc` during their validation
+/// pass instead; this standalone decode is the fallback for the rare case where a
+/// trailing high byte was trimmed after the accumulator had already consumed it.
 fn decodedIsKeyword(src: []const u8, start: u32, end: u32) bool {
-    var buf: [10]u8 = undefined;
-    var len: usize = 0;
+    var acc: KwAcc = .{};
     var raw_i: u32 = start;
     while (raw_i < end) {
-        var dc: u32 = undefined;
         if (src[raw_i] == '\\' and raw_i + 1 < end and src[raw_i + 1] == 'u') {
             const esc = parseUnicodeEscape(src, raw_i, end);
-            dc = esc.cp;
+            acc.push(esc.cp);
             raw_i = esc.end;
         } else {
-            dc = src[raw_i];
+            acc.push(src[raw_i]);
             raw_i += 1;
         }
-        if (dc < 'a' or dc > 'z') return false; // not a reserved-word character
-        if (len == buf.len) return false; // longer than any reserved word
-        buf[len] = @intCast(dc);
-        len += 1;
+        if (!acc.ok) return false;
     }
-    return token.keywords.get(buf[0..len]) != null;
+    return acc.isKeyword();
 }
 
 /// SIMD scan of an ASCII identifier body: returns the offset of the first byte
@@ -243,15 +263,19 @@ inline fn identByteRun(src: []const u8, start: u32, n: u32) u32 {
 }
 
 /// Extend an identifier across `\u` escape continuations starting at `end0`.
-fn extendEscapes(src: []const u8, end0: u32, n: u32) u32 {
+/// When `acc` is non-null, the decoded codepoints are fed to it (in source order)
+/// for the keyword check, so callers needing it avoid a second decode pass.
+fn extendEscapes(src: []const u8, end0: u32, n: u32, acc: ?*KwAcc) u32 {
     var end = end0;
     while (end < n and src[end] == '\\' and end + 1 < n and src[end + 1] == 'u') {
         const esc = parseUnicodeEscape(src, end, n);
         if (!esc.ok or !cpIsIdContinue(esc.cp)) break;
+        if (acc) |a| a.push(esc.cp);
         end = esc.end;
         while (end < n) {
             const cc = src[end];
             if ((cc >= 'a' and cc <= 'z') or (cc >= 'A' and cc <= 'Z') or (cc >= '0' and cc <= '9') or cc == '_' or cc == '$') {
+                if (acc) |a| a.push(cc);
                 end += 1;
                 continue;
             }
@@ -260,6 +284,9 @@ fn extendEscapes(src: []const u8, end0: u32, n: u32) u32 {
                 if (end + cl <= n) {
                     const cont_cp = decodeKnownLen(src, end, cl);
                     if (uid.isIdContinueJS(@intCast(cont_cp))) {
+                        // A high codepoint can't belong to a reserved word; the
+                        // old per-byte decode bailed here, so mark the accumulator.
+                        if (acc) |a| a.push(cc);
                         end += cl;
                         continue;
                     }
@@ -275,7 +302,17 @@ fn extendEscapes(src: []const u8, end0: u32, n: u32) u32 {
 /// (stripping at the first non-ID_Continue high codepoint) and keyword lookup.
 fn scanIdentRun(src: []const u8, start: u32, n: u32, prev: Tag, is_ts: bool) IdentResult {
     const bm_end = identByteRun(src, start, n);
-    var end = extendEscapes(src, bm_end, n);
+    // Feed the keyword accumulator the ASCII byte-run (no escapes appear here —
+    // identByteRun stops at `\`); extendEscapes feeds the escape continuations.
+    // Only consulted on the escaped path, and only when no high byte is trimmed
+    // below (the trim can cut a char the accumulator already saw).
+    var acc: KwAcc = .{};
+    {
+        var bi = start;
+        while (bi < bm_end) : (bi += 1) acc.push(src[bi]);
+    }
+    const pre_trim_end = extendEscapes(src, bm_end, n, &acc);
+    var end = pre_trim_end;
     const has_escape = end != bm_end;
     // Validate high-byte continuation runs: the run accepts all 0x80+ bytes,
     // but not all are valid ID_Continue (whitespace, BOM, Po, ...).
@@ -306,7 +343,11 @@ fn scanIdentRun(src: []const u8, start: u32, n: u32, prev: Tag, is_ts: bool) Ide
     end = valid_end;
     var tag: Tag = undefined;
     if (has_escape) {
-        tag = if (decodedIsKeyword(src, start, end)) .escaped_keyword else .identifier;
+        // Common case (no high byte trimmed): the fused accumulator covers
+        // exactly src[start..end]. If a trim shortened the span, the accumulator
+        // may have already consumed the trimmed char, so re-decode the final span.
+        const is_kw = if (valid_end == pre_trim_end) acc.isKeyword() else decodedIsKeyword(src, start, end);
+        tag = if (is_kw) .escaped_keyword else .identifier;
     } else {
         tag = if (isPropertyAccess(prev)) .identifier else lexer.keywordLookup(src[start..end], is_ts);
     }
@@ -331,7 +372,9 @@ fn scanHighIdentRun(src: []const u8, start: u32, n: u32) u32 {
         if (uid.isIdContinueJS(@intCast(bcp))) break;
         trim_end = back;
     }
-    return extendEscapes(src, trim_end, n);
+    // High-byte-start idents are always `.identifier` (never a reserved word),
+    // so no keyword accumulator is needed.
+    return extendEscapes(src, trim_end, n, null);
 }
 
 /// Scan an identifier whose first codepoint is a `\u` escape (`\uXXXX...`).
@@ -344,10 +387,16 @@ fn scanEscapedIdentStart(src: []const u8, start: u32, n: u32) IdentResult {
     if (!first.ok or !cpIsIdStart(first.cp)) {
         return .{ .end = first.end, .tag = .invalid, .has_escape = true };
     }
+    // Accumulate decoded codepoints for the keyword check in this same pass.
+    // This loop computes the final `end` directly (no post-trim), so the
+    // accumulator always covers exactly `src[start..end]`.
+    var acc: KwAcc = .{};
+    acc.push(first.cp);
     var end = first.end;
     while (end < n) {
         const c = src[end];
         if ((c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_' or c == '$') {
+            acc.push(c);
             end += 1;
             continue;
         }
@@ -356,6 +405,7 @@ fn scanEscapedIdentStart(src: []const u8, start: u32, n: u32) IdentResult {
             if (end + cl <= n) {
                 const cont_cp = decodeKnownLen(src, end, cl);
                 if (uid.isIdContinueJS(cont_cp)) {
+                    acc.push(c); // high codepoint → can't be a reserved word
                     end += cl;
                     continue;
                 }
@@ -365,12 +415,13 @@ fn scanEscapedIdentStart(src: []const u8, start: u32, n: u32) IdentResult {
         if (c == '\\' and end + 1 < n and src[end + 1] == 'u') {
             const esc = parseUnicodeEscape(src, end, n);
             if (!esc.ok or !cpIsIdContinue(esc.cp)) break;
+            acc.push(esc.cp);
             end = esc.end;
             continue;
         }
         break;
     }
-    const tag: Tag = if (decodedIsKeyword(src, start, end)) .escaped_keyword else .identifier;
+    const tag: Tag = if (acc.isKeyword()) .escaped_keyword else .identifier;
     return .{ .end = end, .tag = tag, .has_escape = true };
 }
 
