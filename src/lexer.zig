@@ -1094,7 +1094,7 @@ pub inline fn identEndFromBitmapW(
 ///  - Exponent part (e/E) must have at least one digit after optional sign
 ///  - Number literal immediately followed by IdentifierStart is a syntax error
 ///    (caller checks this separately via next-byte inspection)
-fn validateNumericLiteral(src: []const u8, start: u32, end: u32) bool {
+pub fn validateNumericLiteral(src: []const u8, start: u32, end: u32) bool {
     if (start >= end) return false;
     var i = start;
     // BigInt suffix: strip trailing 'n' for validation.
@@ -1195,7 +1195,7 @@ inline fn isIdentStart(b: u8) bool {
 /// Returns true if the character at src[pos] is an ECMAScript IdentifierStart
 /// (properly decoding multi-byte UTF-8 sequences). Used to detect illegal
 /// numeric literal followed by IdentifierStart.
-fn isIdentStartAtPos(src: []const u8, pos: u32) bool {
+pub fn isIdentStartAtPos(src: []const u8, pos: u32) bool {
     if (pos >= src.len) return false;
     const b = src[pos];
     // ASCII identifier start characters.
@@ -1225,7 +1225,7 @@ fn isIdentStartAtPos(src: []const u8, pos: u32) bool {
 /// but are not ASCII (so they slip through Phase 1 as ident-class bytes).
 /// Covers: NBSP (U+00A0), Zs category chars (U+1680, U+2000-U+200A, U+202F,
 /// U+205F, U+3000), and ZWNBSP (U+FEFF — already handled as BOM).
-inline fn isUnicodeWhitespace(cp: u32) bool {
+pub inline fn isUnicodeWhitespace(cp: u32) bool {
     return switch (cp) {
         0x0085 => true, // NEL (NEXT LINE) — TypeScript treats as whitespace/line-terminator
         0x00A0 => true, // NO-BREAK SPACE
