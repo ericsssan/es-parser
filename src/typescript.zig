@@ -105,6 +105,35 @@ pub fn parseType(p: *Parser) Error!NodeIndex {
         });
     }
 
+    // `<contextualKeyword> is Type` predicate — a parameter named with a TS
+    // contextual keyword (e.g. `type is BaseType`) as the predicate subject.
+    // `.identifier` subjects are handled above; this covers the keyword-tag
+    // case. `is`/`asserts` are excluded (not valid subjects; asserts has its
+    // own path), and no contextual keyword followed by `is` is valid type
+    // syntax otherwise, so this never shadows a real type.
+    {
+        const subj = p.peek();
+        if (p.in_return_type and subj.isTsContextualKeyword() and
+            subj != .kw_asserts and subj != .kw_is and
+            p.peekAt(1) == .kw_is and !p.hasNewLineBetween(p.tokIdx(), @intCast(p.tok_i + 1)))
+        {
+            const param_tok: u32 = p.tokIdx();
+            _ = p.advance(); // eat param name (contextual keyword)
+            _ = p.advance(); // eat 'is'
+            const type_node = try parseType(p);
+            const param_name = try p.addNode(.{
+                .tag = .identifier,
+                .main_token = param_tok,
+                .data = .{ .lhs = .none, .rhs = .none },
+            });
+            return p.addNode(.{
+                .tag = .ts_type_predicate,
+                .main_token = param_tok,
+                .data = .{ .lhs = param_name, .rhs = type_node },
+            });
+        }
+    }
+
     var result = try parseNonConditionalType(p);
 
     // Check for conditional type: `T extends U ? X : Y`
