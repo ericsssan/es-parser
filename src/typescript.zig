@@ -2197,11 +2197,21 @@ pub fn parseInterfaceMember(p: *Parser) Error!NodeIndex {
     }
 
     // ── Skip `readonly` modifier ─────────────────────────────
+    // Only when `readonly` is a modifier, not the member name itself. A
+    // following `: ? ( < ; } ,` / eof means `readonly` IS the member name
+    // (e.g. `interface I { readonly: boolean }`), so leave it for the name
+    // path below — same disambiguation `get`/`set` use above.
     if (p.peek() == .kw_readonly) {
-        _ = p.advance(); // consume `readonly`
-        // Check for index signature after readonly: `readonly [key: Type]: Type;`
-        if (p.peek() == .l_bracket and (p.peekAt(1) == .identifier or p.peekAt(1).isKeyword()) and p.peekAt(2) == .colon) {
-            return parseIndexSignature(p);
+        const next1 = p.peekAt(1);
+        if (next1 != .colon and next1 != .question and next1 != .l_paren and
+            next1 != .less_than and next1 != .semicolon and next1 != .r_brace and
+            next1 != .comma and next1 != .eof)
+        {
+            _ = p.advance(); // consume `readonly` modifier
+            // Index signature after readonly: `readonly [key: Type]: Type;`
+            if (p.peek() == .l_bracket and (p.peekAt(1) == .identifier or p.peekAt(1).isKeyword()) and p.peekAt(2) == .colon) {
+                return parseIndexSignature(p);
+            }
         }
     }
 
@@ -2397,10 +2407,21 @@ pub fn parseIndexSignature(p: *Parser) Error!NodeIndex {
     const key_type_first_tag = p.peek();
     const valid_key_type = switch (key_type_first_tag) {
         .identifier => blk: {
+            // TS1268 is a *resolved-type* check (semantic). A bare type
+            // reference like `PropertyKey` (= string | number | symbol) is
+            // valid, and is syntactically indistinguishable from an invalid
+            // one (`C`, `AliasedBoolean`). So accept any reference and reject
+            // only the built-in primitive type names that can never resolve to
+            // a valid index key. (A full type checker would catch the rest.)
             const name = p.tokenText(key_type_tok);
-            break :blk std.mem.eql(u8, name, "string") or
-                std.mem.eql(u8, name, "number") or
-                std.mem.eql(u8, name, "symbol");
+            const definitely_invalid = std.mem.eql(u8, name, "boolean") or
+                std.mem.eql(u8, name, "bigint") or
+                std.mem.eql(u8, name, "object") or
+                std.mem.eql(u8, name, "any") or
+                std.mem.eql(u8, name, "unknown") or
+                std.mem.eql(u8, name, "never") or
+                std.mem.eql(u8, name, "undefined");
+            break :blk !definitely_invalid;
         },
         .kw_unique => true, // `unique symbol`
         .template_head, .template_no_sub => true, // template literal type
