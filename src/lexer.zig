@@ -22,24 +22,42 @@ pub const TokenList = Ast.Ast.TokenList;
 const V16 = @Vector(16, u8);
 const B16 = @Vector(16, bool);
 
-// ── SIMD nibble classifier (Apple Silicon / aarch64) ────────────────────────
-// simdjson-style byte classification via two `tbl` table lookups instead of
-// ~8 per-class SIMD compares. `cls = lo_nib[lo] & hi_nib[hi]`; bits 0-6 mark
-// the seven identifier rectangles (a-z, A-Z, 0-9, _, $, 0x80+), bit 7 marks
-// newline (\n \r). Whitespace (space/tab) and `structural = ~(ident|nl|ws)`
-// are derived as before. Tables verified byte-for-byte against the scalar
-// classifier over all 256 values. ~1.85× the per-compare classifier in
-// isolation; other architectures use the compare path in `classifyChunk`.
+// ── SIMD nibble classifier (aarch64 `tbl` / x86-64 `pshufb`) ─────────────────
+// simdjson-style byte classification via two table lookups instead of ~8
+// per-class SIMD compares. `cls = NIB_LO[lo] & NIB_HI[hi]`; bits 0-6 mark the
+// seven identifier rectangles (a-z, A-Z, 0-9, _, $, 0x80+), bit 7 marks newline
+// (\n \r). Whitespace (space/tab) and `structural = ~(ident|nl|ws)` are derived
+// as before. Tables verified byte-for-byte against the scalar classifier over
+// all 256 values. ~1.85× the per-compare classifier in isolation; targets
+// without a 16-byte byte-shuffle use the compare path in `classifyChunk`.
+//
+// `tbl` (NEON) zeroes out-of-range lanes; `pshufb` (SSSE3) uses the low 4 index
+// bits and zeroes on the high bit. Both are equivalent here because every index
+// is a nibble (0-15), so neither special case triggers.
+//
 // `[16]u8` (not `V16`) so the regression test can index them at runtime; they
-// coerce to `V16` at the `tbl16` call sites.
+// coerce to `V16` at the shuffle call sites.
 const NIB_LO: [16]u8 = .{ 0x2B, 0x3F, 0x3F, 0x3F, 0x7F, 0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0xBD, 0x15, 0x15, 0x95, 0x15, 0x1D };
 const NIB_HI: [16]u8 = .{ 0x80, 0x00, 0x40, 0x02, 0x04, 0x08, 0x10, 0x20, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01 };
 
-inline fn tbl16(table: V16, idx: V16) V16 {
-    return asm ("tbl %[o].16b, {%[t].16b}, %[i].16b"
-        : [o] "=w" (-> V16),
-        : [t] "w" (table), [i] "w" (idx),
-    );
+/// True when the target has a usable 16-byte in-register byte shuffle.
+const nibble_simd = builtin.cpu.arch == .aarch64 or
+    (builtin.cpu.arch == .x86_64 and std.Target.x86.featureSetHas(builtin.cpu.features, .ssse3));
+
+/// `out[i] = table[idx[i] & 0x0F]` via one shuffle instruction. Only called
+/// when `nibble_simd` is true, so the `else` is never instantiated elsewhere.
+inline fn nibbleShuffle(table: V16, idx: V16) V16 {
+    return switch (builtin.cpu.arch) {
+        .aarch64 => asm ("tbl %[o].16b, {%[t].16b}, %[i].16b"
+            : [o] "=w" (-> V16),
+            : [t] "w" (table), [i] "w" (idx),
+        ),
+        .x86_64 => asm ("pshufb %[i], %[t]"
+            : [t] "=x" (-> V16),
+            : [i] "x" (idx), [tin] "0" (table),
+        ),
+        else => unreachable,
+    };
 }
 
 test "nibble classifier tables match the scalar classification for all 256 bytes" {
@@ -133,12 +151,12 @@ const ChunkMasks = struct {
 };
 
 inline fn classifyChunk(chunk: V16, m: *ChunkMasks) void {
-    if (comptime builtin.cpu.arch == .aarch64) {
+    if (comptime nibble_simd) {
         // Two-lookup nibble classifier (see NIB_LO/NIB_HI). Produces the
         // identical ident/newline/structural masks the compare path below does.
         const lo = chunk & @as(V16, @splat(@as(u8, 0x0F)));
         const hi = chunk >> @as(@Vector(16, u3), @splat(4));
-        const cls = tbl16(NIB_LO, lo) & tbl16(NIB_HI, hi);
+        const cls = nibbleShuffle(NIB_LO, lo) & nibbleShuffle(NIB_HI, hi);
         const zero: V16 = @splat(0);
         m.ident = @bitCast((cls & @as(V16, @splat(@as(u8, 0x7F)))) != zero);
         m.newline = @bitCast((cls & @as(V16, @splat(@as(u8, 0x80)))) != zero);
