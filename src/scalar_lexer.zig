@@ -73,7 +73,24 @@ inline fn isPropertyAccess(t: Tag) bool {
 /// Position of the next line terminator (\n, \r, LS U+2028, PS U+2029) at or
 /// after `start`, or `n` if none. The terminator itself is not consumed.
 inline fn lineTerminatorScan(src: []const u8, start: u32, n: u32) u32 {
+    const V = @Vector(16, u8);
     var i = start;
+    while (i + 16 <= n) {
+        const chunk: V = src[i..][0..16].*;
+        const hits: u16 = @bitCast((chunk == @as(V, @splat(@as(u8, '\n')))) |
+            (chunk == @as(V, @splat(@as(u8, '\r')))) |
+            (chunk == @as(V, @splat(@as(u8, 0xE2)))));
+        if (hits != 0) {
+            const p = i + @ctz(hits);
+            const c = src[p];
+            if (c == '\n' or c == '\r') return p;
+            // 0xE2: a LS/PS lead terminates; any other 0xE2 is comment text.
+            if (p + 2 < n and src[p + 1] == 0x80 and (src[p + 2] == 0xA8 or src[p + 2] == 0xA9)) return p;
+            i = p + 1;
+            continue;
+        }
+        i += 16;
+    }
     while (i < n) : (i += 1) {
         const c = src[i];
         if (c == '\n' or c == '\r') return i;
