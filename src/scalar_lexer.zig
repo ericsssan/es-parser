@@ -607,6 +607,19 @@ pub const Cursor = struct {
                     tag = if (isPropertyAccess(prev)) .identifier else lexer.keywordLookup(src[start..e], is_ts);
                 }
             } else switch (c) {
+                // Single-char operators with no multi-char variant — emit
+                // directly from the jump table (see tokenizeScalarWithOptions).
+                '(' => { tag = .l_paren; self.i += 1; },
+                ')' => { tag = .r_paren; self.i += 1; },
+                '[' => { tag = .l_bracket; self.i += 1; },
+                ']' => { tag = .r_bracket; self.i += 1; },
+                ';' => { tag = .semicolon; self.i += 1; },
+                ',' => { tag = .comma; self.i += 1; },
+                ':' => { tag = .colon; self.i += 1; },
+                '~' => { tag = .tilde; self.i += 1; },
+                '@' => { tag = .at_sign; self.i += 1; },
+                '#' => { tag = .hash; self.i += 1; },
+
                 '0'...'9' => {
                     self.i = Lex.numberEnd(src, start);
                     const is_bn = self.i > start and src[self.i - 1] == 'n';
@@ -934,6 +947,20 @@ pub fn tokenizeScalarWithOptions(
                 tag = if (isPropertyAccess(prev)) .identifier else lexer.keywordLookup(src[start..e], is_ts);
             }
         } else switch (c) {
+            // Single-char operators with no multi-char variant: emit directly
+            // from the jump table (one branch) rather than routing through the
+            // else-prong + inlined scanOp re-switch.
+            '(' => { tag = .l_paren; i += 1; },
+            ')' => { tag = .r_paren; i += 1; },
+            '[' => { tag = .l_bracket; i += 1; },
+            ']' => { tag = .r_bracket; i += 1; },
+            ';' => { tag = .semicolon; i += 1; },
+            ',' => { tag = .comma; i += 1; },
+            ':' => { tag = .colon; i += 1; },
+            '~' => { tag = .tilde; i += 1; },
+            '@' => { tag = .at_sign; i += 1; },
+            '#' => { tag = .hash; i += 1; },
+
             '0'...'9' => {
                 i = Lex.numberEnd(src, start);
                 const is_bn = i > start and src[i - 1] == 'n';
