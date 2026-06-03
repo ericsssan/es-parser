@@ -41,8 +41,7 @@ Add to your `build.zig.zon`:
 .dependencies = .{
     .es_parser = .{
         .url = "https://github.com/ericsssan/es-parser/archive/refs/tags/v0.2.0.tar.gz",
-        // Run `zig fetch --save <url>` to populate the hash.
-        .hash = "...",
+        .hash = "es_parser-0.2.0-C15LK1MYGABh-C55Tzrjpw_vpb0lN3IWzbYXewd_wRMv",
     },
 },
 ```

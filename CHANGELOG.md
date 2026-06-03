@@ -37,6 +37,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Rich-fields tokenization (`tokenizeScalarFull`) is faster now that it no longer
   records line starts: it produces tokens and comment trivia only. The
   parse-only path was already line-starts-free and is unchanged.
+- The scalar single-pass lexer is the sole tokenizer; the legacy two-phase
+  bitmap lexer has been removed.
+
+### Added
+
+- **Duplicate lexical binding early-errors** (opt-in
+  `SemanticAnalyzer.Options.diagnose_redeclare`, default off): within a scope a
+  `let`/`const`/`class` — and a module top-level `function` — may not coexist
+  with another binding of the same name. `var` and Script-level functions remain
+  redeclarable; Annex B B.3.3 functions are exempt.
+
+### Fixed
+
+- Flag-less regex `\u{…}` (e.g. `/\u{41}/`) now parses in JavaScript under Annex
+  B (identity escape + quantifier); TypeScript still reports TS1538.
+- Annex B B.3.3: a sloppy function in an `if`/label body no longer falsely
+  conflicts with an outer lexical binding.
+- A statement-level decorator on a non-class declaration is now rejected in
+  TypeScript (TS1146).
+- tc39/test262 is fully conformant on both must-parse and must-reject; Babel and
+  TypeScript parser-conformance suites improved.
 
 ### Notes
 
