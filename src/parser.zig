@@ -1714,6 +1714,16 @@ pub const Parser = struct {
         const n = self.ev_len;
         if (n >= self.scope_events.events.capacity) {
             @branchHint(.cold);
+            // The hoisted cursor (`ev_ptr`/`ev_len`) writes events without
+            // touching the ArrayList's `items.len`, which lags at its last
+            // synced value. `ensureTotalCapacity` only copies `items.len`
+            // elements into the grown buffer — so before growing we must expose
+            // the `n` events already written through `ev_ptr`, or the realloc
+            // drops them and leaves the new buffer's [0..n) uninitialized. (That
+            // surfaced as dropped/garbage events whenever the pre-sized event
+            // capacity was exceeded; benign under zero-filled pages, fatal under
+            // any allocator returning reused memory.)
+            self.scope_events.events.items.len = n;
             try self.scope_events.events.ensureTotalCapacity(self.gpa, @max(self.scope_events.events.capacity * 2 + 16, n + 1));
             self.ev_ptr = self.scope_events.events.items.ptr;
         }
