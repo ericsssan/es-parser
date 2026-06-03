@@ -124,6 +124,12 @@ fn addConformanceRunner(
     cmd.step.dependOn(b.getInstallStep());
     // `-- <args>` overrides the default fixture path; with no args, run the
     // documented conformance input set so `zig build conformance-X` just works.
-    if (b.args) |args| cmd.addArgs(args) else cmd.addArg(default_fixture);
+    // `b.args` only exists on some Zig versions — guard with @hasField so this
+    // compiles across the supported range (the field was removed after dev.305).
+    if (@hasField(@TypeOf(b.*), "args")) {
+        if (b.args) |args| cmd.addArgs(args) else cmd.addArg(default_fixture);
+    } else {
+        cmd.addArg(default_fixture);
+    }
     b.step(step_name, desc).dependOn(&cmd.step);
 }
