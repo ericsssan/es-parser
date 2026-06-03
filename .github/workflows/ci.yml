@@ -25,7 +25,11 @@ jobs:
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: master
+          # Pin to the project's declared minimum_zig_version (build.zig.zon).
+          # `master` drifts (e.g. dev.657 deprecated @typeInfo().fields), breaking
+          # the build on a toolchain we don't target. The Nightly workflow still
+          # tracks master as an early-warning canary.
+          version: 0.17.0-dev.607+456b2ec07
 
       - name: Cache Zig build artifacts
         uses: actions/cache@v5
