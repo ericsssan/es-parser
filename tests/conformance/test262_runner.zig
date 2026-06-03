@@ -217,7 +217,7 @@ fn tryParseDetailed(allocator: std.mem.Allocator, source: []const u8, is_module:
     }
 
     // Run semantic analysis to catch early errors (duplicate bindings, etc.)
-    var sem = es_parser.semantic.SemanticAnalyzer.analyzeModule(allocator, &tree, is_module) catch return .{ .has_error = false, .detail = .{ .kind = .semantic, .count = 0 } };
+    var sem = es_parser.semantic.SemanticAnalyzer.analyzeWithOptions(allocator, &tree, .{ .is_module = is_module, .diagnose_redeclare = true }) catch return .{ .has_error = false, .detail = .{ .kind = .semantic, .count = 0 } };
     defer sem.deinit(allocator);
 
     if (sem.diagnostics.len > 0) return .{ .has_error = true, .detail = .{ .kind = .semantic, .count = @intCast(sem.diagnostics.len) } };

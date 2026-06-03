@@ -154,6 +154,11 @@ pub const SemanticAnalyzer = struct {
         /// loop_exit_reachable are empty (consumers bounds-check → all-alive)
         /// and code_path_result is null.
         need_cfg: bool = true,
+        /// Emit ECMAScript redeclaration early-errors (duplicate lexical bindings
+        /// in the same scope: `let`/`const`/`class`, and module-top-level
+        /// functions). Off by default — consumers with their own no-redeclare
+        /// rule (lint) opt out; spec-conformance callers opt in.
+        diagnose_redeclare: bool = false,
     };
 
     /// Analyze an AST that was parsed with scope-event emission enabled.
@@ -201,6 +206,7 @@ pub const SemanticAnalyzer = struct {
         const ropts = event_resolver.Options{
             .skip_ref_ranges = !opts.build_ref_ranges,
             .globals = opts.globals,
+            .diagnose_redeclare = opts.diagnose_redeclare,
         };
         var result = if (opts.need_cfg)
             try event_resolver.resolveFull(allocator, ast, ast.scope_events, ropts)

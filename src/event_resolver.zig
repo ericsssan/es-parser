@@ -1227,6 +1227,13 @@ fn resolveFullImpl(
 
     if (do_scope) try buildScopeBindings(&scopes, &symbols, allocator);
 
+    // Duplicate-binding early-errors (opt-in). Only meaningful when the scope
+    // tree + symbol table were built (phase != .cfg_only).
+    const redeclare_diags: []Diagnostic = if (do_scope and opts.diagnose_redeclare)
+        try checkRedeclarations(allocator, sa, ast, &symbols, &scopes)
+    else
+        &.{};
+
     // Capture post-passes time.
     if (opts.streaming) |s| {
         if (s.stats) |st| {
@@ -1246,7 +1253,7 @@ fn resolveFullImpl(
             .symbols = symbols,
             .references = references,
             .ref_by_sym = ref_by_sym,
-            .diagnostics = &.{},
+            .diagnostics = redeclare_diags,
             .node_reachable = node_reachable,
             .loop_exit_reachable = loop_exit_reachable,
             .code_path_result = cpb_result,
@@ -1352,4 +1359,83 @@ fn buildScopeBindings(
         scopes.setBindings(@enumFromInt(i), total, counts[i]);
         total += counts[i];
     }
+}
+
+// ── Redeclaration early-errors ──────────────────────────────────────────────
+
+const RedeclKey = struct { scope: u32, name: []const u8 };
+const RedeclCtx = struct {
+    pub fn hash(_: RedeclCtx, k: RedeclKey) u64 {
+        var h = std.hash.Wyhash.init(k.scope);
+        h.update(k.name);
+        return h.final();
+    }
+    pub fn eql(_: RedeclCtx, a: RedeclKey, b: RedeclKey) bool {
+        return a.scope == b.scope and std.mem.eql(u8, a.name, b.name);
+    }
+};
+
+/// ECMAScript duplicate-binding early-errors. Within one scope, a *lexical*
+/// binding (`let`/`const`/`class`, and a top-level `function` in a Module) may
+/// not coexist with another binding of the same name — neither another lexical
+/// one nor a `var`. Two var-like bindings (two `var`s, or `function`s at Script
+/// top level / in a function body) are allowed and not reported.
+///
+/// Bindings that are not value-level lexical declarations are skipped:
+/// parameters/catch params (the parser handles duplicate params), imports,
+/// TypeScript declaration-merging kinds (type/interface/enum/namespace/type
+/// param), and named function/class *expression* self-bindings.
+fn checkRedeclarations(
+    allocator: std.mem.Allocator, // owns the returned diagnostics
+    sa: std.mem.Allocator, // scope arena — map is temp, freed in bulk
+    ast: *const Ast,
+    symbols: *const SymbolTable,
+    scopes: *const ScopeTree,
+) ![]Diagnostic {
+    const n = symbols.count();
+    if (n == 0) return &.{};
+
+    const Cat = enum { lexical, varlike };
+    var map = std.HashMapUnmanaged(RedeclKey, bool, RedeclCtx, std.hash_map.default_max_load_percentage){};
+    defer map.deinit(sa);
+
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    errdefer diags.deinit(allocator);
+
+    const names = symbols.list.items(.name);
+    const kinds = symbols.list.items(.binding_kind);
+    const scope_ids = symbols.list.items(.scope_id);
+    const decls = symbols.list.items(.decl_node);
+
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        const scope_id = scope_ids[i];
+        if (!scope_id.isValid()) continue;
+        const cat: Cat = switch (kinds[i]) {
+            .let, .@"const", .class_decl => .lexical,
+            // A Module's top-level function is lexical; elsewhere a function is
+            // var-like (Script/function-body hoisting). The Annex B B.3.3 case
+            // (`function_decl_annex_b` — a sloppy function nested in if/label) is
+            // exempt from the redeclaration early error, so it is skipped entirely.
+            .function_decl => if (scopes.kind(scope_id) == .module) .lexical else .varlike,
+            .@"var" => .varlike,
+            else => continue,
+        };
+        const gop = try map.getOrPut(sa, .{ .scope = scope_id.toInt(), .name = names[i] });
+        if (!gop.found_existing) {
+            gop.value_ptr.* = (cat == .lexical); // value = "a lexical binding seen"
+            continue;
+        }
+        // Another relevant binding of this name already exists in this scope.
+        // It is an error when either side is lexical.
+        if (cat == .lexical or gop.value_ptr.*) {
+            try diags.append(allocator, .{
+                .message = "Identifier has already been declared",
+                .span = ast.nodeSpan(decls[i]),
+                .severity = .@"error",
+            });
+        }
+        if (cat == .lexical) gop.value_ptr.* = true;
+    }
+    return diags.toOwnedSlice(allocator);
 }

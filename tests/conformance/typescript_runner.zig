@@ -393,7 +393,7 @@ pub fn main(init: std.process.Init) !void {
                 if (had_error) break :parse_blk false;
                 // Semantic analysis (must-reject only — TS allows redeclarations JS doesn't).
                 if (kind == .must_reject) {
-                    var sem = es_parser.semantic.SemanticAnalyzer.analyze(file_alloc, &tree) catch break :parse_blk true;
+                    var sem = es_parser.semantic.SemanticAnalyzer.analyzeWithOptions(file_alloc, &tree, .{ .is_module = is_module, .diagnose_redeclare = true }) catch break :parse_blk true;
                     defer sem.deinit(file_alloc);
                     if (sem.diagnostics.len > 0) {
                         if (first_error.len == 0) first_error = "semantic error";

@@ -262,3 +262,42 @@ test "analyze closures fixture produces scopes and symbols" {
     try testing.expect(r.scopes.len() > 1);
     try testing.expect(r.symbols.count() > 0);
 }
+
+// ── Duplicate-binding early errors (opt-in diagnose_redeclare) ──────────────
+
+/// Parse `source` (module or script) and return the number of redeclaration
+/// diagnostics produced with `diagnose_redeclare` enabled.
+fn redeclareDiagCount(source: []const u8, is_module: bool) !usize {
+    const allocator = testing.allocator;
+    var _lr = try Lexer.tokenizeWithOptions(allocator, source, .js, is_module);
+    defer _lr.deinit(allocator);
+    var tokens = _lr.tokens;
+    var tree = try Parser.parseWithOptions(allocator, source, tokens.slice(), .{ .is_module = is_module, .emit_events = true });
+    defer tree.deinit(allocator);
+    // Skip cases the parser already rejects (e.g. `let x; let x;`): the early
+    // error we test for is the semantic one, isolated from parser diagnostics.
+    var r = try semantic.SemanticAnalyzer.analyzeWithOptions(allocator, &tree, .{ .is_module = is_module, .diagnose_redeclare = true });
+    defer r.deinit(allocator);
+    return r.diagnostics.len;
+}
+
+test "redeclare: lexical duplicate bindings are flagged" {
+    // class + class, class + var, class + let — all duplicate lexical bindings.
+    try testing.expect(try redeclareDiagCount("class A {}\nclass A {}\n", false) >= 1);
+    try testing.expect(try redeclareDiagCount("class C {}\nvar C;\n", false) >= 1);
+    try testing.expect(try redeclareDiagCount("class C {}\nlet C = 1;\n", false) >= 1);
+}
+
+test "redeclare: top-level function duplicate is module-only" {
+    // Two top-level functions: legal in a Script (var-like), an error in a Module.
+    try testing.expectEqual(@as(usize, 0), try redeclareDiagCount("function x() {}\nfunction x() {}\n", false));
+    try testing.expect(try redeclareDiagCount("function x() {}\nfunction x() {}\n", true) >= 1);
+}
+
+test "redeclare: legal redeclarations are not flagged" {
+    // var + var, var + function, function + function (script) are all allowed.
+    try testing.expectEqual(@as(usize, 0), try redeclareDiagCount("var a;\nvar a;\n", false));
+    try testing.expectEqual(@as(usize, 0), try redeclareDiagCount("var b;\nfunction b() {}\n", false));
+    // Annex B: a sloppy function nested in `if` does not conflict with an outer let.
+    try testing.expectEqual(@as(usize, 0), try redeclareDiagCount("let f = 1;\nif (false) function _f() {} else function f() {}\n", false));
+}
