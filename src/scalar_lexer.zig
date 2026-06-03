@@ -854,32 +854,106 @@ pub fn tokenizeScalarWithOptions(
 
     while (i < n) {
         const c = src[i];
-        switch (c) {
-            ' ', '\t', 0x0B, 0x0C => { i += 1; continue; },
-            '\n' => { saw_nl = true; at_line_start = true; i += 1; continue; },
-            '\r' => { saw_nl = true; at_line_start = true; i += 1; continue; },
-            '<' => {
-                // Annex B HTML open comment `<!--` (non-module scripts).
-                if (annex_b and !is_module and i + 3 < n and src[i + 1] == '!' and src[i + 2] == '-' and src[i + 3] == '-') {
-                    i = lineTerminatorScan(src, i + 4, n);
-                    saw_nl = true;
-                    continue;
+        const start = i;
+        const prev = prev_kind;
+        var tag: Tag = undefined;
+        var has_esc = false;
+        // Identifiers are the most common token in real code, so peel them out as
+        // a direct, well-predicted branch ahead of the dispatch switch. Keeping
+        // the indirect jump-table off the hot ident path avoids the branch-target
+        // mispredictions a single all-classes jump table suffers on mixed input
+        // (a full jump table regressed real-world TS while winning on single-class
+        // microbenchmarks). Everything else dispatches through the jump table —
+        // one indirect branch instead of the former 11-deep if/else chain.
+        // No-token cases (whitespace, comments, BOM/LS/PS) `continue`;
+        // token-producing cases set `tag`/`i` and fall to the shared emit tail.
+        if (c == ' ' or c == '\t' or c == 0x0B or c == 0x0C) {
+            i += 1;
+            continue;
+        } else if (c == '\n' or c == '\r') {
+            saw_nl = true;
+            at_line_start = true;
+            i += 1;
+            continue;
+        } else if (c < 0x80 and isIdentStartByte(c)) {
+            // Hot path: SIMD-scan the ASCII identifier body. If it stops on a
+            // plain delimiter (not `\` or a 0x80+ byte), it is a pure-ASCII
+            // identifier — no escape decoding or Unicode validation needed.
+            const e = asciiIdentEnd(src, start, n);
+            const stop: u8 = if (e < n) src[e] else 0;
+            if (stop == '\\' or stop >= 0x80) {
+                @branchHint(.cold);
+                const r = scanIdentRun(src, start, n, prev, is_ts);
+                tag = r.tag;
+                has_esc = r.has_escape;
+                i = r.end;
+            } else {
+                i = e;
+                tag = if (isPropertyAccess(prev)) .identifier else lexer.keywordLookup(src[start..e], is_ts);
+            }
+        } else switch (c) {
+            '0'...'9' => {
+                i = Lex.numberEnd(src, start);
+                const is_bn = i > start and src[i - 1] == 'n';
+                tag = if (!lexer.validateNumericLiteral(src, start, i) or (i < n and lexer.isIdentStartAtPos(src, i)))
+                    .invalid
+                else if (is_bn) .bigint_literal else .number_literal;
+            },
+
+            '"', '\'' => {
+                tag = .string_literal;
+                // JSX attribute value (prev `=` inside a tag header) / JSX text
+                // (prev `>` or identifier): terminate at `<`. Otherwise plain JS.
+                const jsx_attr = is_jsx and prev == .equal and jsx_tag_depth > 0;
+                const jsx_text = is_jsx and (prev == .greater_than or prev == .identifier);
+                i = scanStringJsx(src, start, n, jsx_attr or jsx_text, jsx_attr);
+            },
+
+            '`' => {
+                const res = Lex.templateChunkEnd(src, start);
+                i = res.end;
+                if (!res.terminated) {
+                    tag = .invalid;
+                } else if (res.has_expr) {
+                    tag = .template_head;
+                    if (tmpl_depth < brace_d.len) {
+                        brace_d[tmpl_depth] = 0;
+                        tmpl_depth += 1;
+                    }
+                } else tag = .template_no_sub;
+            },
+
+            '{' => {
+                if (tmpl_depth > 0) brace_d[tmpl_depth - 1] += 1;
+                tag = .l_brace;
+                i += 1;
+            },
+
+            '}' => {
+                if (tmpl_depth > 0 and brace_d[tmpl_depth - 1] == 0) {
+                    const res = Lex.templateChunkEnd(src, start);
+                    i = res.end;
+                    if (!res.terminated) {
+                        tag = .invalid;
+                    } else if (res.has_expr) {
+                        tag = .template_middle;
+                    } else {
+                        tag = .template_tail;
+                        tmpl_depth -= 1;
+                    }
+                } else {
+                    if (tmpl_depth > 0) brace_d[tmpl_depth - 1] -= 1;
+                    tag = .r_brace;
+                    i += 1;
                 }
             },
-            '-' => {
-                // Annex B HTML close comment `-->` (only at logical line start).
-                if (annex_b and !is_module and at_line_start and i + 2 < n and src[i + 1] == '-' and src[i + 2] == '>') {
-                    i = lineTerminatorScan(src, i + 3, n);
-                    saw_nl = true;
-                    continue;
-                }
-            },
+
             '/' => {
+                // Line comment.
                 if (i + 1 < n and src[i + 1] == '/') {
                     const ce = lineTerminatorScan(src, i + 2, n);
-                    // JSX: a `//` inside JSX text content (where the line also
-                    // contains `</`) is literal text, not a comment. Skip both
-                    // slashes so the rest of the line stays visible.
+                    // JSX: a `//` inside JSX text content (line also contains `</`)
+                    // is literal text, not a comment. Skip both slashes.
                     if (is_jsx and !(i > 0 and src[i - 1] == '/')) {
                         var k = i + 2;
                         while (k + 1 < ce) : (k += 1) {
@@ -897,12 +971,12 @@ pub fn tokenizeScalarWithOptions(
                     saw_nl = true;
                     continue;
                 }
+                // Block comment.
                 if (i + 1 < n and src[i + 1] == '*') {
                     const res = Lex.blockCommentEnd(src, i);
                     if (res.has_nl) { saw_nl = true; at_line_start = true; }
                     if (res.end >= n and !(n >= 2 and src[n - 2] == '*' and src[n - 1] == '/')) {
-                        // JSX: an unterminated `/*` in JSX text is a literal `/`,
-                        // not an error. Emit it as a slash and resume after it.
+                        // JSX: an unterminated `/*` in JSX text is a literal `/`.
                         if (is_jsx) {
                             if (toks.len >= toks.capacity) try toks.ensureTotalCapacity(alloc, toks.capacity * 2 + 16);
                             toks.appendAssumeCapacity(.{ .tag = .slash, .start = i, .len = 1, .has_newline_before = saw_nl });
@@ -912,9 +986,8 @@ pub fn tokenizeScalarWithOptions(
                             i += 1;
                             continue;
                         }
-                        // `Lex.blockCommentEnd`'s scalar tail can miss a trailing
-                        // newline byte; rescan the body so an unterminated comment's
-                        // newline still propagates to the following token.
+                        // `blockCommentEnd`'s scalar tail can miss a trailing newline;
+                        // rescan so an unterminated comment's newline propagates.
                         if (!res.has_nl) {
                             var q = i + 2;
                             while (q < n) : (q += 1) {
@@ -927,148 +1000,119 @@ pub fn tokenizeScalarWithOptions(
                                 }
                             }
                         }
-                        // Unterminated block comment → single invalid token, then stop.
+                        // Unterminated block comment -> single invalid token, then stop.
                         if (toks.len >= toks.capacity) try toks.ensureTotalCapacity(alloc, toks.capacity * 2 + 16);
                         toks.appendAssumeCapacity(.{ .tag = .invalid, .start = i, .len = res.end - i, .has_newline_before = saw_nl });
                         i = res.end;
-                        // Note: saw_nl is intentionally left set — the main lexer
-                        // breaks here without clearing it, so a trailing EOF inherits
-                        // any newline seen inside the unterminated comment.
                         continue;
                     }
                     i = res.end;
                     continue;
                 }
+                // Not a comment: regex literal (if allowed) or slash operator.
+                if (Lex.regexAllowed(prev) and !(is_jsx and (prev == .less_than or prev == .greater_than))) {
+                    tag = .regex_literal;
+                    i = Lex.regexEnd(src, start);
+                } else {
+                    const r = scanOp(src, i, n);
+                    tag = r.tag;
+                    i = r.end;
+                }
             },
-            else => {},
-        }
-        // High-byte line terminators / whitespace / BOM.
-        if (c >= 0x80) {
-            if (c == 0xE2 and i + 2 < n and src[i + 1] == 0x80 and (src[i + 2] == 0xA8 or src[i + 2] == 0xA9)) {
-                saw_nl = true;
-                at_line_start = true;
-                i += 3;
-                continue;
-            }
-            if (c == 0xEF and i + 2 < n and src[i + 1] == 0xBB and src[i + 2] == 0xBF) {
-                i += 3;
-                continue;
-            }
-            const cl: u32 = @intCast(std.unicode.utf8ByteSequenceLength(c) catch 1);
-            if (i + cl > n) {
-                // Truncated UTF-8 sequence at EOF: skip one byte.
-                i += 1;
-                continue;
-            }
-            const cp = decodeKnownLen(src, i, cl);
-            if (lexer.isUnicodeWhitespace(@intCast(cp))) {
-                i += cl;
-                continue;
-            }
-        }
-        const prev = prev_kind;
-        const start = i;
-        var tag: Tag = undefined;
-        var has_esc = false;
-        if (c < 0x80 and isIdentStartByte(c)) {
-            // Hot path: SIMD-scan the ASCII identifier body. If it stops on a
-            // plain delimiter (not `\` or a 0x80+ byte), it is a pure-ASCII
-            // identifier — no escape decoding or Unicode validation needed.
-            const e = asciiIdentEnd(src, start, n);
-            const stop: u8 = if (e < n) src[e] else 0;
-            if (stop == '\\' or stop >= 0x80) {
-                @branchHint(.cold);
-                const r = scanIdentRun(src, start, n, prev, is_ts);
+
+            '<' => {
+                // Annex B HTML open comment `<!--` (non-module scripts).
+                if (annex_b and !is_module and i + 3 < n and src[i + 1] == '!' and src[i + 2] == '-' and src[i + 3] == '-') {
+                    i = lineTerminatorScan(src, i + 4, n);
+                    saw_nl = true;
+                    continue;
+                }
+                const r = scanOp(src, i, n);
+                tag = r.tag;
+                i = r.end;
+            },
+
+            '-' => {
+                // Annex B HTML close comment `-->` (only at logical line start).
+                if (annex_b and !is_module and at_line_start and i + 2 < n and src[i + 1] == '-' and src[i + 2] == '>') {
+                    i = lineTerminatorScan(src, i + 3, n);
+                    saw_nl = true;
+                    continue;
+                }
+                // A line-start `-->` outside Annex B is a single invalid token.
+                if (at_line_start and (is_module or !annex_b) and i + 2 < n and src[i + 1] == '-' and src[i + 2] == '>') {
+                    tag = .invalid;
+                    i += 3;
+                } else {
+                    const r = scanOp(src, i, n);
+                    tag = r.tag;
+                    i = r.end;
+                }
+            },
+
+            '.' => {
+                if (i + 1 < n and src[i + 1] >= '0' and src[i + 1] <= '9') {
+                    i = Lex.numberEnd(src, start);
+                    tag = if (!lexer.validateNumericLiteral(src, start, i) or (i < n and lexer.isIdentStartAtPos(src, i)))
+                        .invalid
+                    else
+                        .number_literal;
+                } else {
+                    const r = scanOp(src, i, n);
+                    tag = r.tag;
+                    i = r.end;
+                }
+            },
+
+            '\\' => {
+                const r = scanEscapedIdentStart(src, start, n);
                 tag = r.tag;
                 has_esc = r.has_escape;
                 i = r.end;
-            } else {
-                i = e;
-                tag = if (isPropertyAccess(prev)) .identifier else lexer.keywordLookup(src[start..e], is_ts);
-            }
-        } else if (c >= 0x80) {
-            // High-byte start (whitespace/BOM/LS/PS/truncation already filtered).
-            const sl: u32 = @intCast(std.unicode.utf8ByteSequenceLength(c) catch 1);
-            const start_cp = decodeKnownLen(src, start, sl);
-            if (!uid.isIdStart(@intCast(start_cp))) {
-                tag = .invalid;
-                i = start + sl;
-            } else {
-                tag = .identifier;
-                i = scanHighIdentRun(src, start, n);
-            }
-        } else if (c == '\\') {
-            const r = scanEscapedIdentStart(src, start, n);
-            tag = r.tag;
-            has_esc = r.has_escape;
-            i = r.end;
-        } else if (c >= '0' and c <= '9') {
-            i = Lex.numberEnd(src, start);
-            const is_bn = i > start and src[i - 1] == 'n';
-            tag = if (!lexer.validateNumericLiteral(src, start, i) or (i < n and lexer.isIdentStartAtPos(src, i)))
-                .invalid
-            else if (is_bn) .bigint_literal else .number_literal;
-        } else if (c == '.' and i + 1 < n and src[i + 1] >= '0' and src[i + 1] <= '9') {
-            i = Lex.numberEnd(src, start);
-            tag = if (!lexer.validateNumericLiteral(src, start, i) or (i < n and lexer.isIdentStartAtPos(src, i)))
-                .invalid
-            else
-                .number_literal;
-        } else if (c == '"' or c == '\'') {
-            tag = .string_literal;
-            // JSX attribute value (`<div id="x">`, prev `=` inside a tag header):
-            // no escapes, terminate at `<`. JSX text content (prev `>` or an
-            // identifier): terminate at `<` but still a string. Otherwise plain JS.
-            const jsx_attr = is_jsx and prev == .equal and jsx_tag_depth > 0;
-            const jsx_text = is_jsx and (prev == .greater_than or prev == .identifier);
-            i = scanStringJsx(src, start, n, jsx_attr or jsx_text, jsx_attr);
-        } else if (c == '/' and Lex.regexAllowed(prev) and !(is_jsx and (prev == .less_than or prev == .greater_than))) {
-            tag = .regex_literal;
-            i = Lex.regexEnd(src, start);
-        } else if (c == '`') {
-            const res = Lex.templateChunkEnd(src, start);
-            i = res.end;
-            if (!res.terminated) {
-                tag = .invalid;
-            } else if (res.has_expr) {
-                tag = .template_head;
-                if (tmpl_depth < brace_d.len) {
-                    brace_d[tmpl_depth] = 0;
-                    tmpl_depth += 1;
-                }
-            } else tag = .template_no_sub;
-        } else if (c == '{') {
-            if (tmpl_depth > 0) brace_d[tmpl_depth - 1] += 1;
-            tag = .l_brace;
-            i += 1;
-        } else if (c == '}') {
-            if (tmpl_depth > 0 and brace_d[tmpl_depth - 1] == 0) {
-                const res = Lex.templateChunkEnd(src, start);
-                i = res.end;
-                if (!res.terminated) {
-                    tag = .invalid;
-                } else if (res.has_expr) {
-                    tag = .template_middle;
+            },
+
+            else => {
+                if (c >= 0x80) {
+                    // LS/PS line terminators.
+                    if (c == 0xE2 and i + 2 < n and src[i + 1] == 0x80 and (src[i + 2] == 0xA8 or src[i + 2] == 0xA9)) {
+                        saw_nl = true;
+                        at_line_start = true;
+                        i += 3;
+                        continue;
+                    }
+                    // BOM.
+                    if (c == 0xEF and i + 2 < n and src[i + 1] == 0xBB and src[i + 2] == 0xBF) {
+                        i += 3;
+                        continue;
+                    }
+                    const cl: u32 = @intCast(std.unicode.utf8ByteSequenceLength(c) catch 1);
+                    if (i + cl > n) {
+                        // Truncated UTF-8 sequence at EOF: skip one byte.
+                        i += 1;
+                        continue;
+                    }
+                    const cp = decodeKnownLen(src, i, cl);
+                    if (lexer.isUnicodeWhitespace(@intCast(cp))) {
+                        i += cl;
+                        continue;
+                    }
+                    // High-byte identifier start, or invalid codepoint.
+                    if (!uid.isIdStart(@intCast(cp))) {
+                        tag = .invalid;
+                        i = start + cl;
+                    } else {
+                        tag = .identifier;
+                        i = scanHighIdentRun(src, start, n);
+                    }
                 } else {
-                    tag = .template_tail;
-                    tmpl_depth -= 1;
+                    // Any other ASCII byte (operators, punctuation, control) — the
+                    // operator scanner returns the right multi/single-char tag, or
+                    // `.invalid` for stray control bytes.
+                    const r = scanOp(src, i, n);
+                    tag = r.tag;
+                    i = r.end;
                 }
-            } else {
-                if (tmpl_depth > 0) brace_d[tmpl_depth - 1] -= 1;
-                tag = .r_brace;
-                i += 1;
-            }
-        } else if (c == '-' and at_line_start and (is_module or !annex_b) and
-            i + 2 < n and src[i + 1] == '-' and src[i + 2] == '>')
-        {
-            // A line-start `-->` outside Annex B (module, or annex_b disabled)
-            // is not an HTML close comment — it is a single invalid token.
-            tag = .invalid;
-            i += 3;
-        } else {
-            const r = scanOp(src, i, n);
-            tag = r.tag;
-            i = r.end;
+            },
         }
         if (toks.len >= toks.capacity) try toks.ensureTotalCapacity(alloc, toks.capacity * 2 + 16);
         toks.appendAssumeCapacity(.{ .tag = tag, .start = start, .len = i - start, .has_newline_before = saw_nl, .has_unicode_escape = has_esc });
@@ -1104,6 +1148,7 @@ pub fn tokenizeScalarWithOptions(
         saw_nl = false;
         at_line_start = false;
     }
+
     try toks.append(alloc, .{ .tag = .eof, .start = n, .len = 0, .has_newline_before = saw_nl });
     return toks;
 }
