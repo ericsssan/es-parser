@@ -40,8 +40,9 @@ Add to your `build.zig.zon`:
 ```zig
 .dependencies = .{
     .es_parser = .{
-        .url = "https://github.com/ericsssan/es-parser/archive/refs/tags/v0.1.4.tar.gz",
-        .hash = "es_parser-0.1.4-C15LKx-eGQCjPatgLNylDis674YRHxkZ3n8Pkm9J7X_x",
+        .url = "https://github.com/ericsssan/es-parser/archive/refs/tags/v0.2.0.tar.gz",
+        // Run `zig fetch --save <url>` to populate the hash.
+        .hash = "...",
     },
 },
 ```
