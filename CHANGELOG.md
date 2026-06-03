@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.2.0]
 
+Headline: the tokenizer is rewritten as a single-pass scalar lexer, and
+`line_starts` is now built lazily (a breaking API change).
+
+### Performance
+
+- **New single-pass scalar lexer, replacing the two-phase bitmap lexer.** The
+  old lexer built character-class bitmaps in one pass and tokenized in a second;
+  the new one tokenizes in a single pass with a SIMD ASCII-identifier fast path
+  (16-byte vector scan) and the Unicode/escape-correctness machinery moved off
+  the hot path. It is a drop-in producing the same token stream and is now the
+  default and sole tokenizer — substantially faster, most of all on
+  declaration-heavy TypeScript (`.d.ts`). The legacy bitmap lexer is removed.
+
 ### Breaking
 
 - **`line_starts` is no longer produced by the lexer.** It is now built lazily
@@ -37,8 +50,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Rich-fields tokenization (`tokenizeScalarFull`) is faster now that it no longer
   records line starts: it produces tokens and comment trivia only. The
   parse-only path was already line-starts-free and is unchanged.
-- The scalar single-pass lexer is the sole tokenizer; the legacy two-phase
-  bitmap lexer has been removed.
 
 ### Added
 
