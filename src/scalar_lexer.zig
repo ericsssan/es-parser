@@ -800,7 +800,7 @@ pub fn tokenizeScalarWithOptions(
                 }
                 // Block comment.
                 if (i + 1 < n and src[i + 1] == '*') {
-                    const res = Lex.blockCommentEnd(src, i);
+                    const res = Lex.blockCommentEnd(src, i, opts.line_starts, alloc);
                     if (res.has_nl) { saw_nl = true; at_line_start = true; }
                     if (res.end >= n and !(n >= 2 and src[n - 2] == '*' and src[n - 1] == '/')) {
                         // JSX: an unterminated `/*` in JSX text is a literal `/`.
@@ -830,12 +830,10 @@ pub fn tokenizeScalarWithOptions(
                         // Unterminated block comment -> single invalid token, then stop.
                         if (toks.len >= toks.capacity) try toks.ensureTotalCapacity(alloc, toks.capacity * 2 + 16);
                         toks.appendAssumeCapacity(.{ .tag = .invalid, .start = i, .len = res.end - i, .has_newline_before = saw_nl });
-                        if (opts.line_starts) |ls| recordSpanNewlines(ls, alloc, src, start, res.end);
                         i = res.end;
                         continue;
                     }
                     if (opts.comment_sink) |s| s.record(alloc, start, res.end, 1);
-                    if (opts.line_starts) |ls| recordSpanNewlines(ls, alloc, src, start, res.end);
                     i = res.end;
                     continue;
                 }
