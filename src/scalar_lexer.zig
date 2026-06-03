@@ -435,36 +435,44 @@ const Op = struct { tag: Tag, end: u32 };
 
 fn scanOp(src: []const u8, i: u32, n: u32) Op {
     const c = src[i];
+    // Single-char delimiters are the common case — return before touching any
+    // lookahead. Multi-char-capable operators read c1/c2/c3 lazily, only down
+    // the branch that needs them, so the hot single-char path costs one switch
+    // and no bounds-checked lookahead loads.
+    switch (c) {
+        '(' => return .{ .tag = .l_paren, .end = i + 1 },
+        ')' => return .{ .tag = .r_paren, .end = i + 1 },
+        '[' => return .{ .tag = .l_bracket, .end = i + 1 },
+        ']' => return .{ .tag = .r_bracket, .end = i + 1 },
+        '{' => return .{ .tag = .l_brace, .end = i + 1 },
+        '}' => return .{ .tag = .r_brace, .end = i + 1 },
+        ';' => return .{ .tag = .semicolon, .end = i + 1 },
+        ',' => return .{ .tag = .comma, .end = i + 1 },
+        ':' => return .{ .tag = .colon, .end = i + 1 },
+        '~' => return .{ .tag = .tilde, .end = i + 1 },
+        '@' => return .{ .tag = .at_sign, .end = i + 1 },
+        '#' => return .{ .tag = .hash, .end = i + 1 },
+        else => {},
+    }
     const c1: u8 = if (i + 1 < n) src[i + 1] else 0;
-    const c2: u8 = if (i + 2 < n) src[i + 2] else 0;
-    const c3: u8 = if (i + 3 < n) src[i + 3] else 0;
     return switch (c) {
-        '(' => .{ .tag = .l_paren, .end = i + 1 },
-        ')' => .{ .tag = .r_paren, .end = i + 1 },
-        '[' => .{ .tag = .l_bracket, .end = i + 1 },
-        ']' => .{ .tag = .r_bracket, .end = i + 1 },
-        '{' => .{ .tag = .l_brace, .end = i + 1 },
-        '}' => .{ .tag = .r_brace, .end = i + 1 },
-        ';' => .{ .tag = .semicolon, .end = i + 1 },
-        ',' => .{ .tag = .comma, .end = i + 1 },
-        ':' => .{ .tag = .colon, .end = i + 1 },
-        '~' => .{ .tag = .tilde, .end = i + 1 },
-        '@' => .{ .tag = .at_sign, .end = i + 1 },
-        '#' => .{ .tag = .hash, .end = i + 1 },
-        '.' => if (c1 == '.' and c2 == '.') .{ .tag = .ellipsis, .end = i + 3 } else .{ .tag = .dot, .end = i + 1 },
-        '?' => if (c1 == '?') (if (c2 == '=') Op{ .tag = .question_question_equal, .end = i + 3 } else Op{ .tag = .question_question, .end = i + 2 }) else if (c1 == '.' and !(c2 >= '0' and c2 <= '9')) Op{ .tag = .question_dot, .end = i + 2 } else Op{ .tag = .question, .end = i + 1 },
-        '=' => if (c1 == '=' and c2 == '=') .{ .tag = .equal_equal_equal, .end = i + 3 } else if (c1 == '=') .{ .tag = .equal_equal, .end = i + 2 } else if (c1 == '>') .{ .tag = .arrow, .end = i + 2 } else .{ .tag = .equal, .end = i + 1 },
-        '!' => if (c1 == '=' and c2 == '=') .{ .tag = .bang_equal_equal, .end = i + 3 } else if (c1 == '=') .{ .tag = .bang_equal, .end = i + 2 } else .{ .tag = .bang, .end = i + 1 },
+        '.' => if (c1 == '.' and (if (i + 2 < n) src[i + 2] else 0) == '.') .{ .tag = .ellipsis, .end = i + 3 } else .{ .tag = .dot, .end = i + 1 },
+        '?' => if (c1 == '?') (if ((if (i + 2 < n) src[i + 2] else 0) == '=') Op{ .tag = .question_question_equal, .end = i + 3 } else Op{ .tag = .question_question, .end = i + 2 }) else if (c1 == '.' and !((if (i + 2 < n) src[i + 2] else 0) >= '0' and (if (i + 2 < n) src[i + 2] else 0) <= '9')) Op{ .tag = .question_dot, .end = i + 2 } else Op{ .tag = .question, .end = i + 1 },
+        '=' => if (c1 == '=' and (if (i + 2 < n) src[i + 2] else 0) == '=') .{ .tag = .equal_equal_equal, .end = i + 3 } else if (c1 == '=') .{ .tag = .equal_equal, .end = i + 2 } else if (c1 == '>') .{ .tag = .arrow, .end = i + 2 } else .{ .tag = .equal, .end = i + 1 },
+        '!' => if (c1 == '=' and (if (i + 2 < n) src[i + 2] else 0) == '=') .{ .tag = .bang_equal_equal, .end = i + 3 } else if (c1 == '=') .{ .tag = .bang_equal, .end = i + 2 } else .{ .tag = .bang, .end = i + 1 },
         '+' => if (c1 == '+') .{ .tag = .plus_plus, .end = i + 2 } else if (c1 == '=') .{ .tag = .plus_equal, .end = i + 2 } else .{ .tag = .plus, .end = i + 1 },
         '-' => if (c1 == '-') .{ .tag = .minus_minus, .end = i + 2 } else if (c1 == '=') .{ .tag = .minus_equal, .end = i + 2 } else .{ .tag = .minus, .end = i + 1 },
-        '*' => if (c1 == '*' and c2 == '=') .{ .tag = .asterisk_asterisk_equal, .end = i + 3 } else if (c1 == '*') .{ .tag = .asterisk_asterisk, .end = i + 2 } else if (c1 == '=') .{ .tag = .asterisk_equal, .end = i + 2 } else .{ .tag = .asterisk, .end = i + 1 },
+        '*' => if (c1 == '*' and (if (i + 2 < n) src[i + 2] else 0) == '=') .{ .tag = .asterisk_asterisk_equal, .end = i + 3 } else if (c1 == '*') .{ .tag = .asterisk_asterisk, .end = i + 2 } else if (c1 == '=') .{ .tag = .asterisk_equal, .end = i + 2 } else .{ .tag = .asterisk, .end = i + 1 },
         '%' => if (c1 == '=') .{ .tag = .percent_equal, .end = i + 2 } else .{ .tag = .percent, .end = i + 1 },
         '/' => if (c1 == '=') .{ .tag = .slash_equal, .end = i + 2 } else .{ .tag = .slash, .end = i + 1 },
         '^' => if (c1 == '=') .{ .tag = .caret_equal, .end = i + 2 } else .{ .tag = .caret, .end = i + 1 },
-        '&' => if (c1 == '&' and c2 == '=') .{ .tag = .ampersand_ampersand_equal, .end = i + 3 } else if (c1 == '&') .{ .tag = .ampersand_ampersand, .end = i + 2 } else if (c1 == '=') .{ .tag = .ampersand_equal, .end = i + 2 } else .{ .tag = .ampersand, .end = i + 1 },
-        '|' => if (c1 == '|' and c2 == '=') .{ .tag = .pipe_pipe_equal, .end = i + 3 } else if (c1 == '|') .{ .tag = .pipe_pipe, .end = i + 2 } else if (c1 == '=') .{ .tag = .pipe_equal, .end = i + 2 } else .{ .tag = .pipe, .end = i + 1 },
-        '<' => if (c1 == '<' and c2 == '=') .{ .tag = .less_less_equal, .end = i + 3 } else if (c1 == '<') .{ .tag = .less_less, .end = i + 2 } else if (c1 == '=') .{ .tag = .less_equal, .end = i + 2 } else .{ .tag = .less_than, .end = i + 1 },
-        '>' => if (c1 == '>' and c2 == '>' and c3 == '=') .{ .tag = .greater_greater_greater_equal, .end = i + 4 } else if (c1 == '>' and c2 == '>') .{ .tag = .greater_greater_greater, .end = i + 3 } else if (c1 == '>' and c2 == '=') .{ .tag = .greater_greater_equal, .end = i + 3 } else if (c1 == '>') .{ .tag = .greater_greater, .end = i + 2 } else if (c1 == '=') .{ .tag = .greater_equal, .end = i + 2 } else .{ .tag = .greater_than, .end = i + 1 },
+        '&' => if (c1 == '&' and (if (i + 2 < n) src[i + 2] else 0) == '=') .{ .tag = .ampersand_ampersand_equal, .end = i + 3 } else if (c1 == '&') .{ .tag = .ampersand_ampersand, .end = i + 2 } else if (c1 == '=') .{ .tag = .ampersand_equal, .end = i + 2 } else .{ .tag = .ampersand, .end = i + 1 },
+        '|' => if (c1 == '|' and (if (i + 2 < n) src[i + 2] else 0) == '=') .{ .tag = .pipe_pipe_equal, .end = i + 3 } else if (c1 == '|') .{ .tag = .pipe_pipe, .end = i + 2 } else if (c1 == '=') .{ .tag = .pipe_equal, .end = i + 2 } else .{ .tag = .pipe, .end = i + 1 },
+        '<' => if (c1 == '<' and (if (i + 2 < n) src[i + 2] else 0) == '=') .{ .tag = .less_less_equal, .end = i + 3 } else if (c1 == '<') .{ .tag = .less_less, .end = i + 2 } else if (c1 == '=') .{ .tag = .less_equal, .end = i + 2 } else .{ .tag = .less_than, .end = i + 1 },
+        '>' => blk: {
+            const c2: u8 = if (i + 2 < n) src[i + 2] else 0;
+            break :blk if (c1 == '>' and c2 == '>' and (if (i + 3 < n) src[i + 3] else 0) == '=') .{ .tag = .greater_greater_greater_equal, .end = i + 4 } else if (c1 == '>' and c2 == '>') .{ .tag = .greater_greater_greater, .end = i + 3 } else if (c1 == '>' and c2 == '=') .{ .tag = .greater_greater_equal, .end = i + 3 } else if (c1 == '>') .{ .tag = .greater_greater, .end = i + 2 } else if (c1 == '=') .{ .tag = .greater_equal, .end = i + 2 } else .{ .tag = .greater_than, .end = i + 1 };
+        },
         else => .{ .tag = .invalid, .end = i + 1 },
     };
 }
