@@ -12,6 +12,7 @@
 //! serialized buffer and has no place in a general parser.
 const std = @import("std");
 const ast_mod = @import("ast.zig");
+const meta_compat = @import("meta_compat.zig");
 const Ast = ast_mod.Ast;
 const NodeIndex = ast_mod.NodeIndex;
 const SubRange = ast_mod.SubRange;
@@ -446,14 +447,15 @@ inline fn spSub(parents: []u32, extra: []const u32, start: u32, end: u32, parent
 
 /// Read an extra-data struct from the flat u32 array without going through Ast.
 inline fn extraData(comptime T: type, extra: []const u32, index: u32) T {
-    const fields = @typeInfo(T).@"struct".fields;
     var result: T = undefined;
-    inline for (fields, 0..) |field, i| {
+    inline for (0..meta_compat.fieldCount(T)) |i| {
+        const name = comptime meta_compat.structFieldName(T, i);
+        const FieldT = @FieldType(T, name);
         const raw: u32 = extra[index + i];
-        @field(result, field.name) = switch (field.type) {
+        @field(result, name) = switch (FieldT) {
             NodeIndex => @enumFromInt(raw),
             u32       => raw,
-            else      => @compileError("unsupported extra field type: " ++ @typeName(field.type)),
+            else      => @compileError("unsupported extra field type: " ++ @typeName(FieldT)),
         };
     }
     return result;

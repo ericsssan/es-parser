@@ -1,5 +1,6 @@
 const std = @import("std");
 const TokenTag = @import("token.zig").Tag;
+const meta_compat = @import("meta_compat.zig");
 const Span = @import("span.zig").Span;
 const Diagnostic = @import("diagnostic.zig").Diagnostic;
 const ScopeEvent = @import("scope_events.zig").Event;
@@ -937,16 +938,17 @@ pub const Ast = struct {
     /// Read a typed extra data struct starting at the given index.
     /// Returns zero-initialized result if index is out of bounds (e.g. .none passed as extra index).
     pub fn extraData(self: *const Ast, comptime T: type, index: ExtraIndex) T {
-        const fields = std.meta.fields(T);
         var result: T = undefined;
-        inline for (fields, 0..) |field, i| {
+        inline for (0..meta_compat.fieldCount(T)) |i| {
+            const name = comptime meta_compat.structFieldName(T, i);
+            const FieldT = @FieldType(T, name);
             const raw = if (index + i < self.extra_data.len) self.extra_data[index + i] else 0;
-            @field(result, field.name) = if (field.type == NodeIndex)
+            @field(result, name) = if (FieldT == NodeIndex)
                 @enumFromInt(raw)
-            else if (field.type == u32)
+            else if (FieldT == u32)
                 raw
             else
-                @compileError("unexpected field type: " ++ @typeName(field.type));
+                @compileError("unexpected field type: " ++ @typeName(FieldT));
         }
         return result;
     }

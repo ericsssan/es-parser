@@ -1,5 +1,6 @@
 const std = @import("std");
 const ast = @import("ast.zig");
+const meta_compat = @import("meta_compat.zig");
 const Ast = ast.Ast;
 const Node = ast.Node;
 const NodeIndex = ast.NodeIndex;
@@ -2267,26 +2268,28 @@ pub const Parser = struct {
 
     /// Serialize a struct to extra_data as sequential u32 fields, return the start index.
     pub inline fn addExtra(self: *Parser, comptime T: type, data: T) !ExtraIndex {
-        const fields = std.meta.fields(T);
+        const field_count = comptime meta_compat.fieldCount(T);
         const cur_len = self.extra_data.items.len;
         // Fast path: pre-allocated capacity covers the common case — avoid loading the allocator vtable.
-        if (cur_len + fields.len > self.extra_data.capacity) {
+        if (cur_len + field_count > self.extra_data.capacity) {
             @branchHint(.cold);
-            try self.extra_data.ensureTotalCapacity(self.gpa, @max(self.extra_data.capacity * 2 + 16, cur_len + fields.len));
+            try self.extra_data.ensureTotalCapacity(self.gpa, @max(self.extra_data.capacity * 2 + 16, cur_len + field_count));
         }
         const result: ExtraIndex = @intCast(cur_len);
         const ptr = self.extra_data.items.ptr;
-        inline for (fields, 0..) |field, i| {
-            const val = @field(data, field.name);
-            const as_u32: u32 = if (field.type == NodeIndex)
+        inline for (0..field_count) |i| {
+            const name = comptime meta_compat.structFieldName(T, i);
+            const FieldT = @FieldType(T, name);
+            const val = @field(data, name);
+            const as_u32: u32 = if (FieldT == NodeIndex)
                 @intFromEnum(val)
-            else if (field.type == u32)
+            else if (FieldT == u32)
                 val
             else
-                @compileError("unexpected field type: " ++ @typeName(field.type));
+                @compileError("unexpected field type: " ++ @typeName(FieldT));
             ptr[cur_len + i] = as_u32;
         }
-        self.extra_data.items.len = cur_len + fields.len;
+        self.extra_data.items.len = cur_len + field_count;
         return result;
     }
 
@@ -2643,7 +2646,7 @@ pub const Parser = struct {
                 // node_main_token_ptr[...] below → tok_starts_ptr[huge] → segfault
                 // (ReleaseFast only; the value is benign zero under zeroed pages).
                 const ev_kind_int = @intFromEnum(ev.kind);
-                if (ev_kind_int >= @typeInfo(ScopeEventKind).@"enum".fields.len) continue;
+                if (ev_kind_int >= meta_compat.fieldCount(ScopeEventKind)) continue;
                 if (@as(usize, @intCast(ev.node)) >= self.nodes.len) continue;
                 switch (ev.kind) {
                     .scope_open => if (ev.aux != @intFromEnum(ScopeKindU8.elided)) { depth += 1; },

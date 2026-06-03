@@ -1,9 +1,10 @@
 const std = @import("std");
 const NodeTag = @import("ast.zig").Node.Tag;
+const meta_compat = @import("meta_compat.zig");
 
 // ── Tag Count ────────────────────────────────────────────────────
 
-pub const tag_count: u32 = @typeInfo(NodeTag).@"enum".fields.len;
+pub const tag_count: u32 = meta_compat.fieldCount(NodeTag);
 
 // ── ESTree Name Table ────────────────────────────────────────────
 
@@ -11,8 +12,9 @@ pub const tag_count: u32 = @typeInfo(NodeTag).@"enum".fields.len;
 /// ESTree-compatible type name (null-terminated for C ABI).
 pub const tag_names: [tag_count][*:0]const u8 = blk: {
     var names: [tag_count][*:0]const u8 = undefined;
-    for (@typeInfo(NodeTag).@"enum".fields) |field| {
-        names[field.value] = estreeNameForTag(@enumFromInt(field.value));
+    for (0..meta_compat.fieldCount(NodeTag)) |i| {
+        const tag = meta_compat.enumValue(NodeTag, i);
+        names[@intFromEnum(tag)] = estreeNameForTag(tag);
     }
     break :blk names;
 };
@@ -235,7 +237,7 @@ test "known tag names" {
 }
 
 test "ez_tag_count matches enum" {
-    try std.testing.expectEqual(tag_count, @as(u32, @typeInfo(NodeTag).@"enum".fields.len));
+    try std.testing.expectEqual(tag_count, @as(u32, meta_compat.fieldCount(NodeTag)));
 }
 
 test "ez_tag_name out of bounds" {

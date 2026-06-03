@@ -49,4 +49,5 @@ test {
     _ = @import("semantic.zig");
     _ = @import("layout.zig");
     _ = @import("lexer.zig");
+    _ = @import("meta_compat.zig");
 }
