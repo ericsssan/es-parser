@@ -433,7 +433,7 @@ inline fn isIdentStartByte(c: u8) bool {
 
 const Op = struct { tag: Tag, end: u32 };
 
-fn scanOp(src: []const u8, i: u32, n: u32) Op {
+inline fn scanOp(src: []const u8, i: u32, n: u32) Op {
     const c = src[i];
     // Single-char delimiters are the common case — return before touching any
     // lookahead. Multi-char-capable operators read c1/c2/c3 lazily, only down
