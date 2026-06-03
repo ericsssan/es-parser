@@ -32,7 +32,7 @@ pub const TokenList = Ast.Ast.TokenList;
 
 /// Scan a string literal starting at `open`. In JSX context (`is_jsx`) the
 /// string terminates at `<` and may span newlines; JSX attribute strings
-/// (`jsx_no_escape`) treat `\` as a literal byte. Mirrors `stringEndBMOptFull`.
+/// (`jsx_no_escape`) treat `\` as a literal byte.
 fn scanStringJsx(src: []const u8, open: u32, n: u32, is_jsx: bool, jsx_no_escape: bool) u32 {
     const quote = src[open];
     var i = open + 1;
