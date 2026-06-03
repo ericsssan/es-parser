@@ -474,6 +474,18 @@ pub const CodePathBuilder = struct {
         };
     }
 
+    /// Establish an empty root fork context so `fork_context` is never the
+    /// `undefined` init value. enterCodePath replaces it; this only matters if a
+    /// segment op (makeNext/leave/…) is reached before the first enterCodePath —
+    /// which a well-formed event stream never does, but a malformed one under a
+    /// non-zeroing allocator can, otherwise dereferencing an uninitialized
+    /// `fork_context` (head() → totalLen) and segfaulting. Empty ⇒ head() = &.{}.
+    pub fn initForkContext(self: *CodePathBuilder) !void {
+        const fc = try self.allocator.create(ForkContext);
+        fc.* = ForkContext.init(self.allocator, null, 0);
+        self.fork_context = fc;
+    }
+
     /// Pre-size internal ArrayLists to avoid growth reallocs during event
     /// processing.  Hints come from the event stream (scope/declare/reference
     /// counts).  Over-estimation is fine — arena-backed, so unused capacity

@@ -456,6 +456,10 @@ fn resolveFullImpl(
     cpb.allocator = cpb.arena.allocator();
     cpb.bump_alloc = opts.cfg_pool_alloc;
     errdefer cpb.deinit();
+    // fork_context starts `undefined`; establish an empty root so a segment op
+    // reached before the first enterCodePath (only under a malformed event stream
+    // on a non-zeroing allocator) reads an empty context instead of segfaulting.
+    if (do_cfg) try cpb.initForkContext();
 
     // Pre-size cpb ArrayLists.  ev_len is a safe upper bound for all per-event
     // arrays (measured peak ratios: segs 0.27, evts 0.62, aprev 0.40 — all < 1).
