@@ -3009,6 +3009,15 @@ pub const Parser = struct {
                     _ = self.advance(); // eat abstract
                     return self.parseClassDeclaration();
                 }
+                // A statement-level decorator must decorate a class declaration.
+                // Any other follower is a grammar error in TypeScript (TS1146
+                // "Declaration expected"); the `function` case already emitted the
+                // more specific TS1206 just above, so exclude it here.
+                if (self.is_ts and after_deco != .kw_function and
+                    !(after_deco == .kw_async and self.peekAt(1) == .kw_function))
+                {
+                    try self.emitDiagnostic(self.currentSpan(), "Declaration expected", .{});
+                }
                 return self.parseExpressionStatement();
             },
             .kw_import => {

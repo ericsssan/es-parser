@@ -556,3 +556,26 @@ test "annexB exemption does not mask real lexical/var conflicts" {
     defer a.deinit(testing.allocator);
     try testing.expect(a.errors.len >= 1);
 }
+
+// ── TS: a statement-level decorator must decorate a class (TS1146) ──────────
+
+test "ts: decorator on a non-declaration is rejected" {
+    var a = try parseTs("declare function dec<T>(t: T): T;\n@dec\nawait 1\n");
+    defer a.deinit(testing.allocator);
+    try testing.expect(a.errors.len >= 1);
+}
+
+test "ts: decorator on a class declaration is accepted" {
+    var a = try parseTs("declare function dec<T>(t: T): T;\n@dec\nclass C {}\n");
+    defer a.deinit(testing.allocator);
+    try expectNoErrors(&a);
+
+    // export / abstract forms too.
+    var b = try parseTs("declare const dec: any;\n@dec\nexport class D {}\n");
+    defer b.deinit(testing.allocator);
+    try expectNoErrors(&b);
+
+    var c = try parseTs("declare const dec: any;\n@dec\nabstract class E {}\n");
+    defer c.deinit(testing.allocator);
+    try expectNoErrors(&c);
+}
