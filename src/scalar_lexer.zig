@@ -528,21 +528,42 @@ pub fn computeLineStarts(alloc: std.mem.Allocator, src: []const u8) ![]u32 {
     const n: u32 = @intCast(src.len);
     try ls.ensureTotalCapacity(alloc, n / 24 + 8);
     ls.appendAssumeCapacity(0);
+    const V = @Vector(16, u8);
     var i: u32 = 0;
-    while (i < n) : (i += 1) {
+    while (i < n) {
+        // SIMD-skip 16-byte runs containing no line-terminator candidate
+        // (`\n`, `\r`, or a `0xE2` lead). The common case — long terminator-free
+        // spans — advances 16 bytes per branch; terminator-bearing windows fall
+        // to the scalar handling below (which owns the \r\n / LS-PS semantics).
+        if (i + 16 <= n) {
+            const chunk: V = src[i..][0..16].*;
+            const hits: u16 = @bitCast((chunk == @as(V, @splat(@as(u8, '\n')))) |
+                (chunk == @as(V, @splat(@as(u8, '\r')))) |
+                (chunk == @as(V, @splat(@as(u8, 0xE2)))));
+            if (hits == 0) {
+                i += 16;
+                continue;
+            }
+            i += @ctz(hits); // jump straight to the first candidate
+        }
         const c = src[i];
         if (c == '\n') {
             try ls.append(alloc, i + 1);
+            i += 1;
         } else if (c == '\r') {
             if (i + 1 < n and src[i + 1] == '\n') {
                 try ls.append(alloc, i + 2);
-                i += 1;
+                i += 2;
             } else {
                 try ls.append(alloc, i + 1);
+                i += 1;
             }
         } else if (c == 0xE2 and i + 2 < n and src[i + 1] == 0x80 and (src[i + 2] == 0xA8 or src[i + 2] == 0xA9)) {
             try ls.append(alloc, i + 3);
-            i += 2;
+            i += 3;
+        } else {
+            // 0xE2 that isn't LS/PS, or a candidate at the tail — just advance.
+            i += 1;
         }
     }
     return ls.toOwnedSlice(alloc);
