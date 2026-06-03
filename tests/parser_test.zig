@@ -534,3 +534,25 @@ test "regex: flag-less \\u{...} still errors in TypeScript (TS1538)" {
     defer b.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 0), b.errors.len);
 }
+
+// ── Annex B B.3.3: sloppy if/label function vs outer lexical binding ────────
+
+test "annexB: sloppy if-body function does not conflict with outer let" {
+    // Per Annex B B.3.3 the function's hoisted var-binding is suppressed when it
+    // would clash with a lexical declaration — no early error (test262
+    // annexB/.../global-code/if-decl-*-skip-early-err).
+    var a = try parseSource("let f = 123;\nif (true) function f() {} else function _f() {}\n");
+    defer a.deinit(testing.allocator);
+    try expectNoErrors(&a);
+
+    var b = try parseSource("let f = 123;\nif (false) ; else function f() {}\n");
+    defer b.deinit(testing.allocator);
+    try expectNoErrors(&b);
+}
+
+test "annexB exemption does not mask real lexical/var conflicts" {
+    // A genuine let-vs-var clash at top level is still an error.
+    var a = try parseSource("let g = 1;\nvar g;\n");
+    defer a.deinit(testing.allocator);
+    try testing.expect(a.errors.len >= 1);
+}

@@ -2654,8 +2654,13 @@ pub const Parser = struct {
                         // In modules: var bindings conflict with lex bindings.
                         // In scripts: var bindings AND function decls (which hoist as var)
                         // conflict with lex bindings (let/const/class).
+                        // Annex B B.3.3 exemption: a sloppy function in an if/label body
+                        // (`function_decl_annex_b`) whose hoisted name would clash with a
+                        // lexical binding has that hoist suppressed and the early error
+                        // skipped — so it does not contribute a conflicting var-name.
                         if (!self.is_ts and (bk == .@"var" or
-                            (!self.is_module and (bk == .function_decl or bk == .function_decl_annex_b))))
+                            (!self.is_module and (bk == .function_decl or
+                                (bk == .function_decl_annex_b and !allow_fn_dup)))))
                         {
                             const vt = self.node_main_token_ptr[@intCast(ev.node)];
                             const vs = self.tok_starts_ptr[vt];
