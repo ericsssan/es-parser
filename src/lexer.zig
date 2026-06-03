@@ -89,6 +89,7 @@ test "nibble classifier tables match the scalar classification for all 256 bytes
 
 pub const TokenizeResult = Lex.TokenizeResult;
 pub const TokenizeOptions = Lex.TokenizeOptions;
+pub const CommentSink = Lex.CommentSink;
 pub const PUBLISH_BATCH: usize = Lex.PUBLISH_BATCH;
 
 pub fn tokenize(alloc: std.mem.Allocator, source: []const u8) !TokenizeResult {
@@ -106,7 +107,10 @@ pub fn tokenizeWithAllOptions(
     language: Language,
     opts: TokenizeOptions,
 ) !TokenizeResult {
-    return tokenizeWithBuf(alloc, source, language, opts, null);
+    // The scalar lexer is the single token producer; it now also emits the
+    // comment + line-start trivia this result carries. (The two-phase bitmap
+    // path below is retired.)
+    return @import("scalar_lexer.zig").tokenizeScalarFull(alloc, source, language, opts);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -493,6 +493,61 @@ pub fn tokenizeScalar(alloc: std.mem.Allocator, src: []const u8, language: Langu
     return tokenizeScalarWithOptions(alloc, src, language, .{});
 }
 
+/// Full front-end result: tokens + comment trivia + line starts, matching the
+/// (now-retired) bitmap lexer's `TokenizeResult`. The parse-only path uses
+/// `tokenizeScalar` (tokens only, no trivia cost); callers that need comments /
+/// line starts (diagnostics, lint directives) use this.
+pub fn tokenizeScalarFull(alloc: std.mem.Allocator, src: []const u8, language: Language, opts: Lex.TokenizeOptions) !Lex.TokenizeResult {
+    var sink = Lex.CommentSink{};
+    errdefer sink.deinit(alloc);
+    var o = opts;
+    o.comment_sink = &sink;
+    var tokens = try tokenizeScalarWithOptions(alloc, src, language, o);
+    errdefer tokens.deinit(alloc);
+    const line_starts = try computeLineStarts(alloc, src);
+    errdefer alloc.free(line_starts);
+    const count: u32 = @intCast(sink.starts.items.len);
+    return .{
+        .tokens = tokens,
+        .comment_starts = try sink.starts.toOwnedSlice(alloc),
+        .comment_ends = try sink.ends.toOwnedSlice(alloc),
+        .comment_kinds = try sink.kinds.toOwnedSlice(alloc),
+        .comment_count = count,
+        .line_starts = line_starts,
+    };
+}
+
+/// Byte offset of each line start: index 0 is 0, then the offset just past every
+/// line terminator (`\n`, lone `\r`, `\r\n` coalesced as one, U+2028/U+2029).
+/// Computed in a single source scan independent of tokenizing — matches the
+/// bitmap lexer's `line_starts` (which counts every terminator in the source,
+/// including those inside block comments / strings / templates).
+pub fn computeLineStarts(alloc: std.mem.Allocator, src: []const u8) ![]u32 {
+    var ls: std.ArrayListUnmanaged(u32) = .empty;
+    errdefer ls.deinit(alloc);
+    const n: u32 = @intCast(src.len);
+    try ls.ensureTotalCapacity(alloc, n / 24 + 8);
+    ls.appendAssumeCapacity(0);
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        const c = src[i];
+        if (c == '\n') {
+            try ls.append(alloc, i + 1);
+        } else if (c == '\r') {
+            if (i + 1 < n and src[i + 1] == '\n') {
+                try ls.append(alloc, i + 2);
+                i += 1;
+            } else {
+                try ls.append(alloc, i + 1);
+            }
+        } else if (c == 0xE2 and i + 2 < n and src[i + 1] == 0x80 and (src[i + 2] == 0xA8 or src[i + 2] == 0xA9)) {
+            try ls.append(alloc, i + 3);
+            i += 2;
+        }
+    }
+    return ls.toOwnedSlice(alloc);
+}
+
 /// Tokenize `src` into a `TokenList`, matching `Lexer.tokenizeWithAllOptions`.
 ///
 /// Single eager pass: keeps the hot lexer state (`i`, `prev_kind`, `saw_nl`,
@@ -655,11 +710,13 @@ pub fn tokenizeScalarWithOptions(
                                 break;
                             }
                         } else {
+                            if (opts.comment_sink) |s| s.record(alloc, start, ce, 0);
                             i = ce;
                             saw_nl = true;
                         }
                         continue;
                     }
+                    if (opts.comment_sink) |s| s.record(alloc, start, ce, 0);
                     i = ce;
                     saw_nl = true;
                     continue;
@@ -699,6 +756,7 @@ pub fn tokenizeScalarWithOptions(
                         i = res.end;
                         continue;
                     }
+                    if (opts.comment_sink) |s| s.record(alloc, start, res.end, 1);
                     i = res.end;
                     continue;
                 }
@@ -716,7 +774,9 @@ pub fn tokenizeScalarWithOptions(
             '<' => {
                 // Annex B HTML open comment `<!--` (non-module scripts).
                 if (annex_b and !is_module and i + 3 < n and src[i + 1] == '!' and src[i + 2] == '-' and src[i + 3] == '-') {
-                    i = lineTerminatorScan(src, i + 4, n);
+                    const ce = lineTerminatorScan(src, i + 4, n);
+                    if (opts.comment_sink) |s| s.record(alloc, start, ce, 0);
+                    i = ce;
                     saw_nl = true;
                     continue;
                 }
@@ -728,7 +788,9 @@ pub fn tokenizeScalarWithOptions(
             '-' => {
                 // Annex B HTML close comment `-->` (only at logical line start).
                 if (annex_b and !is_module and at_line_start and i + 2 < n and src[i + 1] == '-' and src[i + 2] == '>') {
-                    i = lineTerminatorScan(src, i + 3, n);
+                    const ce = lineTerminatorScan(src, i + 3, n);
+                    if (opts.comment_sink) |s| s.record(alloc, start, ce, 0);
+                    i = ce;
                     saw_nl = true;
                     continue;
                 }

@@ -47,9 +47,32 @@ pub const TokenizeResult = struct {
     }
 };
 
+/// Optional comment-trivia output. When passed to the scalar lexer it records
+/// each comment's `(start, end, kind)` — kind 0 = line / HTML (Annex B),
+/// kind 1 = block — matching the bitmap lexer's `comment_*` arrays. Left null
+/// on the parse-only fast path so no trivia work is done.
+pub const CommentSink = struct {
+    starts: std.ArrayListUnmanaged(u32) = .empty,
+    ends: std.ArrayListUnmanaged(u32) = .empty,
+    kinds: std.ArrayListUnmanaged(u8) = .empty,
+
+    pub fn record(self: *CommentSink, alloc: std.mem.Allocator, start: u32, end: u32, kind: u8) void {
+        self.starts.append(alloc, start) catch {};
+        self.ends.append(alloc, end) catch {};
+        self.kinds.append(alloc, kind) catch {};
+    }
+    pub fn deinit(self: *CommentSink, alloc: std.mem.Allocator) void {
+        self.starts.deinit(alloc);
+        self.ends.deinit(alloc);
+        self.kinds.deinit(alloc);
+    }
+};
+
 pub const TokenizeOptions = struct {
     is_module: bool = false,
     annex_b: bool = true,
+    /// When non-null, the scalar lexer records comment spans here (trivia).
+    comment_sink: ?*CommentSink = null,
     /// Streaming publish: when non-null, the lexer atomically stores `tok_n`
     /// to this slot every PUBLISH_BATCH tokens, allowing a concurrent parser
     /// to consume tokens as they are produced. Null in sequential mode —
