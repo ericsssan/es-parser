@@ -503,3 +503,34 @@ test "deeply nested input is rejected, not a stack overflow" {
     try expectRejectsDeepNesting("x=", "-", "y", reps, .js); // parseUnaryOp (unary minus)
     try expectRejectsDeepNesting("await ", "await ", "y", reps, .js); // parseAwaitExpression
 }
+
+// ── Annex B: flag-less `\u{…}` in regex (web reality) vs TypeScript TS1538 ──
+
+fn parseTs(source: []const u8) !ast.Ast {
+    var lr = try Lexer.tokenizeWithLanguage(testing.allocator, source, .ts);
+    defer lr.deinit(testing.allocator);
+    return Parser.parseWithOptions(testing.allocator, source, lr.tokens.slice(), .{ .language = .ts });
+}
+
+test "regex: flag-less \\u{...} parses in JS (Annex B identity-escape + quantifier)" {
+    // `/\u{41}/` without the u flag is valid web-reality JS: `\u` matches "u",
+    // `{41}` is a quantifier. Named-group names admit `\u{...}` too.
+    var a = try parseSource("var r = /\\u{41}/;\n");
+    defer a.deinit(testing.allocator);
+    try expectNoErrors(&a);
+
+    var b = try parseSource("var r = /(?<\\u{1d4d1}>x)/;\n");
+    defer b.deinit(testing.allocator);
+    try expectNoErrors(&b);
+}
+
+test "regex: flag-less \\u{...} still errors in TypeScript (TS1538)" {
+    var a = try parseTs("var r = /\\u{10000}/;\n");
+    defer a.deinit(testing.allocator);
+    try testing.expect(a.errors.len >= 1);
+
+    // With the u flag it is a valid code-point escape in both JS and TS.
+    var b = try parseTs("var r = /\\u{10000}/u;\n");
+    defer b.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 0), b.errors.len);
+}

@@ -2565,8 +2565,13 @@ pub fn parsePrimaryExpression(p: *Parser) Error!NodeIndex {
                 try validateRegexNamedGroups(p, p.source[ts + 1 .. close - 1], has_u or has_v);
                 // Lookbehind cannot be quantified in any mode.
                 try validateRegexLookbehindQuant(p, p.source[ts + 1 .. close - 1]);
-                // TS1538: \u{...} escape sequences require the u or v flag.
-                if (!has_u and !has_v) {
+                // TS1538: `\u{…}` requires the u or v flag — but only in TypeScript
+                // (and in non-AnnexB strict ES). Under ECMAScript Annex B (web
+                // reality, the default for JS), a flag-less `/\u{41}/` is valid: it
+                // parses as the identity escape `\u` followed by the `{41}`
+                // quantifier, and named-group names admit `\u{…}` regardless. So
+                // only flag this in TS mode or when Annex B is disabled.
+                if (!has_u and !has_v and (p.is_ts or !p.annex_b)) {
                     const body = p.source[ts + 1 .. close - 1];
                     var bi: usize = 0;
                     while (bi + 3 < body.len) : (bi += 1) {
