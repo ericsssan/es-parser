@@ -500,12 +500,18 @@ pub fn tokenizeScalar(alloc: std.mem.Allocator, src: []const u8, language: Langu
 pub fn tokenizeScalarFull(alloc: std.mem.Allocator, src: []const u8, language: Language, opts: Lex.TokenizeOptions) !Lex.TokenizeResult {
     var sink = Lex.CommentSink{};
     errdefer sink.deinit(alloc);
+    // Single pass: comments and line starts are both recorded as the tokenizer
+    // scans (no separate source scan). Line index 0 is byte 0; the loop appends
+    // the rest at the whitespace handlers and multi-line token sites.
+    var ls: std.ArrayListUnmanaged(u32) = .empty;
+    errdefer ls.deinit(alloc);
+    try ls.ensureTotalCapacity(alloc, src.len / 24 + 8);
+    ls.appendAssumeCapacity(0);
     var o = opts;
     o.comment_sink = &sink;
+    o.line_starts = &ls;
     var tokens = try tokenizeScalarWithOptions(alloc, src, language, o);
     errdefer tokens.deinit(alloc);
-    const line_starts = try computeLineStarts(alloc, src);
-    errdefer alloc.free(line_starts);
     const count: u32 = @intCast(sink.starts.items.len);
     return .{
         .tokens = tokens,
@@ -513,8 +519,49 @@ pub fn tokenizeScalarFull(alloc: std.mem.Allocator, src: []const u8, language: L
         .comment_ends = try sink.ends.toOwnedSlice(alloc),
         .comment_kinds = try sink.kinds.toOwnedSlice(alloc),
         .comment_count = count,
-        .line_starts = line_starts,
+        .line_starts = try ls.toOwnedSlice(alloc),
     };
+}
+
+/// Append line-start offsets for every line terminator within `src[from..to)`
+/// to `ls`. Used by the single-pass tokenizer to record newlines inside
+/// multi-line tokens (block comments, templates, multi-line strings) that the
+/// dispatch loop scans opaquely — same terminator semantics as `computeLineStarts`.
+inline fn recordSpanNewlines(ls: *std.ArrayListUnmanaged(u32), alloc: std.mem.Allocator, src: []const u8, from: u32, to: u32) void {
+    const V = @Vector(16, u8);
+    var j = from;
+    while (j < to) {
+        // SIMD-skip terminator-free 16-byte runs (big block comments / templates).
+        if (j + 16 <= to) {
+            const chunk: V = src[j..][0..16].*;
+            const hits: u16 = @bitCast((chunk == @as(V, @splat(@as(u8, '\n')))) |
+                (chunk == @as(V, @splat(@as(u8, '\r')))) |
+                (chunk == @as(V, @splat(@as(u8, 0xE2)))));
+            if (hits == 0) {
+                j += 16;
+                continue;
+            }
+            j += @ctz(hits);
+        }
+        const c = src[j];
+        if (c == '\n') {
+            ls.append(alloc, j + 1) catch {};
+            j += 1;
+        } else if (c == '\r') {
+            if (j + 1 < to and src[j + 1] == '\n') {
+                ls.append(alloc, j + 2) catch {};
+                j += 2;
+            } else {
+                ls.append(alloc, j + 1) catch {};
+                j += 1;
+            }
+        } else if (c == 0xE2 and j + 2 < to and src[j + 1] == 0x80 and (src[j + 2] == 0xA8 or src[j + 2] == 0xA9)) {
+            ls.append(alloc, j + 3) catch {};
+            j += 3;
+        } else {
+            j += 1;
+        }
+    }
 }
 
 /// Byte offset of each line start: index 0 is 0, then the offset just past every
@@ -628,7 +675,16 @@ pub fn tokenizeScalarWithOptions(
         } else if (c == '\n' or c == '\r') {
             saw_nl = true;
             at_line_start = true;
-            i += 1;
+            // `\r\n` counts as one line start (offset past the `\n`); a lone `\n`
+            // or `\r` advances one. Recording is gated on the line-starts sink so
+            // the parse-only path is unaffected.
+            if (c == '\r' and i + 1 < n and src[i + 1] == '\n') {
+                if (opts.line_starts) |ls| ls.append(alloc, i + 2) catch {};
+                i += 2;
+            } else {
+                if (opts.line_starts) |ls| ls.append(alloc, i + 1) catch {};
+                i += 1;
+            }
             continue;
         } else if (c < 0x80 and isIdentStartByte(c)) {
             // Hot path: SIMD-scan the ASCII identifier body. If it stops on a
@@ -774,10 +830,12 @@ pub fn tokenizeScalarWithOptions(
                         // Unterminated block comment -> single invalid token, then stop.
                         if (toks.len >= toks.capacity) try toks.ensureTotalCapacity(alloc, toks.capacity * 2 + 16);
                         toks.appendAssumeCapacity(.{ .tag = .invalid, .start = i, .len = res.end - i, .has_newline_before = saw_nl });
+                        if (opts.line_starts) |ls| recordSpanNewlines(ls, alloc, src, start, res.end);
                         i = res.end;
                         continue;
                     }
                     if (opts.comment_sink) |s| s.record(alloc, start, res.end, 1);
+                    if (opts.line_starts) |ls| recordSpanNewlines(ls, alloc, src, start, res.end);
                     i = res.end;
                     continue;
                 }
@@ -853,6 +911,7 @@ pub fn tokenizeScalarWithOptions(
                     if (c == 0xE2 and i + 2 < n and src[i + 1] == 0x80 and (src[i + 2] == 0xA8 or src[i + 2] == 0xA9)) {
                         saw_nl = true;
                         at_line_start = true;
+                        if (opts.line_starts) |ls| ls.append(alloc, i + 3) catch {};
                         i += 3;
                         continue;
                     }
@@ -892,6 +951,17 @@ pub fn tokenizeScalarWithOptions(
         }
         if (toks.len >= toks.capacity) try toks.ensureTotalCapacity(alloc, toks.capacity * 2 + 16);
         toks.appendAssumeCapacity(.{ .tag = tag, .start = start, .len = i - start, .has_newline_before = saw_nl, .has_unicode_escape = has_esc });
+
+        // Single-pass line starts: tokens that can span lines (strings with line
+        // continuations / JSX text strings; template chunks) carry interior
+        // newlines the dispatch loop didn't visit — scan their span now (cache-hot).
+        if (opts.line_starts) |ls| switch (tag) {
+            // Tokens that can span lines: strings (continuations / JSX text),
+            // template chunks, regex, and `.invalid` (unterminated string /
+            // template / regex runs to EOF over newlines).
+            .string_literal, .template_head, .template_middle, .template_tail, .template_no_sub, .regex_literal, .invalid => recordSpanNewlines(ls, alloc, src, start, i),
+            else => {},
+        };
 
         // Maintain JSX opening-tag depth. `<` opens a JSX element when in
         // expression/child position (regexAllowed) and followed by a tag-name

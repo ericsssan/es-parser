@@ -73,6 +73,10 @@ pub const TokenizeOptions = struct {
     annex_b: bool = true,
     /// When non-null, the scalar lexer records comment spans here (trivia).
     comment_sink: ?*CommentSink = null,
+    /// When non-null, the scalar lexer records line-start byte offsets here as it
+    /// scans (single pass — inter-token newlines from the whitespace handlers,
+    /// multi-line token interiors from their emit sites). Caller seeds index 0.
+    line_starts: ?*std.ArrayListUnmanaged(u32) = null,
     /// Streaming publish: when non-null, the lexer atomically stores `tok_n`
     /// to this slot every PUBLISH_BATCH tokens, allowing a concurrent parser
     /// to consume tokens as they are produced. Null in sequential mode —
