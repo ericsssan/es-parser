@@ -18,13 +18,6 @@ const scalar_lexer = @import("scalar_lexer.zig");
 
 /// Fused-lexing token source: the parser pulls tokens from `cursor` into the
 /// growable `buf` on demand instead of consuming a pre-materialized array.
-pub const CursorSource = struct {
-    cursor: *scalar_lexer.Cursor,
-    buf: *TokenList,
-    /// Template `{`-nesting depths, owned by the caller (kept out of the Cursor
-    /// so the fill loop's local cursor copy registerizes — see `fillTokens`).
-    brace_d: *[16]u32,
-};
 const scope_events_mod = @import("scope_events.zig");
 const ScopeEventStream = scope_events_mod.EventStream;
 const ScopeEvent = scope_events_mod.Event;
@@ -679,10 +672,6 @@ pub const Parser = struct {
     /// will come" from "EOF reached".
     published_len: ?*std.atomic.Value(usize) = null,
     lex_done: ?*std.atomic.Value(bool) = null,
-    /// Fused-lexing source. When non-null, the parser pulls tokens from this
-    /// cursor into `cursor_src.buf` on the slow path (synchronous, single-pass),
-    /// instead of reading a pre-materialized array.
-    cursor_src: ?CursorSource = null,
     /// Event-stream publisher for the 3-stage pipeline: when non-null, the
     /// parser stores `scope_events.len()` to this slot at statement boundaries
     /// so a concurrent semantic analyzer can consume events as they are
@@ -991,66 +980,19 @@ pub const Parser = struct {
 
     pub fn parseWithOptions(allocator: std.mem.Allocator, source: []const u8, tokens: TokenList.Slice, opts: ParseOptions) !Ast {
         const is_strict = opts.is_strict orelse opts.is_module;
-        return parseInternal(allocator, source, tokens, opts.language, opts.is_module, opts.global_return, is_strict, opts.events_out, opts.emit_events, opts.streaming, opts.annex_b, opts.experimental_decorators, null);
+        return parseInternal(allocator, source, tokens, opts.language, opts.is_module, opts.global_return, is_strict, opts.events_out, opts.emit_events, opts.streaming, opts.annex_b, opts.experimental_decorators);
     }
 
     /// Parse with a specific language mode (js/ts/jsx/tsx).
     /// Always emits scope events — the event-driven semantic analyzer is the
     /// sole path (tree walker was removed). AnnexB extensions are ON by default.
     pub fn parseWithLanguage(allocator: std.mem.Allocator, source: []const u8, tokens: TokenList.Slice, language: Language, is_module_file: bool) !Ast {
-        return parseInternal(allocator, source, tokens, language, is_module_file, false, is_module_file, null, true, null, true, false, null);
+        return parseInternal(allocator, source, tokens, language, is_module_file, false, is_module_file, null, true, null, true, false);
     }
 
     /// Same as parseWithLanguage but with an explicit AnnexB flag.
     pub fn parseWithLanguageOpts(allocator: std.mem.Allocator, source: []const u8, tokens: TokenList.Slice, language: Language, is_module_file: bool, annex_b: bool) !Ast {
-        return parseInternal(allocator, source, tokens, language, is_module_file, false, is_module_file, null, true, null, annex_b, false, null);
-    }
-
-    /// Result of `parseFused`: the AST plus the token buffer it was lexed into.
-    /// The AST references tokens by index, so `tokens` must outlive `ast`; the
-    /// caller owns and must free both.
-    pub const FusedResult = struct {
-        ast: Ast,
-        tokens: TokenList,
-
-        pub fn deinit(self: *FusedResult, allocator: std.mem.Allocator) void {
-            self.ast.deinit(allocator);
-            self.tokens.deinit(allocator);
-        }
-    };
-
-    /// Fused parse: lex on demand from a `Cursor` while parsing (single pass,
-    /// no separate full tokenize). Equivalent output to lexing then `parseWith‐
-    /// Language`, but interleaved. The token buffer fills lazily as the parser
-    /// pulls tokens.
-    pub fn parseFused(
-        allocator: std.mem.Allocator,
-        source: []const u8,
-        language: Language,
-        is_module_file: bool,
-        annex_b: bool,
-    ) !FusedResult {
-        var buf: TokenList = .empty;
-        errdefer buf.deinit(allocator);
-        try buf.ensureTotalCapacity(allocator, source.len / 3 + 64);
-        var cursor = scalar_lexer.Cursor.init(source, language, .{ .is_module = is_module_file, .annex_b = annex_b });
-        var brace_d: [16]u32 = @splat(0);
-        const tree = try parseInternal(
-            allocator,
-            source,
-            buf.slice(),
-            language,
-            is_module_file,
-            false,
-            is_module_file,
-            null,
-            true,
-            null,
-            annex_b,
-            false,
-            .{ .cursor = &cursor, .buf = &buf, .brace_d = &brace_d },
-        );
-        return .{ .ast = tree, .tokens = buf };
+        return parseInternal(allocator, source, tokens, language, is_module_file, false, is_module_file, null, true, null, annex_b, false);
     }
 
     fn parseInternal(
@@ -1066,7 +1008,6 @@ pub const Parser = struct {
         streaming: ?StreamingHooks,
         annex_b: bool,
         experimental_decorators: bool,
-        cursor_src: ?CursorSource,
     ) !Ast {
         var p = Parser{
             .source = source,
@@ -1077,10 +1018,9 @@ pub const Parser = struct {
             .tok_starts_ptr = tokens.items(.start).ptr,
             .tok_lens_ptr = tokens.items(.len).ptr,
             .tok_i = 0,
-            .parsed_len = if (cursor_src != null or streaming != null) 0 else tokens.len,
+            .parsed_len = if (streaming != null) 0 else tokens.len,
             .published_len = if (streaming) |s| s.published_len else null,
             .lex_done = if (streaming) |s| s.lex_done else null,
-            .cursor_src = cursor_src,
             .events_publish_to = if (streaming) |s| s.events_publish_to else null,
             .nodes = .empty,
             .node_tags_ptr = undefined,
@@ -1094,8 +1034,7 @@ pub const Parser = struct {
             // capacity, not the actual produced count — caller passes the
             // tighter `capacity_hint`. Otherwise size by the materialized
             // token count.
-            .max_nodes = if (cursor_src != null) (source.len + 16) * 16
-                else if (streaming) |s| s.capacity_hint * 16
+            .max_nodes = if (streaming) |s| s.capacity_hint * 16
                 else tokens.len * 16,
             .in_function = false,
             // Top-level await: allowed in modules (ES2022) and in TypeScript
@@ -1162,8 +1101,7 @@ pub const Parser = struct {
         // long statement / arg lists (each grow is an allocator round-trip
         // plus memcpy). In streaming mode tokens.len is the buffer capacity,
         // not the actual produced count — caller passes a tighter hint.
-        const sizing_count = if (cursor_src != null) source.len / 3 + 16
-            else if (streaming) |s| s.capacity_hint
+        const sizing_count = if (streaming) |s| s.capacity_hint
             else tokens.len;
         // Streaming mode: shared buffers must NEVER resize during parse,
         // because a sem thread holds raw pointers (node_tags_ptr, events.items)
@@ -1380,11 +1318,6 @@ pub const Parser = struct {
 
     fn advanceSlow(self: *Parser, result: TokenIndex) TokenIndex {
         @branchHint(.cold);
-        if (self.cursor_src != null) {
-            self.fillTokens(self.tok_i + 1);
-            if (self.tok_i < self.parsed_len - 1) self.tok_i += 1;
-            return result;
-        }
         if (self.published_len != null) {
             self.refreshParsedLen();
             if (self.tok_i < self.parsed_len - 1) self.tok_i += 1;
@@ -1392,74 +1325,10 @@ pub const Parser = struct {
         return result;
     }
 
-    /// Does a token exist at absolute index `idx`? In fused (cursor) mode this
-    /// fills the buffer up to `idx` first, so a lookahead bounds-check sees the
-    /// real stream rather than the lazily-filled prefix. In pre-tokenized mode
-    /// it is a plain bounds check against the materialized array.
+    /// Does a token exist at absolute index `idx`? A plain bounds check against
+    /// the materialized token array.
     pub fn tokenExists(self: *Parser, idx: usize) bool {
-        if (self.cursor_src != null) {
-            self.fillTokens(idx);
-            return idx < self.parsed_len;
-        }
         return idx < self.tokens.len;
-    }
-
-    /// Refresh the cached token-column pointers after the cursor buffer grows.
-    fn refreshTokPtrs(self: *Parser) void {
-        const cs = self.cursor_src orelse return;
-        const s = cs.buf.slice();
-        self.tokens = s;
-        self.tags_ptr = s.items(.tag).ptr;
-        self.newlines_ptr = s.items(.has_newline_before).ptr;
-        self.has_escape_ptr = s.items(.has_unicode_escape).ptr;
-        self.tok_starts_ptr = s.items(.start).ptr;
-        self.tok_lens_ptr = s.items(.len).ptr;
-    }
-
-    /// Fused-lexing fill: pull tokens from the cursor into the buffer until
-    /// index `want` is available (plus a batch lookahead to amortize the slow
-    /// path), or the stream is exhausted. Grows the buffer + refreshes the
-    /// cached pointers on overflow (safe: single-threaded, no concurrent reader).
-    fn fillTokens(self: *Parser, want: usize) void {
-        const cs = self.cursor_src.?;
-        const target = want + 256;
-        if (cs.buf.len > target) return;
-        // Pre-grow once so the hot loop needs no per-token capacity check, then
-        // drive the cursor from a LOCAL copy. The local lets the compiler keep
-        // the cursor's hot state (i/prev_kind/saw_nl/at_line_start) in registers
-        // across the inlined next() — the per-token reload through cs.cursor was
-        // the fused path's overhead vs. the materialized direct loop. Sync back
-        // at the batch boundary, which is exactly where the next fill resumes.
-        cs.buf.ensureTotalCapacity(self.gpa, target + 1) catch {
-            // Allocation failed: fall back to the incremental grow path.
-            while (self.parsed_len <= target) {
-                const t = cs.cursor.next(cs.brace_d) orelse break;
-                if (cs.buf.len >= cs.buf.capacity) {
-                    cs.buf.ensureTotalCapacity(self.gpa, cs.buf.capacity * 2 + 256) catch break;
-                    self.refreshTokPtrs();
-                }
-                cs.buf.appendAssumeCapacity(.{ .tag = t.tag, .start = t.start, .len = t.len, .has_newline_before = t.has_newline_before, .has_unicode_escape = t.has_unicode_escape });
-                self.parsed_len = cs.buf.len;
-            }
-            return;
-        };
-        self.refreshTokPtrs();
-        var lc = cs.cursor.*;
-        const bd = cs.brace_d;
-        var len = cs.buf.len;
-        while (len <= target) {
-            const t = lc.next(bd) orelse break;
-            cs.buf.appendAssumeCapacity(.{
-                .tag = t.tag,
-                .start = t.start,
-                .len = t.len,
-                .has_newline_before = t.has_newline_before,
-                .has_unicode_escape = t.has_unicode_escape,
-            });
-            len += 1;
-        }
-        cs.cursor.* = lc;
-        self.parsed_len = cs.buf.len;
     }
 
     /// Streaming slow-path: refresh the visible token count from the lex
@@ -1555,11 +1424,6 @@ pub const Parser = struct {
 
     fn peekSlow(self: *Parser) TokenTag {
         @branchHint(.cold);
-        if (self.cursor_src != null) {
-            self.fillTokens(self.tok_i);
-            if (self.tok_i < self.parsed_len) return self.tags_ptr[self.tok_i];
-            return .eof;
-        }
         if (self.published_len != null) {
             self.refreshParsedLen();
             if (self.tok_i < self.parsed_len) return self.tags_ptr[self.tok_i];
@@ -1579,11 +1443,6 @@ pub const Parser = struct {
 
     fn peekAtSlow(self: *Parser, idx: u32) TokenTag {
         @branchHint(.cold);
-        if (self.cursor_src != null) {
-            self.fillTokens(idx);
-            if (idx < self.parsed_len) return self.tags_ptr[idx];
-            return .eof;
-        }
         if (self.published_len != null) {
             self.refreshParsedLen();
             if (idx < self.parsed_len) return self.tags_ptr[idx];
