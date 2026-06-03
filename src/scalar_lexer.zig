@@ -500,16 +500,11 @@ pub fn tokenizeScalar(alloc: std.mem.Allocator, src: []const u8, language: Langu
 pub fn tokenizeScalarFull(alloc: std.mem.Allocator, src: []const u8, language: Language, opts: Lex.TokenizeOptions) !Lex.TokenizeResult {
     var sink = Lex.CommentSink{};
     errdefer sink.deinit(alloc);
-    // Single pass: comments and line starts are both recorded as the tokenizer
-    // scans (no separate source scan). Line index 0 is byte 0; the loop appends
-    // the rest at the whitespace handlers and multi-line token sites.
-    var ls: std.ArrayListUnmanaged(u32) = .empty;
-    errdefer ls.deinit(alloc);
-    try ls.ensureTotalCapacity(alloc, src.len / 24 + 8);
-    ls.appendAssumeCapacity(0);
+    // Single pass: comment trivia is recorded as the tokenizer scans. Line starts
+    // are no longer produced here — the diagnostic/location layer builds them
+    // lazily from source (see `span.LineIndex`) so clean files never pay for them.
     var o = opts;
     o.comment_sink = &sink;
-    o.line_starts = &ls;
     var tokens = try tokenizeScalarWithOptions(alloc, src, language, o);
     errdefer tokens.deinit(alloc);
     const count: u32 = @intCast(sink.starts.items.len);
@@ -519,102 +514,9 @@ pub fn tokenizeScalarFull(alloc: std.mem.Allocator, src: []const u8, language: L
         .comment_ends = try sink.ends.toOwnedSlice(alloc),
         .comment_kinds = try sink.kinds.toOwnedSlice(alloc),
         .comment_count = count,
-        .line_starts = try ls.toOwnedSlice(alloc),
     };
 }
 
-/// Append line-start offsets for every line terminator within `src[from..to)`
-/// to `ls`. Used by the single-pass tokenizer to record newlines inside
-/// multi-line tokens (block comments, templates, multi-line strings) that the
-/// dispatch loop scans opaquely — same terminator semantics as `computeLineStarts`.
-inline fn recordSpanNewlines(ls: *std.ArrayListUnmanaged(u32), alloc: std.mem.Allocator, src: []const u8, from: u32, to: u32) void {
-    const V = @Vector(16, u8);
-    var j = from;
-    while (j < to) {
-        // SIMD-skip terminator-free 16-byte runs (big block comments / templates).
-        if (j + 16 <= to) {
-            const chunk: V = src[j..][0..16].*;
-            const hits: u16 = @bitCast((chunk == @as(V, @splat(@as(u8, '\n')))) |
-                (chunk == @as(V, @splat(@as(u8, '\r')))) |
-                (chunk == @as(V, @splat(@as(u8, 0xE2)))));
-            if (hits == 0) {
-                j += 16;
-                continue;
-            }
-            j += @ctz(hits);
-        }
-        const c = src[j];
-        if (c == '\n') {
-            ls.append(alloc, j + 1) catch {};
-            j += 1;
-        } else if (c == '\r') {
-            if (j + 1 < to and src[j + 1] == '\n') {
-                ls.append(alloc, j + 2) catch {};
-                j += 2;
-            } else {
-                ls.append(alloc, j + 1) catch {};
-                j += 1;
-            }
-        } else if (c == 0xE2 and j + 2 < to and src[j + 1] == 0x80 and (src[j + 2] == 0xA8 or src[j + 2] == 0xA9)) {
-            ls.append(alloc, j + 3) catch {};
-            j += 3;
-        } else {
-            j += 1;
-        }
-    }
-}
-
-/// Byte offset of each line start: index 0 is 0, then the offset just past every
-/// line terminator (`\n`, lone `\r`, `\r\n` coalesced as one, U+2028/U+2029).
-/// Computed in a single source scan independent of tokenizing — matches the
-/// bitmap lexer's `line_starts` (which counts every terminator in the source,
-/// including those inside block comments / strings / templates).
-pub fn computeLineStarts(alloc: std.mem.Allocator, src: []const u8) ![]u32 {
-    var ls: std.ArrayListUnmanaged(u32) = .empty;
-    errdefer ls.deinit(alloc);
-    const n: u32 = @intCast(src.len);
-    try ls.ensureTotalCapacity(alloc, n / 24 + 8);
-    ls.appendAssumeCapacity(0);
-    const V = @Vector(16, u8);
-    var i: u32 = 0;
-    while (i < n) {
-        // SIMD-skip 16-byte runs containing no line-terminator candidate
-        // (`\n`, `\r`, or a `0xE2` lead). The common case — long terminator-free
-        // spans — advances 16 bytes per branch; terminator-bearing windows fall
-        // to the scalar handling below (which owns the \r\n / LS-PS semantics).
-        if (i + 16 <= n) {
-            const chunk: V = src[i..][0..16].*;
-            const hits: u16 = @bitCast((chunk == @as(V, @splat(@as(u8, '\n')))) |
-                (chunk == @as(V, @splat(@as(u8, '\r')))) |
-                (chunk == @as(V, @splat(@as(u8, 0xE2)))));
-            if (hits == 0) {
-                i += 16;
-                continue;
-            }
-            i += @ctz(hits); // jump straight to the first candidate
-        }
-        const c = src[i];
-        if (c == '\n') {
-            try ls.append(alloc, i + 1);
-            i += 1;
-        } else if (c == '\r') {
-            if (i + 1 < n and src[i + 1] == '\n') {
-                try ls.append(alloc, i + 2);
-                i += 2;
-            } else {
-                try ls.append(alloc, i + 1);
-                i += 1;
-            }
-        } else if (c == 0xE2 and i + 2 < n and src[i + 1] == 0x80 and (src[i + 2] == 0xA8 or src[i + 2] == 0xA9)) {
-            try ls.append(alloc, i + 3);
-            i += 3;
-        } else {
-            // 0xE2 that isn't LS/PS, or a candidate at the tail — just advance.
-            i += 1;
-        }
-    }
-    return ls.toOwnedSlice(alloc);
-}
 
 /// Tokenize `src` into a `TokenList`, matching `Lexer.tokenizeWithAllOptions`.
 ///
@@ -675,14 +577,10 @@ pub fn tokenizeScalarWithOptions(
         } else if (c == '\n' or c == '\r') {
             saw_nl = true;
             at_line_start = true;
-            // `\r\n` counts as one line start (offset past the `\n`); a lone `\n`
-            // or `\r` advances one. Recording is gated on the line-starts sink so
-            // the parse-only path is unaffected.
+            // `\r\n` advances two bytes as one newline; a lone `\n`/`\r` advances one.
             if (c == '\r' and i + 1 < n and src[i + 1] == '\n') {
-                if (opts.line_starts) |ls| ls.append(alloc, i + 2) catch {};
                 i += 2;
             } else {
-                if (opts.line_starts) |ls| ls.append(alloc, i + 1) catch {};
                 i += 1;
             }
             continue;
@@ -800,7 +698,7 @@ pub fn tokenizeScalarWithOptions(
                 }
                 // Block comment.
                 if (i + 1 < n and src[i + 1] == '*') {
-                    const res = Lex.blockCommentEnd(src, i, opts.line_starts, alloc);
+                    const res = Lex.blockCommentEnd(src, i);
                     if (res.has_nl) { saw_nl = true; at_line_start = true; }
                     if (res.end >= n and !(n >= 2 and src[n - 2] == '*' and src[n - 1] == '/')) {
                         // JSX: an unterminated `/*` in JSX text is a literal `/`.
@@ -909,7 +807,6 @@ pub fn tokenizeScalarWithOptions(
                     if (c == 0xE2 and i + 2 < n and src[i + 1] == 0x80 and (src[i + 2] == 0xA8 or src[i + 2] == 0xA9)) {
                         saw_nl = true;
                         at_line_start = true;
-                        if (opts.line_starts) |ls| ls.append(alloc, i + 3) catch {};
                         i += 3;
                         continue;
                     }
@@ -949,17 +846,6 @@ pub fn tokenizeScalarWithOptions(
         }
         if (toks.len >= toks.capacity) try toks.ensureTotalCapacity(alloc, toks.capacity * 2 + 16);
         toks.appendAssumeCapacity(.{ .tag = tag, .start = start, .len = i - start, .has_newline_before = saw_nl, .has_unicode_escape = has_esc });
-
-        // Single-pass line starts: tokens that can span lines (strings with line
-        // continuations / JSX text strings; template chunks) carry interior
-        // newlines the dispatch loop didn't visit — scan their span now (cache-hot).
-        if (opts.line_starts) |ls| switch (tag) {
-            // Tokens that can span lines: strings (continuations / JSX text),
-            // template chunks, regex, and `.invalid` (unterminated string /
-            // template / regex runs to EOF over newlines).
-            .string_literal, .template_head, .template_middle, .template_tail, .template_no_sub, .regex_literal, .invalid => recordSpanNewlines(ls, alloc, src, start, i),
-            else => {},
-        };
 
         // Maintain JSX opening-tag depth. `<` opens a JSX element when in
         // expression/child position (regexAllowed) and followed by a tag-name

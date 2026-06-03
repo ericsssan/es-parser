@@ -25,14 +25,12 @@ pub const TokenizeResult = struct {
     comment_ends: []const u32,
     comment_kinds: []const u8,
     comment_count: u32,
-    line_starts: []u32,
 
     pub fn deinit(self: *TokenizeResult, allocator: std.mem.Allocator) void {
         self.tokens.deinit(allocator);
         if (self.comment_starts.len > 0) allocator.free(self.comment_starts);
         if (self.comment_ends.len > 0) allocator.free(self.comment_ends);
         if (self.comment_kinds.len > 0) allocator.free(self.comment_kinds);
-        if (self.line_starts.len > 0) allocator.free(self.line_starts);
     }
 };
 
@@ -62,10 +60,6 @@ pub const TokenizeOptions = struct {
     annex_b: bool = true,
     /// When non-null, the scalar lexer records comment spans here (trivia).
     comment_sink: ?*CommentSink = null,
-    /// When non-null, the scalar lexer records line-start byte offsets here as it
-    /// scans (single pass — inter-token newlines from the whitespace handlers,
-    /// multi-line token interiors from their emit sites). Caller seeds index 0.
-    line_starts: ?*std.ArrayListUnmanaged(u32) = null,
     /// Streaming publish: when non-null, the lexer atomically stores `tok_n`
     /// to this slot every PUBLISH_BATCH tokens, allowing a concurrent parser
     /// to consume tokens as they are produced. Null in sequential mode —
@@ -81,29 +75,11 @@ pub const TokenizeOptions = struct {
 /// publish overhead on a 9MB file, while the parse side rarely waits.
 pub const PUBLISH_BATCH: usize = 1024;
 
-/// Record line starts for the newline/E2 candidate bits in `mask` of the 16-byte
-/// chunk at `base` (\r\n coalesced, LS/PS validated) — used for zero-re-read
-/// line-start recording inside the SIMD body scanners.
-inline fn recordChunkNewlines(ls: *std.ArrayListUnmanaged(u32), la: std.mem.Allocator, src: []const u8, base: u32, mask: u16, n: u32) void {
-    var m = mask;
-    while (m != 0) {
-        const b: u32 = @ctz(m);
-        m &= m -% 1;
-        const p = base + b;
-        const c = src[p];
-        if (c == '\n') {
-            ls.append(la, p + 1) catch {};
-        } else if (c == '\r') {
-            if (!(p + 1 < n and src[p + 1] == '\n')) ls.append(la, p + 1) catch {};
-        } else if (c == 0xE2 and p + 2 < n and src[p + 1] == 0x80 and (src[p + 2] == 0xA8 or src[p + 2] == 0xA9)) {
-            ls.append(la, p + 3) catch {};
-        }
-    }
-}
-
-/// `ls` (with `la`): when non-null, line starts inside the comment are recorded
-/// from the SIMD newline mask as the scanner runs — no second scan of the body.
-pub fn blockCommentEnd(src: []const u8, open: u32, ls: ?*std.ArrayListUnmanaged(u32), la: std.mem.Allocator) struct { end: u32, has_nl: bool } {
+/// Scan to the end of a `/*…*/` block comment. `has_nl` reports whether the
+/// comment body contains a line terminator (`\n`/`\r`/LS/PS) — the lexer uses it
+/// to set `has_newline_before` on the following token. Line-start offsets are no
+/// longer recorded here; the diagnostic layer builds them lazily from source.
+pub fn blockCommentEnd(src: []const u8, open: u32) struct { end: u32, has_nl: bool } {
     const n: u32 = @intCast(src.len);
     const vstar = @as(V16, @splat(@as(u8, '*')));
     const vnl   = @as(V16, @splat(@as(u8, '\n')));
@@ -120,7 +96,6 @@ pub fn blockCommentEnd(src: []const u8, open: u32, ls: ?*std.ArrayListUnmanaged(
         if (sm == 0) {
             if (nl_mask != 0) has_nl = true;
             if (!has_nl and e2_mask != 0) has_nl = checkLsPs(src, i, e2_mask, n);
-            if (ls) |l| recordChunkNewlines(l, la, src, i, nl_mask | e2_mask, n);
             i += 16;
             continue;
         }
@@ -128,32 +103,20 @@ pub fn blockCommentEnd(src: []const u8, open: u32, ls: ?*std.ArrayListUnmanaged(
             const b: u32 = @ctz(sm); sm &= sm -% 1;
             const p = i + b;
             if (p + 1 < n and src[p + 1] == '/') {
+                // Only newlines before the `*/` count toward the comment body.
                 const before: u16 = if (b > 0) (@as(u16, 1) << @intCast(b)) - 1 else 0;
                 if (nl_mask != 0 and b > 0 and (nl_mask & before) != 0) has_nl = true;
                 if (!has_nl and e2_mask != 0 and b > 0 and (e2_mask & before) != 0) has_nl = checkLsPs(src, i, e2_mask & before, n);
-                if (ls) |l| recordChunkNewlines(l, la, src, i, (nl_mask | e2_mask) & before, n);
                 return .{ .end = p + 2, .has_nl = has_nl };
             }
         }
         if (nl_mask != 0) has_nl = true;
         if (!has_nl and e2_mask != 0) has_nl = checkLsPs(src, i, e2_mask, n);
-        if (ls) |l| recordChunkNewlines(l, la, src, i, nl_mask | e2_mask, n);
         i += 16;
     }
-    // Process every remaining byte (to n-1) so a trailing newline in an
-    // unterminated comment at EOF is still recorded; the `*/` check is guarded
-    // by `i + 1 < n`.
     while (i < n) : (i += 1) {
-        if (src[i] == '\n' or src[i] == '\r') {
-            has_nl = true;
-            if (ls) |l| {
-                if (!(src[i] == '\r' and i + 1 < n and src[i + 1] == '\n')) l.append(la, i + 1) catch {};
-            }
-        }
-        if (src[i] == 0xE2 and i + 2 < n and src[i + 1] == 0x80 and (src[i + 2] == 0xA8 or src[i + 2] == 0xA9)) {
-            has_nl = true;
-            if (ls) |l| l.append(la, i + 3) catch {};
-        }
+        if (src[i] == '\n' or src[i] == '\r') has_nl = true;
+        if (src[i] == 0xE2 and i + 2 < n and src[i + 1] == 0x80 and (src[i + 2] == 0xA8 or src[i + 2] == 0xA9)) has_nl = true;
         if (i + 1 < n and src[i] == '*' and src[i + 1] == '/') return .{ .end = i + 2, .has_nl = has_nl };
     }
     return .{ .end = n, .has_nl = has_nl };
