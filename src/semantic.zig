@@ -83,6 +83,60 @@ pub const SemanticResult = struct {
 // parser.  All `analyze*` entry points delegate to `event_resolver.resolveFull`
 // which consumes the stream and produces the same `SemanticResult` shape.
 
+/// Wraps an allocator so every fresh allocation (and realloc-grown tail) is
+/// zero-filled. `SemanticAnalyzer.analyze` requires zero-initialized memory (it
+/// reads sentinel-initialized scope/CFG buffers assuming fresh memory is zero —
+/// see its doc comment). Wrap a non-zeroing allocator (a GeneralPurposeAllocator,
+/// or an ArenaAllocator over c_allocator that returns reused dirty blocks) with
+/// this to satisfy the contract. An ArenaAllocator over `std.heap.page_allocator`
+/// already returns zeroed OS pages and needs no wrapper — that is what the
+/// production / conformance runners use.
+pub const ZeroingAllocator = struct {
+    base: std.mem.Allocator,
+
+    pub fn init(base: std.mem.Allocator) ZeroingAllocator {
+        return .{ .base = base };
+    }
+
+    const vtable = std.mem.Allocator.VTable{ .alloc = zaAlloc, .resize = zaResize, .remap = zaRemap, .free = zaFree };
+
+    pub fn allocator(self: *ZeroingAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    fn zaAlloc(ctx: *anyopaque, len: usize, a: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *ZeroingAllocator = @ptrCast(@alignCast(ctx));
+        const p = self.base.vtable.alloc(self.base.ptr, len, a, ra) orelse return null;
+        @memset(p[0..len], 0);
+        return p;
+    }
+    fn zaResize(ctx: *anyopaque, m: []u8, a: std.mem.Alignment, nl: usize, ra: usize) bool {
+        const self: *ZeroingAllocator = @ptrCast(@alignCast(ctx));
+        const ok = self.base.vtable.resize(self.base.ptr, m, a, nl, ra);
+        if (ok and nl > m.len) @memset(m.ptr[m.len..nl], 0);
+        return ok;
+    }
+    fn zaRemap(ctx: *anyopaque, m: []u8, a: std.mem.Alignment, nl: usize, ra: usize) ?[*]u8 {
+        const self: *ZeroingAllocator = @ptrCast(@alignCast(ctx));
+        const p = self.base.vtable.remap(self.base.ptr, m, a, nl, ra) orelse return null;
+        if (nl > m.len) @memset(p[m.len..nl], 0);
+        return p;
+    }
+    fn zaFree(ctx: *anyopaque, m: []u8, a: std.mem.Alignment, ra: usize) void {
+        const self: *ZeroingAllocator = @ptrCast(@alignCast(ctx));
+        self.base.vtable.free(self.base.ptr, m, a, ra);
+    }
+};
+
+// NOTE: a runtime "is this allocator zeroing?" probe is NOT feasible — in
+// Debug/ReleaseSafe the allocator interface fills freshly-allocated memory with
+// the 0xAA undefined-poison regardless of the underlying allocator (so a probe
+// always sees non-zero, even for a compliant page_allocator), and ReleaseFast
+// has no safety hook to run a probe in. The contract is therefore enforced by
+// construction: callers that lack a zeroing allocator wrap with ZeroingAllocator
+// (effective in ReleaseFast, where the bug lives); the conformance/production
+// runners already use ArenaAllocator over page_allocator.
+
 pub const SemanticAnalyzer = struct {
     pub const Options = struct {
         is_module: bool = true,
@@ -104,6 +158,17 @@ pub const SemanticAnalyzer = struct {
 
     /// Analyze an AST that was parsed with scope-event emission enabled.
     /// Module mode (strict, import/export allowed).
+    ///
+    /// ALLOCATOR CONTRACT: `allocator` must zero-initialize fresh allocations.
+    /// The binder/CFG read sentinel-initialized scope and control-flow buffers
+    /// (a 0 means "none"/"unset") and rely on freshly-allocated memory being
+    /// zero. A non-zeroing allocator — a raw `GeneralPurposeAllocator`, or an
+    /// `ArenaAllocator` over `c_allocator` (which hands back reused dirty blocks)
+    /// — yields undefined behavior / crashes in ReleaseFast on some inputs.
+    /// Pass an `ArenaAllocator` over `std.heap.page_allocator` (zeroed OS pages —
+    /// what the production/conformance runners use) or wrap with
+    /// `ZeroingAllocator`. (A runtime probe can't enforce this: Debug/ReleaseSafe
+    /// poison-fill all fresh memory with 0xAA, and ReleaseFast has no safety hook.)
     pub fn analyze(allocator: std.mem.Allocator, ast: *const Ast) !SemanticResult {
         return analyzeWithOptions(allocator, ast, .{ .is_module = true });
     }
