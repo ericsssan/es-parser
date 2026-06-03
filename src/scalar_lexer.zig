@@ -577,25 +577,92 @@ pub const Cursor = struct {
 
         while (self.i < n) {
             const c = src[self.i];
-            switch (c) {
-                ' ', '\t', 0x0B, 0x0C => { self.i += 1; continue; },
-                '\n' => { self.saw_nl = true; self.at_line_start = true; self.i += 1; continue; },
-                '\r' => { self.saw_nl = true; self.at_line_start = true; self.i += 1; continue; },
-                '<' => {
-                    if (annex_b and !is_module and self.i + 3 < n and src[self.i + 1] == '!' and src[self.i + 2] == '-' and src[self.i + 3] == '-') {
-                        self.i = lineTerminatorScan(src, self.i + 4, n);
-                        self.saw_nl = true;
-                        continue;
+            const start = self.i;
+            const prev = self.prev_kind;
+            var tag: Tag = undefined;
+            var has_esc = false;
+            // Same dispatch shape as tokenizeScalarWithOptions: peel the two
+            // dominant predictable classes (whitespace, ASCII idents) as direct
+            // branches; jump-table the rest. A full all-classes jump table
+            // mispredicts on mixed input; see the materialized path for details.
+            if (c == ' ' or c == '\t' or c == 0x0B or c == 0x0C) {
+                self.i += 1;
+                continue;
+            } else if (c == '\n' or c == '\r') {
+                self.saw_nl = true;
+                self.at_line_start = true;
+                self.i += 1;
+                continue;
+            } else if (c < 0x80 and isIdentStartByte(c)) {
+                const e = asciiIdentEnd(src, start, n);
+                const stop: u8 = if (e < n) src[e] else 0;
+                if (stop == '\\' or stop >= 0x80) {
+                    @branchHint(.cold);
+                    const r = scanIdentRun(src, start, n, prev, is_ts);
+                    tag = r.tag;
+                    has_esc = r.has_escape;
+                    self.i = r.end;
+                } else {
+                    self.i = e;
+                    tag = if (isPropertyAccess(prev)) .identifier else lexer.keywordLookup(src[start..e], is_ts);
+                }
+            } else switch (c) {
+                '0'...'9' => {
+                    self.i = Lex.numberEnd(src, start);
+                    const is_bn = self.i > start and src[self.i - 1] == 'n';
+                    tag = if (!lexer.validateNumericLiteral(src, start, self.i) or (self.i < n and lexer.isIdentStartAtPos(src, self.i)))
+                        .invalid
+                    else if (is_bn) .bigint_literal else .number_literal;
+                },
+
+                '"', '\'' => {
+                    tag = .string_literal;
+                    const jsx_attr = is_jsx and prev == .equal and self.jsx_tag_depth > 0;
+                    const jsx_text = is_jsx and (prev == .greater_than or prev == .identifier);
+                    self.i = scanStringJsx(src, start, n, jsx_attr or jsx_text, jsx_attr);
+                },
+
+                '`' => {
+                    const res = Lex.templateChunkEnd(src, start);
+                    self.i = res.end;
+                    if (!res.terminated) {
+                        tag = .invalid;
+                    } else if (res.has_expr) {
+                        tag = .template_head;
+                        if (self.tmpl_depth < brace_d.len) {
+                            brace_d[self.tmpl_depth] = 0;
+                            self.tmpl_depth += 1;
+                        }
+                    } else tag = .template_no_sub;
+                },
+
+                '{' => {
+                    if (self.tmpl_depth > 0) brace_d[self.tmpl_depth - 1] += 1;
+                    tag = .l_brace;
+                    self.i += 1;
+                },
+
+                '}' => {
+                    if (self.tmpl_depth > 0 and brace_d[self.tmpl_depth - 1] == 0) {
+                        const res = Lex.templateChunkEnd(src, start);
+                        self.i = res.end;
+                        if (!res.terminated) {
+                            tag = .invalid;
+                        } else if (res.has_expr) {
+                            tag = .template_middle;
+                        } else {
+                            tag = .template_tail;
+                            self.tmpl_depth -= 1;
+                        }
+                    } else {
+                        if (self.tmpl_depth > 0) brace_d[self.tmpl_depth - 1] -= 1;
+                        tag = .r_brace;
+                        self.i += 1;
                     }
                 },
-                '-' => {
-                    if (annex_b and !is_module and self.at_line_start and self.i + 2 < n and src[self.i + 1] == '-' and src[self.i + 2] == '>') {
-                        self.i = lineTerminatorScan(src, self.i + 3, n);
-                        self.saw_nl = true;
-                        continue;
-                    }
-                },
+
                 '/' => {
+                    // Line comment.
                     if (self.i + 1 < n and src[self.i + 1] == '/') {
                         const ce = lineTerminatorScan(src, self.i + 2, n);
                         if (is_jsx and !(self.i > 0 and src[self.i - 1] == '/')) {
@@ -615,6 +682,7 @@ pub const Cursor = struct {
                         self.saw_nl = true;
                         continue;
                     }
+                    // Block comment.
                     if (self.i + 1 < n and src[self.i + 1] == '*') {
                         const res = Lex.blockCommentEnd(src, self.i);
                         if (res.has_nl) { self.saw_nl = true; self.at_line_start = true; }
@@ -646,126 +714,100 @@ pub const Cursor = struct {
                         self.i = res.end;
                         continue;
                     }
+                    // Not a comment: regex literal (if allowed) or slash operator.
+                    if (Lex.regexAllowed(prev) and !(is_jsx and (prev == .less_than or prev == .greater_than))) {
+                        tag = .regex_literal;
+                        self.i = Lex.regexEnd(src, start);
+                    } else {
+                        const r = scanOp(src, self.i, n);
+                        tag = r.tag;
+                        self.i = r.end;
+                    }
                 },
-                else => {},
-            }
-            if (c >= 0x80) {
-                if (c == 0xE2 and self.i + 2 < n and src[self.i + 1] == 0x80 and (src[self.i + 2] == 0xA8 or src[self.i + 2] == 0xA9)) {
-                    self.saw_nl = true;
-                    self.at_line_start = true;
-                    self.i += 3;
-                    continue;
-                }
-                if (c == 0xEF and self.i + 2 < n and src[self.i + 1] == 0xBB and src[self.i + 2] == 0xBF) {
-                    self.i += 3;
-                    continue;
-                }
-                const cl: u32 = @intCast(std.unicode.utf8ByteSequenceLength(c) catch 1);
-                if (self.i + cl > n) {
-                    self.i += 1;
-                    continue;
-                }
-                const cp = decodeKnownLen(src, self.i, cl);
-                if (lexer.isUnicodeWhitespace(@intCast(cp))) {
-                    self.i += cl;
-                    continue;
-                }
-            }
-            // ── produce one token ──────────────────────────────────────
-            const prev = self.prev_kind;
-            const start = self.i;
-            var tag: Tag = undefined;
-            var has_esc = false;
-            if (c < 0x80 and isIdentStartByte(c)) {
-                const e = asciiIdentEnd(src, start, n);
-                const stop: u8 = if (e < n) src[e] else 0;
-                if (stop == '\\' or stop >= 0x80) {
-                    @branchHint(.cold);
-                    const r = scanIdentRun(src, start, n, prev, is_ts);
+
+                '<' => {
+                    if (annex_b and !is_module and self.i + 3 < n and src[self.i + 1] == '!' and src[self.i + 2] == '-' and src[self.i + 3] == '-') {
+                        self.i = lineTerminatorScan(src, self.i + 4, n);
+                        self.saw_nl = true;
+                        continue;
+                    }
+                    const r = scanOp(src, self.i, n);
+                    tag = r.tag;
+                    self.i = r.end;
+                },
+
+                '-' => {
+                    if (annex_b and !is_module and self.at_line_start and self.i + 2 < n and src[self.i + 1] == '-' and src[self.i + 2] == '>') {
+                        self.i = lineTerminatorScan(src, self.i + 3, n);
+                        self.saw_nl = true;
+                        continue;
+                    }
+                    if (self.at_line_start and (is_module or !annex_b) and self.i + 2 < n and src[self.i + 1] == '-' and src[self.i + 2] == '>') {
+                        tag = .invalid;
+                        self.i += 3;
+                    } else {
+                        const r = scanOp(src, self.i, n);
+                        tag = r.tag;
+                        self.i = r.end;
+                    }
+                },
+
+                '.' => {
+                    if (self.i + 1 < n and src[self.i + 1] >= '0' and src[self.i + 1] <= '9') {
+                        self.i = Lex.numberEnd(src, start);
+                        tag = if (!lexer.validateNumericLiteral(src, start, self.i) or (self.i < n and lexer.isIdentStartAtPos(src, self.i)))
+                            .invalid
+                        else
+                            .number_literal;
+                    } else {
+                        const r = scanOp(src, self.i, n);
+                        tag = r.tag;
+                        self.i = r.end;
+                    }
+                },
+
+                '\\' => {
+                    const r = scanEscapedIdentStart(src, start, n);
                     tag = r.tag;
                     has_esc = r.has_escape;
                     self.i = r.end;
-                } else {
-                    self.i = e;
-                    tag = if (isPropertyAccess(prev)) .identifier else lexer.keywordLookup(src[start..e], is_ts);
-                }
-            } else if (c >= 0x80) {
-                const sl: u32 = @intCast(std.unicode.utf8ByteSequenceLength(c) catch 1);
-                const start_cp = decodeKnownLen(src, start, sl);
-                if (!uid.isIdStart(@intCast(start_cp))) {
-                    tag = .invalid;
-                    self.i = start + sl;
-                } else {
-                    tag = .identifier;
-                    self.i = scanHighIdentRun(src, start, n);
-                }
-            } else if (c == '\\') {
-                const r = scanEscapedIdentStart(src, start, n);
-                tag = r.tag;
-                has_esc = r.has_escape;
-                self.i = r.end;
-            } else if (c >= '0' and c <= '9') {
-                self.i = Lex.numberEnd(src, start);
-                const is_bn = self.i > start and src[self.i - 1] == 'n';
-                tag = if (!lexer.validateNumericLiteral(src, start, self.i) or (self.i < n and lexer.isIdentStartAtPos(src, self.i)))
-                    .invalid
-                else if (is_bn) .bigint_literal else .number_literal;
-            } else if (c == '.' and self.i + 1 < n and src[self.i + 1] >= '0' and src[self.i + 1] <= '9') {
-                self.i = Lex.numberEnd(src, start);
-                tag = if (!lexer.validateNumericLiteral(src, start, self.i) or (self.i < n and lexer.isIdentStartAtPos(src, self.i)))
-                    .invalid
-                else
-                    .number_literal;
-            } else if (c == '"' or c == '\'') {
-                tag = .string_literal;
-                const jsx_attr = is_jsx and prev == .equal and self.jsx_tag_depth > 0;
-                const jsx_text = is_jsx and (prev == .greater_than or prev == .identifier);
-                self.i = scanStringJsx(src, start, n, jsx_attr or jsx_text, jsx_attr);
-            } else if (c == '/' and Lex.regexAllowed(prev) and !(is_jsx and (prev == .less_than or prev == .greater_than))) {
-                tag = .regex_literal;
-                self.i = Lex.regexEnd(src, start);
-            } else if (c == '`') {
-                const res = Lex.templateChunkEnd(src, start);
-                self.i = res.end;
-                if (!res.terminated) {
-                    tag = .invalid;
-                } else if (res.has_expr) {
-                    tag = .template_head;
-                    if (self.tmpl_depth < brace_d.len) {
-                        brace_d[self.tmpl_depth] = 0;
-                        self.tmpl_depth += 1;
-                    }
-                } else tag = .template_no_sub;
-            } else if (c == '{') {
-                if (self.tmpl_depth > 0) brace_d[self.tmpl_depth - 1] += 1;
-                tag = .l_brace;
-                self.i += 1;
-            } else if (c == '}') {
-                if (self.tmpl_depth > 0 and brace_d[self.tmpl_depth - 1] == 0) {
-                    const res = Lex.templateChunkEnd(src, start);
-                    self.i = res.end;
-                    if (!res.terminated) {
-                        tag = .invalid;
-                    } else if (res.has_expr) {
-                        tag = .template_middle;
+                },
+
+                else => {
+                    if (c >= 0x80) {
+                        if (c == 0xE2 and self.i + 2 < n and src[self.i + 1] == 0x80 and (src[self.i + 2] == 0xA8 or src[self.i + 2] == 0xA9)) {
+                            self.saw_nl = true;
+                            self.at_line_start = true;
+                            self.i += 3;
+                            continue;
+                        }
+                        if (c == 0xEF and self.i + 2 < n and src[self.i + 1] == 0xBB and src[self.i + 2] == 0xBF) {
+                            self.i += 3;
+                            continue;
+                        }
+                        const cl: u32 = @intCast(std.unicode.utf8ByteSequenceLength(c) catch 1);
+                        if (self.i + cl > n) {
+                            self.i += 1;
+                            continue;
+                        }
+                        const cp = decodeKnownLen(src, self.i, cl);
+                        if (lexer.isUnicodeWhitespace(@intCast(cp))) {
+                            self.i += cl;
+                            continue;
+                        }
+                        if (!uid.isIdStart(@intCast(cp))) {
+                            tag = .invalid;
+                            self.i = start + cl;
+                        } else {
+                            tag = .identifier;
+                            self.i = scanHighIdentRun(src, start, n);
+                        }
                     } else {
-                        tag = .template_tail;
-                        self.tmpl_depth -= 1;
+                        const r = scanOp(src, self.i, n);
+                        tag = r.tag;
+                        self.i = r.end;
                     }
-                } else {
-                    if (self.tmpl_depth > 0) brace_d[self.tmpl_depth - 1] -= 1;
-                    tag = .r_brace;
-                    self.i += 1;
-                }
-            } else if (c == '-' and self.at_line_start and (is_module or !annex_b) and
-                self.i + 2 < n and src[self.i + 1] == '-' and src[self.i + 2] == '>')
-            {
-                tag = .invalid;
-                self.i += 3;
-            } else {
-                const r = scanOp(src, self.i, n);
-                tag = r.tag;
-                self.i = r.end;
+                },
             }
             const t = Token{ .tag = tag, .start = start, .len = self.i - start, .has_newline_before = self.saw_nl, .has_unicode_escape = has_esc };
             if (is_jsx) {
