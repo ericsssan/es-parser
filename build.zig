@@ -86,22 +86,22 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&ptr_cmd.step);
 
     // ── Conformance runners ───────────────────────────────
-    // Executables that run against fixture directories.
-    // Usage:
-    //   zig build conformance-parser-tests -- tests/conformance/test262-parser-tests
-    //   zig build conformance-test262      -- tests/conformance/test262
-    //   zig build conformance-babel        -- tests/conformance/babel/packages/babel-parser/test/fixtures
+    // Executables that run against fixture directories. Each step has a default
+    // fixture path (the correct conformance input set) so `zig build conformance-X`
+    // works with no arguments; pass `-- <dir>` to override. NOTE: the TypeScript
+    // input set is `tests/cases` — the runner derives error baselines from a sibling
+    // `tests/baselines/reference`, so it must NOT be pointed at the whole tree.
 
-    addConformanceRunner(b, target, conf_releaseFast, "parser_tests_runner", "tests/conformance/parser_tests_runner.zig", "conformance-parser-tests", "Run tc39/test262-parser-tests conformance suite");
-    addConformanceRunner(b, target, conf_releaseFast, "test262_runner", "tests/conformance/test262_runner.zig", "conformance-test262", "Run tc39/test262 conformance suite");
-    addConformanceRunner(b, target, conf_releaseFast, "babel_runner", "tests/conformance/babel_runner.zig", "conformance-babel", "Run Babel parser conformance suite");
-    addConformanceRunner(b, target, conf_releaseFast, "typescript_runner", "tests/conformance/typescript_runner.zig", "conformance-typescript", "Run TypeScript parser conformance suite");
-    addConformanceRunner(b, target, conf_releaseFast, "semantic_runner", "tests/conformance/semantic_runner.zig", "conformance-semantic", "Run semantic analysis conformance suite");
+    addConformanceRunner(b, target, conf_releaseFast, "parser_tests_runner", "tests/conformance/parser_tests_runner.zig", "conformance-parser-tests", "Run tc39/test262-parser-tests conformance suite", "tests/conformance/test262-parser-tests");
+    addConformanceRunner(b, target, conf_releaseFast, "test262_runner", "tests/conformance/test262_runner.zig", "conformance-test262", "Run tc39/test262 conformance suite", "tests/conformance/test262");
+    addConformanceRunner(b, target, conf_releaseFast, "babel_runner", "tests/conformance/babel_runner.zig", "conformance-babel", "Run Babel parser conformance suite", "tests/conformance/babel/packages/babel-parser/test/fixtures");
+    addConformanceRunner(b, target, conf_releaseFast, "typescript_runner", "tests/conformance/typescript_runner.zig", "conformance-typescript", "Run TypeScript parser conformance suite", "tests/conformance/typescript/tests/cases");
+    addConformanceRunner(b, target, conf_releaseFast, "semantic_runner", "tests/conformance/semantic_runner.zig", "conformance-semantic", "Run semantic analysis conformance suite", "tests/conformance/typescript/tests/cases");
 }
 
 /// Wire up one standalone conformance runner: a ReleaseFast executable built
 /// from `src`, importing the shared parser module `dep`, exposed as build step
-/// `step_name`. Forwards `-- <args>` (a fixture dir) through to the runner.
+/// `step_name`. Runs against `default_fixture` unless `-- <args>` overrides it.
 fn addConformanceRunner(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -110,6 +110,7 @@ fn addConformanceRunner(
     src: []const u8,
     step_name: []const u8,
     desc: []const u8,
+    default_fixture: []const u8,
 ) void {
     const mod = b.createModule(.{
         .root_source_file = b.path(src),
@@ -121,8 +122,8 @@ fn addConformanceRunner(
     const exe = b.addExecutable(.{ .name = name, .root_module = mod });
     const cmd = b.addRunArtifact(exe);
     cmd.step.dependOn(b.getInstallStep());
-    if (@hasField(@TypeOf(b.*), "args")) {
-        if (b.args) |args| cmd.addArgs(args);
-    }
+    // `-- <args>` overrides the default fixture path; with no args, run the
+    // documented conformance input set so `zig build conformance-X` just works.
+    if (b.args) |args| cmd.addArgs(args) else cmd.addArg(default_fixture);
     b.step(step_name, desc).dependOn(&cmd.step);
 }

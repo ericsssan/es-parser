@@ -290,6 +290,10 @@ fn walkDir(io: std.Io, allocator: std.mem.Allocator, base_dir: std.Io.Dir, base_
             const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ item.path, entry.name }) catch continue;
 
             if (entry.kind == .directory) {
+                // `tools/` (template generators, linter) and `harness/` (assert.js,
+                // sta.js, …) are test262 infrastructure, not conformance tests —
+                // their `.js` fixtures are not spec cases and must not be scored.
+                if (std.mem.eql(u8, entry.name, "tools") or std.mem.eql(u8, entry.name, "harness")) continue;
                 const sub_dir = item.dir.openDir(io, entry.name, .{}) catch continue;
                 try stack.append(allocator, .{ .dir = sub_dir, .path = try allocator.dupe(u8, full_path) });
             } else if (std.mem.endsWith(u8, entry.name, ".js")) {

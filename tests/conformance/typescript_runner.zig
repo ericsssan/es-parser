@@ -1020,6 +1020,11 @@ fn walkTs(io: std.Io, allocator: std.mem.Allocator, base_dir: std.Io.Dir, base_p
             const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ item.path, entry.name }) catch continue;
 
             if (entry.kind == .directory) {
+                // `baselines/` holds the compiler's *output* baselines (.js/.d.ts/
+                // .errors.txt plus markup fixtures like `*.mapCode.ts` containing
+                // `[||]` range markers) — these are not test inputs. Scanning them
+                // as source produces spurious parse failures, so skip the subtree.
+                if (std.mem.eql(u8, entry.name, "baselines")) continue;
                 const sub_dir = item.dir.openDir(io, entry.name, .{}) catch continue;
                 try stack.append(allocator, .{ .dir = sub_dir, .path = try allocator.dupe(u8, full_path) });
             } else if (std.mem.endsWith(u8, entry.name, ".ts") or std.mem.endsWith(u8, entry.name, ".tsx")) {
