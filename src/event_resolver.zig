@@ -596,6 +596,17 @@ fn resolveFullImpl(
                 try scopes.addScope(kind, parent, node)
             else
                 ScopeId.fromInt(0);
+            // Directive-based strictness: scope_open carries the parser's
+            // in_strict (bit 0 of the event pad). Records `"use strict"` that
+            // addScope's kind/parent inheritance can't see (e.g. a block in a
+            // sloppy script after a "use strict" prologue).
+            if (do_scope and (e._pad & 1) != 0) {
+                var sf = scopes.getFlags(sid);
+                if (!sf.strict_mode) {
+                    sf.strict_mode = true;
+                    scopes.setFlags(sid, sf);
+                }
+            }
             if (sp < stack.len) {
                 stack[sp] = sid;
                 kind_stack[sp] = kind;

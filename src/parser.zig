@@ -1598,9 +1598,13 @@ pub const Parser = struct {
     pub inline fn emitScopeOpen(self: *Parser, kind: ScopeKindU8, node: NodeIndex) !u32 {
         if (!self.emit_scope_events) return 0;
         const idx: u32 = @intCast(self.ev_len);
+        // Carry the current strictness so the scope tree records directive-based
+        // `"use strict"` (a block opens AFTER the prologue, so in_strict is set).
+        // Module/class always-strict is handled separately in addScope.
         try self.evPush(.{
             .kind = .scope_open,
             .aux = @intFromEnum(kind),
+            ._pad = if (self.in_strict) @as(u16, 1) else 0,
             .node = @intFromEnum(node),
         });
         if (!self.is_ts) self.block_dup_depth += 1;
