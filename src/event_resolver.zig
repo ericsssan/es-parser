@@ -1482,6 +1482,18 @@ fn checkRedeclarations(
                     .block, .switch_stmt, .catch_clause, .static_block => {},
                     else => continue,
                 }
+                // A function at function-body top is var-scoped (it merges with a
+                // same-named `var` — S10.2.1), NOT lexical; only a function in a
+                // NESTED block is lexically declared. So skip a function decl whose
+                // block's parent is a function/arrow scope. (let/const/class always
+                // conflict, so they are not skipped.)
+                switch (kinds[li]) {
+                    .function_decl, .function_decl_annex_b => switch (scopes.kind(scopes.parent(sid))) {
+                        .function, .arrow_function => continue,
+                        else => {},
+                    },
+                    else => {},
+                }
                 const entries = var_map.get(names[li]) orelse continue;
                 const bnode = scopes.nodeId(sid);
                 const bstart = ast.nodeSpan(bnode).start;
