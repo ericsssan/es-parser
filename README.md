@@ -41,16 +41,18 @@ Zig `0.17.0-dev.607+456b2ec07` or later.
 
 ## Usage
 
-Add to your `build.zig.zon`:
+Add es-parser to your `build.zig.zon` with `zig fetch`, which records the URL and
+hash for you:
 
-```zig
-.dependencies = .{
-    .es_parser = .{
-        .url = "https://github.com/ericsssan/es-parser/archive/refs/tags/v0.2.1.tar.gz",
-        .hash = "es_parser-0.2.1-C15LK3w8GADeqnvtcjDACj27kVx7AWlQ1UN8WeCN4ikj",
-    },
-},
+```sh
+# Pin to a release tag (recommended):
+zig fetch --save https://github.com/ericsssan/es-parser/archive/refs/tags/v0.2.1.tar.gz
+
+# …or track the main branch:
+zig fetch --save git+https://github.com/ericsssan/es-parser
 ```
+
+This writes a `.es_parser` dependency (URL + hash) into your `build.zig.zon`.
 
 Then in `build.zig` — the dependency is named `es_parser` and exposes a module
 called `es-parser`:
