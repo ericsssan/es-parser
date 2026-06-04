@@ -98,7 +98,11 @@ pub fn build(b: *std.Build) void {
     addConformanceRunner(b, target, conf_releaseFast, "test262_runner", "tests/conformance/test262_runner.zig", "conformance-test262", "Run tc39/test262 conformance suite", "tests/conformance/test262");
     addConformanceRunner(b, target, conf_releaseFast, "babel_runner", "tests/conformance/babel_runner.zig", "conformance-babel", "Run Babel parser conformance suite", "tests/conformance/babel/packages/babel-parser/test/fixtures");
     addConformanceRunner(b, target, conf_releaseFast, "typescript_runner", "tests/conformance/typescript_runner.zig", "conformance-typescript", "Run TypeScript parser conformance suite", "tests/conformance/typescript/tests/cases");
-    addConformanceRunner(b, target, conf_releaseFast, "semantic_runner", "tests/conformance/semantic_runner.zig", "conformance-semantic", "Run semantic analysis conformance suite", "tests/fixtures/semantic");
+    // Robustness sweep: run the full parse + semantic pipeline over the large
+    // real-world TypeScript corpus (≈19k files) to catch analyzer crashes/OOM.
+    // It tallies scope/symbol/ref/diagnostic structure — it is NOT a correctness
+    // gate (no expected-output comparison). Needs the `typescript` submodule.
+    addConformanceRunner(b, target, conf_releaseFast, "semantic_runner", "tests/conformance/semantic_runner.zig", "conformance-semantic", "Semantic-analysis robustness sweep over the TypeScript corpus", "tests/conformance/typescript/tests/cases");
 }
 
 /// Wire up one standalone conformance runner: a ReleaseFast executable built

@@ -123,14 +123,13 @@ zig build test    # unit + lexer + parser + semantic tests + tc39/test262-parser
 ### Conformance suites
 
 Each step runs a built-in default fixture path, so no arguments are needed.
-`conformance-parser-tests` and `conformance-semantic` use bundled fixtures; the
-other three are large external repos registered as submodules and not checked
-out by default — initialize the submodule first, then run the step:
+`conformance-parser-tests` uses a bundled submodule; the others are large
+external repos registered as submodules and not checked out by default —
+initialize the submodule first, then run the step:
 
 ```sh
 # Bundled — no submodule needed
 zig build conformance-parser-tests
-zig build conformance-semantic
 
 # Full tc39/test262
 git submodule update --init tests/conformance/test262
@@ -140,9 +139,15 @@ zig build conformance-test262
 git submodule update --init tests/conformance/babel
 zig build conformance-babel
 
-# TypeScript compiler tests
+# TypeScript compiler tests (also drives conformance-semantic below)
 git submodule update --init tests/conformance/typescript
 zig build conformance-typescript
+
+# Semantic-analysis robustness sweep: runs the full parse + scope/symbol/
+# reference pipeline over the ~19k-file TypeScript corpus to catch analyzer
+# crashes. Reports structural tallies (scopes/symbols/refs/diagnostics) — it is
+# a robustness sweep, not a correctness gate. Needs the typescript submodule.
+zig build conformance-semantic
 ```
 
 ## Support
