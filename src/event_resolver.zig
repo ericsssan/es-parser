@@ -1470,8 +1470,10 @@ fn checkRedeclarations(
             const tok_lens = ast.tokens.items(.len);
             var li: u32 = 0;
             while (li < n) : (li += 1) {
+                // Block-scoped function decls are lexically declared; the lex-vs-var
+                // rule has no AnnexB exemption (`{ var f; function f(){} }` is an error).
                 switch (kinds[li]) {
-                    .let, .@"const", .class_decl => {},
+                    .let, .@"const", .class_decl, .function_decl, .function_decl_annex_b => {},
                     else => continue,
                 }
                 const sid = scope_ids[li];
@@ -1497,7 +1499,11 @@ fn checkRedeclarations(
                     }
                 }
                 const vs_int = vs.toInt();
+                // A block function may also create an AnnexB var binding at its own
+                // position; that self-binding is not a redeclaration.
+                const self_pos = ast.nodeSpan(decls[li]).start;
                 for (entries.items) |ve| {
+                    if (ve.pos == self_pos) continue;
                     if (ve.scope == vs_int and ve.pos >= bstart and ve.pos < bend) {
                         try diags.append(allocator, .{
                             .message = "Identifier has already been declared",
