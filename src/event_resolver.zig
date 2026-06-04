@@ -1517,5 +1517,57 @@ fn checkRedeclarations(
         }
     }
 
+    // ── Pass 3: duplicate function declarations in a block ────────────────────
+    // Sloppy + AnnexB allows duplicate *plain* FunctionDeclarations in a block
+    // (B.3.3.4). Generators / async functions are never AnnexB-eligible, and
+    // strict/module contexts forbid all duplicates → error. (function-vs-var and
+    // function-vs-let are handled by passes 2 and 1 respectively.)
+    {
+        const main_tokens = ast.nodes.items(.main_token);
+        const tok_tags = ast.tokens.items(.tag);
+        var fmap = std.HashMapUnmanaged(RedeclKey, bool, RedeclCtx, std.hash_map.default_max_load_percentage){};
+        defer fmap.deinit(sa);
+        var fi: u32 = 0;
+        while (fi < n) : (fi += 1) {
+            switch (kinds[fi]) {
+                .function_decl, .function_decl_annex_b => {},
+                else => continue,
+            }
+            const sid = scope_ids[fi];
+            if (!sid.isValid()) continue;
+            switch (scopes.kind(sid)) {
+                .block, .switch_stmt, .static_block => {},
+                else => continue,
+            }
+            // Flavor: walk back from the name token to `function`; a generator
+            // (`function*`) or async (`async function`) is never AnnexB-eligible.
+            var t: i64 = main_tokens[decls[fi].toInt()];
+            while (t >= 0 and tok_tags[@intCast(t)] != .kw_function) : (t -= 1) {}
+            const plain = blk: {
+                if (t < 0) break :blk true;
+                const ft: usize = @intCast(t);
+                const is_gen = ft + 1 < tok_tags.len and tok_tags[ft + 1] == .asterisk;
+                const is_async = ft > 0 and tok_tags[ft - 1] == .kw_async;
+                break :blk !(is_gen or is_async);
+            };
+            const ok = plain and !scopes.getFlags(sid).strict_mode; // AnnexB-dup-eligible
+            const gop = try fmap.getOrPut(sa, .{ .scope = sid.toInt(), .name = names[fi] });
+            if (!gop.found_existing) {
+                gop.value_ptr.* = ok;
+                continue;
+            }
+            // A duplicate is allowed only if this and every prior one are
+            // AnnexB-dup-eligible (plain + sloppy).
+            if (!(ok and gop.value_ptr.*)) {
+                try diags.append(allocator, .{
+                    .message = "Identifier has already been declared",
+                    .span = ast.nodeSpan(decls[fi]),
+                    .severity = .@"error",
+                });
+            }
+            gop.value_ptr.* = gop.value_ptr.* and ok;
+        }
+    }
+
     return diags.toOwnedSlice(allocator);
 }
