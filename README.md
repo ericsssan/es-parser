@@ -19,10 +19,16 @@ system (error / warning / info / hint). Extracted from the Ez linter.
 The remaining TypeScript failures require cross-file type analysis or
 transpile-level error recovery, which a single-file parser does not perform.
 
+Babel numbers are over the supported-feature subset: ~1,740 of the 5,216 parser
+fixtures are skipped — Flow type syntax, the pipeline operator, and assorted
+Stage-x proposals (record/tuple, module blocks, do-expressions, …) — none of
+which es-parser targets. TypeScript-specific fixtures are skipped here too;
+they run under the TypeScript suite instead.
+
 ## Features
 
 - **Languages**: JS, TS, JSX, TSX, `.d.ts` (also `.mjs`, `.cjs`, `.mts`, `.cts`)
-- **ES2025**: async/await, generators, optional chaining, nullish coalescing, import attributes, `using` declarations, decorators
+- **ES2025**: async/await, generators, optional chaining, nullish coalescing, import attributes, `using` declarations, decorators (standard syntax)
 - **Single-pass lexer**: SIMD-accelerated scalar tokenization
 - **Scope analysis**: lexical scopes, symbol table, reference resolution
 - **CFG**: control-flow graph for reachability analysis
