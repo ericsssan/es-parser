@@ -1441,5 +1441,75 @@ fn checkRedeclarations(
         }
         if (cat == .lexical) gop.value_ptr.* = true;
     }
+
+    // ── Pass 2: lexical-in-block vs `var` declared within that block ──────────
+    // `var` hoists to the enclosing function/script scope, so the scope-grouping
+    // pass above can't see `{ let x; var x; }`. For each lexical binding in a
+    // *block-like* scope, flag a same-named `var` that (a) hoists to that block's
+    // enclosing var-scope and (b) is declared within the block's byte range.
+    // Condition (a) excludes a `var` inside a nested function within the block
+    // (it hoists to that nested function, not here) — avoiding false positives.
+    {
+        const VarEntry = struct { scope: u32, pos: u32 };
+        var var_map = std.HashMapUnmanaged([]const u8, std.ArrayListUnmanaged(VarEntry), std.hash_map.StringContext, std.hash_map.default_max_load_percentage){};
+        defer {
+            var it = var_map.valueIterator();
+            while (it.next()) |v| v.deinit(sa);
+            var_map.deinit(sa);
+        }
+        var k: u32 = 0;
+        while (k < n) : (k += 1) {
+            if (kinds[k] != .@"var") continue;
+            if (!scope_ids[k].isValid()) continue;
+            const gop = try var_map.getOrPut(sa, names[k]);
+            if (!gop.found_existing) gop.value_ptr.* = .empty;
+            try gop.value_ptr.append(sa, .{ .scope = scope_ids[k].toInt(), .pos = ast.nodeSpan(decls[k]).start });
+        }
+        if (var_map.count() > 0) {
+            const node_end = ast.node_end_toks;
+            const tok_lens = ast.tokens.items(.len);
+            var li: u32 = 0;
+            while (li < n) : (li += 1) {
+                switch (kinds[li]) {
+                    .let, .@"const", .class_decl => {},
+                    else => continue,
+                }
+                const sid = scope_ids[li];
+                if (!sid.isValid()) continue;
+                switch (scopes.kind(sid)) {
+                    .block, .switch_stmt, .catch_clause, .static_block => {},
+                    else => continue,
+                }
+                const entries = var_map.get(names[li]) orelse continue;
+                const bnode = scopes.nodeId(sid);
+                const bstart = ast.nodeSpan(bnode).start;
+                const bni = bnode.toInt();
+                const bend: u32 = if (bni < node_end.len) blk: {
+                    const et = node_end[bni];
+                    break :blk ast.tokenStart(et) + tok_lens[et];
+                } else bstart;
+                // Enclosing var-scope of this block.
+                var vs = sid;
+                while (vs.isValid()) : (vs = scopes.parent(vs)) {
+                    switch (scopes.kind(vs)) {
+                        .function, .arrow_function, .global, .module => break,
+                        else => {},
+                    }
+                }
+                const vs_int = vs.toInt();
+                for (entries.items) |ve| {
+                    if (ve.scope == vs_int and ve.pos >= bstart and ve.pos < bend) {
+                        try diags.append(allocator, .{
+                            .message = "Identifier has already been declared",
+                            .span = ast.nodeSpan(decls[li]),
+                            .severity = .@"error",
+                        });
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     return diags.toOwnedSlice(allocator);
 }
