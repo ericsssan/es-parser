@@ -122,28 +122,27 @@ zig build test    # unit + lexer + parser + semantic tests + tc39/test262-parser
 
 ### Conformance suites
 
-`conformance-parser-tests` runs against the bundled submodule automatically.
-The other three suites are large external repos registered as submodules but
-not checked out by default — initialize them first, then pass the path:
+Each step runs a built-in default fixture path, so no arguments are needed.
+`conformance-parser-tests` and `conformance-semantic` use bundled fixtures; the
+other three are large external repos registered as submodules and not checked
+out by default — initialize the submodule first, then run the step:
 
 ```sh
-# Bundled — no argument needed
+# Bundled — no submodule needed
 zig build conformance-parser-tests
+zig build conformance-semantic
 
 # Full tc39/test262
 git submodule update --init tests/conformance/test262
-zig build conformance-test262 -- tests/conformance/test262
+zig build conformance-test262
 
 # Babel parser fixtures
 git submodule update --init tests/conformance/babel
-zig build conformance-babel -- tests/conformance/babel/packages/babel-parser/test/fixtures
+zig build conformance-babel
 
 # TypeScript compiler tests
 git submodule update --init tests/conformance/typescript
-zig build conformance-typescript -- tests/conformance/typescript/tests/cases
-
-# Semantic analysis fixtures (bundled)
-zig build conformance-semantic -- tests/fixtures/semantic
+zig build conformance-typescript
 ```
 
 ## Support
