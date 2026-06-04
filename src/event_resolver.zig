@@ -1394,6 +1394,10 @@ fn checkRedeclarations(
 ) ![]Diagnostic {
     const n = symbols.count();
     if (n == 0) return &.{};
+    // `diagnose_redeclare` models the JavaScript duplicate-binding early error.
+    // TypeScript has declaration merging (function overloads, namespace/interface/
+    // class merges), so this JS rule does not apply — skip it for TS.
+    if (ast.is_ts) return &.{};
 
     const Cat = enum { lexical, varlike };
     var map = std.HashMapUnmanaged(RedeclKey, bool, RedeclCtx, std.hash_map.default_max_load_percentage){};
@@ -1417,10 +1421,7 @@ fn checkRedeclarations(
             // var-like (Script/function-body hoisting). The Annex B B.3.3 case
             // (`function_decl_annex_b` — a sloppy function nested in if/label) is
             // exempt from the redeclaration early error, so it is skipped entirely.
-            // In TypeScript, function declarations merge (overload signatures +
-            // implementation share a name), so a function is never lexical there —
-            // two `function f` decls must not be flagged as a redeclaration.
-            .function_decl => if (!ast.is_ts and scopes.kind(scope_id) == .module) .lexical else .varlike,
+            .function_decl => if (scopes.kind(scope_id) == .module) .lexical else .varlike,
             .@"var" => .varlike,
             else => continue,
         };

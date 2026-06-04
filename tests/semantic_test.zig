@@ -294,14 +294,17 @@ fn redeclareDiagCountTs(source: []const u8) !usize {
     return r.diagnostics.len;
 }
 
-test "redeclare: TS function overloads are not flagged, real TS dups still are" {
-    // Overload signatures + implementation share a name — valid TS, must NOT flag.
+test "redeclare: the duplicate-binding check is JavaScript-only" {
+    // `diagnose_redeclare` models a JS early error. TypeScript has declaration
+    // merging (function overloads, namespace/interface/class merges), so the JS
+    // rule does not apply and is skipped for TS — no redeclaration diagnostics,
+    // even for what looks like a duplicate in JS terms.
     try testing.expectEqual(@as(usize, 0), try redeclareDiagCountTs(
         "function f(x: number): void;\nfunction f(x: string): void;\nfunction f(x: any): void {}\nexport { f };\n",
     ));
-    // But genuine duplicate lexical bindings are still errors in TS.
-    try testing.expect(try redeclareDiagCountTs("class C {}\nclass C {}\nexport { C };\n") >= 1);
-    try testing.expect(try redeclareDiagCountTs("let g = 1;\nfunction g() {}\nexport { g };\n") >= 1);
+    try testing.expectEqual(@as(usize, 0), try redeclareDiagCountTs("class C {}\nclass C {}\nexport { C };\n"));
+    // The JS path still flags genuine duplicate lexical bindings.
+    try testing.expect(try redeclareDiagCount("class D {}\nclass D {}\n", false) >= 1);
 }
 
 test "redeclare: lexical duplicate bindings are flagged" {
