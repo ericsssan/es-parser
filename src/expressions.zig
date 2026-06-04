@@ -3297,21 +3297,30 @@ fn parseAsyncParenArrowOrCall(p: *Parser, async_tok: TokenIndex) Error!NodeIndex
         defer p.in_function = saved_fn4;
         defer { p.in_generator = saved_gen4; p.syncYieldLex(); }
         defer p.in_fn_params = saved_fp4;
+        // Open the arrow scope and declare params into it (this JS path was
+        // missing it, unlike the TS path and the regular paren-arrow path —
+        // so async-arrow params were absent from the scope tree, breaking
+        // scope-aware analyses like redeclaration / no-shadow / no-unused).
+        const arrow_scope_ev = try p.emitScopeOpen(.arrow_function, .none);
+        try p.emitParamDeclaresFromRange(params_range);
         const body = if (p.peek() == .l_brace)
             try parseBlockBodyWithStrictChecks(p, params_range, .none)
         else
             try parseAssignmentExpression(p);
+        try p.emitScopeClose(.none);
 
         const extra = try p.addExtra(ast.ArrowData, .{
             .params_start = params_range.start,
             .params_end = params_range.end,
             .body = body,
         });
-        return p.addNode(.{
+        const arrow_node = try p.addNode(.{
             .tag = .async_arrow_fn,
             .main_token = async_tok,
             .data = .{ .lhs = NodeIndex.fromInt(extra), .rhs = .none },
         });
+        p.patchScopeOpenNode(arrow_scope_ev, arrow_node);
+        return arrow_node;
     }
 
     // Not an arrow — `async(args)` is a call expression where `async`
