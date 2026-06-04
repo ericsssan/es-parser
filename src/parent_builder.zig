@@ -1,10 +1,10 @@
 //! Parent-pointer construction for the AST — the parser-side primitive.
 //!
 //! `setChildParents` writes parents[child] = parent_idx from a node's structure.
-//! The parser calls it at addNode time (fast path: `tree.parents.len == n`), or
-//! `buildParentsOnly` runs a single forward scan over an already-built tree
-//! (fallback). child_idx < parent_idx for all non-root nodes (bottom-up build),
-//! so one forward pass suffices.
+//! `buildParentsOnly` runs a single forward scan over an already-built tree,
+//! then replays `parent_fixups` for the few non-structural links. child_idx <
+//! parent_idx for all non-root nodes (bottom-up build), so one pass suffices.
+//! The parser does not build parents — semantic calls this on demand.
 //!
 //! The traversal + ESTree bridge that consumes these parents (pre_order,
 //! post_order, dfs_events, resolved_parents, type_overrides) lives in Ez's
@@ -416,16 +416,19 @@ pub fn buildParentsOnly(tree: *const Ast, alloc: std.mem.Allocator) ![]u32 {
     const n = tree.nodes.len;
     const parents = try alloc.alloc(u32, n);
     if (n == 0) return parents;
-    if (tree.parents.len == n) {
-        @memcpy(parents, tree.parents[0..n]);
-    } else {
-        @memset(parents, NONE);
-        const tags  = tree.nodes.items(.tag);
-        const data  = tree.nodes.items(.data);
-        const extra = tree.extra_data;
-        for (0..n) |i| {
-            setChildParents(parents, extra, tags[i], data[i], @intCast(i));
-        }
+    @memset(parents, NONE);
+    const tags  = tree.nodes.items(.tag);
+    const data  = tree.nodes.items(.data);
+    const extra = tree.extra_data;
+    for (0..n) |i| {
+        setChildParents(parents, extra, tags[i], data[i], @intCast(i));
+    }
+    // Replay non-structural parent links the forward scan can't derive
+    // (e.g. type annotations on destructured params). Flat (child, parent).
+    var fi: usize = 0;
+    while (fi + 1 < tree.parent_fixups.len) : (fi += 2) {
+        const child = tree.parent_fixups[fi];
+        if (child < n) parents[child] = tree.parent_fixups[fi + 1];
     }
     return parents;
 }

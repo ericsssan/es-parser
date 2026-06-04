@@ -231,11 +231,7 @@ pub const SemanticAnalyzer = struct {
             };
         };
         if (opts.build_parents) {
-            if (ast.parents.len > 0) {
-                result.parent_indices = try allocator.dupe(u32, ast.parents);
-            } else {
-                result.parent_indices = try parent_builder.buildParentsOnly(ast, allocator);
-            }
+            result.parent_indices = try parent_builder.buildParentsOnly(ast, allocator);
         }
         // Loop-exit reachability is derived from the CFG; only meaningful when
         // it was built.

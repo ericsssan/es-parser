@@ -13,7 +13,6 @@ const Span = @import("span.zig").Span;
 const Diagnostic = @import("diagnostic.zig").Diagnostic;
 const Severity = @import("diagnostic.zig").Severity;
 
-const parent_builder = @import("parent_builder.zig");
 const TokenList = Ast.TokenList;
 const scalar_lexer = @import("scalar_lexer.zig");
 
@@ -785,9 +784,11 @@ pub const Parser = struct {
     /// `.function_decl` when the NFE name matches the outer var name —
     /// matches ESLint's fn_expr_exceptions rule (affects no-shadow).
     decl_name_text: []const u8 = &.{},
-    /// Pre-allocated buffer for parent pointers, written at addNode time.
-    /// Kept at nodes.capacity during parsing; trimmed to nodes.len on transfer to Ast.parents.
-    parents_buf: []u32 = &.{},
+    /// Non-structural (child, parent) parent links recorded for `Ast.parent_fixups`.
+    /// The parser does NOT build the parent array (semantic does, via
+    /// `buildParentsOnly`); it only records the few links that aren't derivable
+    /// from the final tree (type annotations on destructured params/bindings).
+    parent_fixups: std.ArrayListUnmanaged(u32) = .empty,
     gpa: std.mem.Allocator,
     max_nodes: usize,
 
@@ -1071,11 +1072,11 @@ pub const Parser = struct {
         defer p.nodes.deinit(allocator);
         defer p.extra_data.deinit(allocator);
         defer p.scratch.deinit(allocator);
+        defer p.parent_fixups.deinit(allocator);
         // If events were requested, hand the stream back; otherwise free it.
         defer if (events_out == null) p.scope_events.deinit(allocator);
         defer if (p.ref_event_idx.len > 0) allocator.free(p.ref_event_idx);
         defer if (p.node_end_toks.len > 0) allocator.free(p.node_end_toks);
-        defer if (p.parents_buf.len > 0) allocator.free(p.parents_buf);
         defer p.private_decls.deinit(allocator);
         defer p.private_refs.deinit(allocator);
         defer p.tok_mut_log.deinit(allocator);
@@ -1120,9 +1121,6 @@ pub const Parser = struct {
         // Allocate to the actual (rounded-up) capacity so the hot path in addNode
         // is always in-bounds. nodes.capacity may exceed estimated_node_count.
         p.node_end_toks = try allocator.alloc(u32, p.nodes.capacity);
-        p.parents_buf = try allocator.alloc(u32, p.nodes.capacity);
-        // NONE = 0xFFFF_FFFF, not 0; cannot rely on OS zero-pages.
-        @memset(p.parents_buf, parent_builder.NONE);
         try p.extra_data.ensureTotalCapacity(allocator, estimated_extra_count);
         // Scratch is a stack used by statement-list / arg-list parsers. Peak
         // depth depends on the largest block in the file (could be thousands
@@ -1265,10 +1263,11 @@ pub const Parser = struct {
         p.node_end_toks = &.{}; // hand off; prevent defer from double-freeing
         errdefer if (ast_node_end_toks_cap > 0) allocator.free(ast_node_end_toks.ptr[0..ast_node_end_toks_cap]);
 
-        const ast_parents: []const u32 = p.parents_buf[0..final_node_count];
-        const ast_parents_cap: u32 = @intCast(p.parents_buf.len);
-        p.parents_buf = &.{};
-        errdefer if (ast_parents_cap > 0) allocator.free(ast_parents.ptr[0..ast_parents_cap]);
+        // The parser does not build the parent array — semantic builds it on
+        // demand via `buildParentsOnly` (structural scan + `parent_fixups`).
+        const ast_parent_fixups: []const u32 = try p.parent_fixups.toOwnedSlice(allocator);
+        const ast_parent_fixups_cap: u32 = @intCast(ast_parent_fixups.len);
+        errdefer if (ast_parent_fixups_cap > 0) allocator.free(ast_parent_fixups.ptr[0..ast_parent_fixups_cap]);
 
         if (streaming) |s| {
             if (s.lex_stall_count_out) |out| out.* = p.lex_stall_count;
@@ -1287,8 +1286,8 @@ pub const Parser = struct {
             .scope_events_cap = ast_events_cap,
             .node_end_toks = ast_node_end_toks,
             .node_end_toks_cap = ast_node_end_toks_cap,
-            .parents = ast_parents,
-            .parents_cap = ast_parents_cap,
+            .parent_fixups = ast_parent_fixups,
+            .parent_fixups_cap = ast_parent_fixups_cap,
         };
     }
 
@@ -1548,11 +1547,6 @@ pub const Parser = struct {
             if (self.node_end_toks.len < self.nodes.capacity) {
                 self.node_end_toks = try self.gpa.realloc(self.node_end_toks, self.nodes.capacity);
             }
-            if (self.parents_buf.len < self.nodes.capacity) {
-                const old_plen = self.parents_buf.len;
-                self.parents_buf = try self.gpa.realloc(self.parents_buf, self.nodes.capacity);
-                @memset(self.parents_buf[old_plen..], parent_builder.NONE);
-            }
         }
         // Write via hoisted raw pointers — skips MultiArrayList's internal
         // pointer-chain lookups (fields[0], fields[1], fields[2]).
@@ -1561,8 +1555,6 @@ pub const Parser = struct {
         self.node_data_ptr[result]       = node.data;
         self.nodes.len += 1;
         self.node_end_toks[result] = if (self.tok_i > 0) @intCast(self.tok_i - 1) else 0;
-        std.debug.assert(self.parents_buf.len > result);
-        parent_builder.setChildParents(self.parents_buf, self.extra_data.items, node.tag, node.data, result);
         return NodeIndex.fromInt(result);
     }
 
@@ -2572,9 +2564,6 @@ pub const Parser = struct {
             .rhs = NodeIndex.fromInt(range.end),
         };
         self.node_data_ptr[0] = root_data;
-        // Root is pre-allocated via nodes.append (not addNode), so setChildParents
-        // must be called manually to populate parents_buf for top-level statements.
-        parent_builder.setChildParents(self.parents_buf, self.extra_data.items, .root, root_data, 0);
         self.node_end_toks[0] = if (self.tok_i > 0) @intCast(self.tok_i - 1) else 0;
 
         // Validate that named exports without 'from' refer to declared bindings.
@@ -5265,7 +5254,7 @@ pub const Parser = struct {
         const had_definite_bang = self.is_ts and self.eat(.bang) != null;
         const type_annotation = try self.parseOptionalTypeAnnotation();
 
-        // Attach type annotation to identifier binding (so parent_builder can reach it).
+        // Attach type annotation to identifier binding (structurally derivable).
         if (type_annotation != .none) {
             const binding_tag = self.node_tags_ptr[binding.toInt()];
             if (binding_tag == .identifier) {
@@ -5274,15 +5263,8 @@ pub const Parser = struct {
                 // that report `node: identifier` get the full typed span.
                 // (Same treatment as parameter identifiers at parseParam.)
                 self.node_end_toks[binding.toInt()] = if (self.tok_i > 0) @intCast(self.tok_i - 1) else 0;
-                // Patch parents[type_annotation] = binding so the chain
-                // identifier ← type_annotation ← typeref reaches the
-                // surrounding declarator/fn.  addNode set the original
-                // parent (often NONE for fresh annotation), but we
-                // mutate after the fact.
-                const ann_idx = type_annotation.toInt();
-                if (ann_idx < self.parents_buf.len) {
-                    self.parents_buf[ann_idx] = @intCast(binding.toInt());
-                }
+                // The annotation now lives in the identifier's data.rhs, so its
+                // parent is derivable by buildParentsOnly — no fixup needed.
             }
         }
 
@@ -7225,14 +7207,8 @@ pub const Parser = struct {
                 // through its typeAnnotation. Update end_tok so rules calling
                 // sourceCode.getText(param) get `name: Type`, not just `name`.
                 self.node_end_toks[binding.toInt()] = if (self.tok_i > 0) @intCast(self.tok_i - 1) else 0;
-                // Patch the parent index so the type annotation node
-                // points back to the binding identifier — addNode set
-                // the original parent (NONE for a fresh ann) and we're
-                // mutating after the fact.
-                const ann_idx = param_type_annotation.toInt();
-                if (ann_idx < self.parents_buf.len) {
-                    self.parents_buf[ann_idx] = @intCast(binding.toInt());
-                }
+                // Annotation lives in the identifier's data.rhs → parent is
+                // derivable by buildParentsOnly, no fixup needed.
             }
             // Encode optional `?` marker in lhs (lhs=root/0 means optional; lhs=none means not).
             if (is_optional_ts) {
@@ -7246,9 +7222,8 @@ pub const Parser = struct {
             // so downstream rules can discover the annotation by
             // scanning ts_type_annotation children whose parent matches.
             const ann_idx = param_type_annotation.toInt();
-            if (ann_idx < self.parents_buf.len) {
-                self.parents_buf[ann_idx] = @intCast(binding.toInt());
-            }
+            try self.parent_fixups.append(self.gpa, ann_idx);
+            try self.parent_fixups.append(self.gpa, @intCast(binding.toInt()));
             self.node_end_toks[binding.toInt()] = if (self.tok_i > 0) @intCast(self.tok_i - 1) else 0;
         }
 

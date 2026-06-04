@@ -6612,11 +6612,8 @@ fn parseBindingElement(p: *Parser) Error!NodeIndex {
                 // through its typeAnnotation; rules call sourceCode.getText(param)
                 // and expect `name: Type`, not just `name`.
                 p.node_end_toks[node.toInt()] = if (p.tok_i > 0) @intCast(p.tok_i - 1) else 0;
-                // Patch parents[type_ann] = node so the parent chain
-                // reaches the binding identifier (addNode's initial
-                // setChildParents ran before this mutation).
-                const ann_idx = type_ann.toInt();
-                if (ann_idx < p.parents_buf.len) p.parents_buf[ann_idx] = @intCast(node.toInt());
+                // The annotation lives in the identifier's data.rhs, so its
+                // parent is derivable from the tree — no fixup needed.
             } else if (node_tag == .object_pattern or node_tag == .array_pattern) {
                 // Patterns can't store the annotation inline (their
                 // data slots hold a SubRange), but we still need
@@ -6626,7 +6623,11 @@ fn parseBindingElement(p: *Parser) Error!NodeIndex {
                 // pattern, and let rules discover it by scanning all
                 // ts_type_annotation children whose parent matches.
                 const ann_idx = type_ann.toInt();
-                if (ann_idx < p.parents_buf.len) p.parents_buf[ann_idx] = @intCast(node.toInt());
+                // This link is NOT derivable from the final tree (the pattern's
+                // data slot is a SubRange with no room for the annotation), so
+                // record it for Ast.parent_fixups → lossless buildParentsOnly.
+                try p.parent_fixups.append(p.gpa, ann_idx);
+                try p.parent_fixups.append(p.gpa, @intCast(node.toInt()));
                 p.node_end_toks[node.toInt()] = if (p.tok_i > 0) @intCast(p.tok_i - 1) else 0;
             }
         }

@@ -532,15 +532,8 @@ fn parsePrimaryTypeInner(p: *Parser) Error!NodeIndex {
                 const fn_data_idx = @intFromEnum(p.node_data_ptr[inner.toInt()].lhs);
                 p.extra_data.items[fn_data_idx + 5] = tp_range.start;
                 p.extra_data.items[fn_data_idx + 6] = tp_range.end;
-                // The ts_function_type was added before its type_params
-                // were spliced in, so setChildParents missed them.  Wire
-                // parent links now so type-checker lookups (e.g.
-                // findTypeParameterDecl) reach the params.
-                const inner_idx: u32 = inner.toInt();
-                var k = tp_range.start;
-                while (k < tp_range.end) : (k += 1) {
-                    p.parents_buf[p.extra_data.items[k]] = inner_idx;
-                }
+                // (type_params are spliced in above, so their parents are now
+                // derivable from the final tree by buildParentsOnly — no fixup.)
             }
             return inner;
         },

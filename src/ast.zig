@@ -741,32 +741,14 @@ pub const Ast = struct {
     /// tok_ends[node_end_toks[i]] gives the correct ESTree end byte position.
     node_end_toks: []const u32 = &.{},
     node_end_toks_cap: u32 = 0,
-    /// Parent node index for every node (NONE = no parent, i.e. root).
-    /// Pre-populated by the parser at addNode time.
-    parents: []const u32 = &.{},
-    parents_cap: u32 = 0,
-
-    /// Phase 2 of the byte-span-AST migration: authoritative per-node subtree
-    /// byte spans (`node_start_bytes[i] .. node_end_bytes[i]`), populated by
-    /// `populateByteSpans` when requested. Empty until populated — node spans
-    /// are otherwise derived from token indices. These let consumers (and,
-    /// eventually, Ez) read node ranges without the token array, the
-    /// precondition for discarding it and fusing the lexer.
-    node_start_bytes: []const u32 = &.{},
-    node_start_bytes_cap: u32 = 0,
-    node_end_bytes: []const u32 = &.{},
-    node_end_bytes_cap: u32 = 0,
-
-    /// Per-node *name* byte range (`source[name_start..name_start+name_len]`):
-    /// the slice consumers resolve identifiers/labels by. Usually the node's
-    /// main_token span, but resolved through node-tag conventions (e.g.
-    /// `ts_enum_decl` keeps its name token in `extra_data`, not `main_token`).
-    /// Populated by `populateNameBytes`; lets the binder read names without the
-    /// token array (Milestone A of dropping it). `name_len == 0` ⇒ unnamed node.
-    node_name_starts: []const u32 = &.{},
-    node_name_starts_cap: u32 = 0,
-    node_name_lens: []const u32 = &.{},
-    node_name_lens_cap: u32 = 0,
+    /// Flat (child, parent) pairs for parent links that are NOT derivable from
+    /// the final tree structure (currently: type annotations on destructured
+    /// parameters/bindings, whose pattern node has no slot to hold them).
+    /// `buildParentsOnly` replays these after its structural pass so the
+    /// semantic-built parents are lossless. Parents themselves are NOT stored on
+    /// the Ast — they are built on demand by semantic (`parent_indices`).
+    parent_fixups: []const u32 = &.{},
+    parent_fixups_cap: u32 = 0,
 
     pub const NodeList = std.MultiArrayList(Node);
     pub const TokenList = std.MultiArrayList(struct {
@@ -809,11 +791,7 @@ pub const Ast = struct {
         allocator.free(self.errors);
         freeCapped(allocator, self.scope_events, self.scope_events_cap);
         freeCapped(allocator, self.node_end_toks, self.node_end_toks_cap);
-        freeCapped(allocator, self.parents, self.parents_cap);
-        freeCapped(allocator, self.node_start_bytes, self.node_start_bytes_cap);
-        freeCapped(allocator, self.node_end_bytes, self.node_end_bytes_cap);
-        freeCapped(allocator, self.node_name_starts, self.node_name_starts_cap);
-        freeCapped(allocator, self.node_name_lens, self.node_name_lens_cap);
+        freeCapped(allocator, self.parent_fixups, self.parent_fixups_cap);
         self.* = undefined;
     }
 
@@ -977,78 +955,10 @@ pub const Ast = struct {
         return .{ .start = start, .end = end };
     }
 
-    /// Populate `node_start_bytes` / `node_end_bytes` with authoritative subtree
-    /// byte spans (idempotent — no-op if already populated). Requires the token
-    /// array to still be present. After this, `nodeByteSpan` is O(1) and the
-    /// spans persist on the Ast independent of the tokens.
-    pub fn populateByteSpans(self: *Ast, allocator: std.mem.Allocator) !void {
-        if (self.node_start_bytes.len == self.nodes.len and self.nodes.len != 0) return;
-        const spans = try self.computeByteSpans(allocator);
-        self.node_start_bytes = spans.start;
-        self.node_start_bytes_cap = @intCast(spans.start.len);
-        self.node_end_bytes = spans.end;
-        self.node_end_bytes_cap = @intCast(spans.end.len);
-    }
-
-    /// O(1) authoritative subtree byte-span of a node. Requires
-    /// `populateByteSpans` to have been called.
-    pub fn nodeByteSpan(self: *const Ast, index: NodeIndex) Span {
-        const i = index.toInt();
-        if (i < self.node_start_bytes.len) {
-            return .{ .start = self.node_start_bytes[i], .end = self.node_end_bytes[i] };
-        }
-        return self.nodeSpan(index); // not populated — fall back to main-token span
-    }
-
-    /// Populate `node_name_starts` / `node_name_lens` (idempotent). For each node
-    /// records the byte slice of its *name* token — the same token the binder
-    /// reads today (main_token, except `ts_enum_decl` whose name lives in
-    /// `extra_data`), precomputed so the binder needs no token array. Requires
-    /// the token array to still be present.
-    pub fn populateNameBytes(self: *Ast, allocator: std.mem.Allocator) !void {
-        if (self.node_name_starts.len == self.nodes.len and self.nodes.len != 0) return;
-        const n = self.nodes.len;
-        const starts_t = self.tokens.items(.start);
-        const lens_t = self.tokens.items(.len);
-        const main_toks = self.nodes.items(.main_token);
-        const tags = self.nodes.items(.tag);
-        const datas = self.nodes.items(.data);
-        const ns = try allocator.alloc(u32, n);
-        errdefer allocator.free(ns);
-        const nl = try allocator.alloc(u32, n);
-        errdefer allocator.free(nl);
-        var i: usize = 0;
-        while (i < n) : (i += 1) {
-            var nt: u32 = main_toks[i];
-            if (tags[i] == .ts_enum_decl) {
-                const extra_idx = @intFromEnum(datas[i].lhs);
-                if (extra_idx < self.extra_data.len) nt = self.extra_data[extra_idx];
-            }
-            if (nt < starts_t.len) {
-                ns[i] = starts_t[nt];
-                nl[i] = lens_t[nt];
-            } else {
-                ns[i] = 0;
-                nl[i] = 0;
-            }
-        }
-        self.node_name_starts = ns;
-        self.node_name_starts_cap = @intCast(n);
-        self.node_name_lens = nl;
-        self.node_name_lens_cap = @intCast(n);
-    }
-
-    /// The source text of a node's name. O(1) from `node_name_starts` when
-    /// populated (no token array needed); otherwise falls back to the token.
+    /// The source text of a node's name: its name token's text. Usually
+    /// `main_token`, except `ts_enum_decl` whose name lives in `extra_data`.
     pub inline fn nodeName(self: *const Ast, index: NodeIndex) []const u8 {
         const i = index.toInt();
-        if (i < self.node_name_starts.len) {
-            const s = self.node_name_starts[i];
-            const end = @min(s + self.node_name_lens[i], @as(u32, @intCast(self.source.len)));
-            return self.source[s..end];
-        }
-        // Fallback (columns not populated, e.g. streaming): select the name token
-        // exactly as populateNameBytes would, then read it from the token array.
         var nt = self.nodeMainToken(index);
         if (self.nodes.items(.tag)[i] == .ts_enum_decl) {
             const extra_idx = @intFromEnum(self.nodes.items(.data)[i].lhs);
@@ -1057,50 +967,7 @@ pub const Ast = struct {
         return self.tokenText(nt);
     }
 
-    /// Compute authoritative per-node byte-spans (subtree min-start .. max-end).
-    /// Caller owns the returned slices. This is the Phase-1 foundation of the
-    /// byte-span-AST migration: it gives every node a real `{start,end}` derived
-    /// from the parser's existing token data, so later phases can store it on the
-    /// node and drop the token-index indirection (enabling token-array discard /
-    /// fused lexing).
-    ///
-    /// `main_token` alone is NOT the node's start — it is the operator for infix
-    /// nodes — so the start must be the minimum over the subtree. `node_end_toks`
-    /// is authoritative for the end. We seed each node from its own token span,
-    /// then fold each node's span into its parent. The parser creates a node only
-    /// after its children, so a low→high pass propagates fully.
-    pub fn computeByteSpans(self: *const Ast, allocator: std.mem.Allocator) !struct { start: []u32, end: []u32 } {
-        const n = self.nodes.len;
-        const starts_t = self.tokens.items(.start);
-        const lens_t = self.tokens.items(.len);
-        const main_toks = self.nodes.items(.main_token);
-        const lo = try allocator.alloc(u32, n);
-        errdefer allocator.free(lo);
-        const hi = try allocator.alloc(u32, n);
-        errdefer allocator.free(hi);
-        var i: usize = 0;
-        while (i < n) : (i += 1) {
-            const mt = main_toks[i];
-            const s = if (mt < starts_t.len) starts_t[mt] else 0;
-            lo[i] = s;
-            const et = if (i < self.node_end_toks.len) self.node_end_toks[i] else mt;
-            hi[i] = if (et < starts_t.len) starts_t[et] + lens_t[et] else s;
-            if (hi[i] < lo[i]) hi[i] = lo[i];
-        }
-        // Fold each node's span into its parent (parent index > child index).
-        i = 0;
-        while (i < n) : (i += 1) {
-            if (i >= self.parents.len) break;
-            const p = self.parents[i];
-            if (p == parent_none or p >= n) continue;
-            if (lo[i] < lo[p]) lo[p] = lo[i];
-            if (hi[i] > hi[p]) hi[p] = hi[i];
-        }
-        return .{ .start = lo, .end = hi };
-    }
 };
-
-const parent_none: u32 = std.math.maxInt(u32);
 
 // ── Helpers ────────────────────────────────────────────────
 
