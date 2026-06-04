@@ -159,6 +159,9 @@ pub const SemanticAnalyzer = struct {
         /// functions). Off by default — consumers with their own no-redeclare
         /// rule (lint) opt out; spec-conformance callers opt in.
         diagnose_redeclare: bool = false,
+        /// Whether Annex B extensions are active.  When false, duplicate plain
+        /// FunctionDeclarations in blocks are always errors (no B.3.3.4 exemption).
+        annex_b: bool = true,
     };
 
     /// Analyze an AST that was parsed with scope-event emission enabled.
@@ -207,6 +210,7 @@ pub const SemanticAnalyzer = struct {
             .skip_ref_ranges = !opts.build_ref_ranges,
             .globals = opts.globals,
             .diagnose_redeclare = opts.diagnose_redeclare,
+            .annex_b = opts.annex_b,
         };
         var result = if (opts.need_cfg)
             try event_resolver.resolveFull(allocator, ast, ast.scope_events, ropts)

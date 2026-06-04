@@ -148,6 +148,9 @@ pub const Options = struct {
     /// Emit redeclaration diagnostics (same-scope duplicate detection).
     /// Off by default in the PoC — enable when replacing semantic.zig.
     diagnose_redeclare: bool = false,
+    /// Whether Annex B extensions are active.  When false, duplicate plain
+    /// FunctionDeclarations in blocks are always errors (no B.3.3.4 exemption).
+    annex_b: bool = true,
     /// Skip reference resolution inner scope-chain walk.  Bench-only.
     skip_resolve: bool = false,
     /// Skip buildRefRanges (the counting sort that groups references by symbol).
@@ -1241,7 +1244,7 @@ fn resolveFullImpl(
     // Duplicate-binding early-errors (opt-in). Only meaningful when the scope
     // tree + symbol table were built (phase != .cfg_only).
     const redeclare_diags: []Diagnostic = if (do_scope and opts.diagnose_redeclare)
-        try checkRedeclarations(allocator, sa, ast, &symbols, &scopes)
+        try checkRedeclarations(allocator, sa, ast, &symbols, &scopes, opts)
     else
         &.{};
 
@@ -1402,6 +1405,7 @@ fn checkRedeclarations(
     ast: *const Ast,
     symbols: *const SymbolTable,
     scopes: *const ScopeTree,
+    opts: Options,
 ) ![]Diagnostic {
     const n = symbols.count();
     if (n == 0) return &.{};
@@ -1586,7 +1590,7 @@ fn checkRedeclarations(
                 const is_async = ft > 0 and tok_tags[ft - 1] == .kw_async;
                 break :blk !(is_gen or is_async);
             };
-            const ok = plain and !scopes.getFlags(sid).strict_mode; // AnnexB-dup-eligible
+            const ok = plain and !scopes.getFlags(sid).strict_mode and opts.annex_b; // AnnexB-dup-eligible
             const gop = try fmap.getOrPut(sa, .{ .scope = sid.toInt(), .name = names[fi] });
             if (!gop.found_existing) {
                 gop.value_ptr.* = ok;
@@ -1652,6 +1656,70 @@ fn checkRedeclarations(
                         .span = ast.nodeSpan(decls[bi]),
                         .severity = .@"error",
                     });
+                }
+            }
+        }
+    }
+
+    // ── Pass 5: destructuring catch param vs var in catch body ───────────────
+    // `catch ([a]) { var a; }` is a SyntaxError (B.3.5 exemption applies only to
+    // simple-identifier catch params, not patterns). For each catch_clause scope
+    // whose catch param is a pattern, flag any `var` declared within the catch
+    // clause's byte span that matches a catch param bound name.
+    {
+        const node_tags = ast.nodes.items(.tag);
+        const node_data = ast.nodes.items(.data);
+        const node_end = ast.node_end_toks;
+        var cpi: u32 = 0;
+        while (cpi < n) : (cpi += 1) {
+            if (kinds[cpi] != .catch_param) continue;
+            const csid = scope_ids[cpi];
+            if (!csid.isValid() or scopes.kind(csid) != .catch_clause) continue;
+            const catch_node = scopes.nodeId(csid);
+            if (catch_node == .none or catch_node.toInt() >= node_data.len) continue;
+            // catch_clause.lhs = the catch param node
+            const cp_node = node_data[catch_node.toInt()].lhs;
+            if (cp_node == .none or cp_node.toInt() >= node_tags.len) continue;
+            // B.3.5: simple identifier catch param is allowed to have a same-named
+            // var in the catch body (sloppy mode). Pattern catch params always error.
+            if (node_tags[cp_node.toInt()] == .identifier) continue;
+            // Pattern catch param — check for var conflicts within the catch clause's span.
+            const catch_span = ast.nodeSpan(catch_node);
+            const catch_end_tok = node_end[catch_node.toInt()];
+            const catch_end = if (catch_end_tok < ast.tokens.items(.start).len)
+                ast.tokens.items(.start)[catch_end_tok] + ast.tokens.items(.len)[catch_end_tok]
+            else
+                catch_span.end;
+            // Find the enclosing var-scope of this catch clause.
+            const enclosing_var_scope = blk: {
+                var s = scopes.parent(csid);
+                while (s.isValid()) {
+                    switch (scopes.kind(s)) {
+                        .global, .module, .function, .static_block, .class_field_initializer, .arrow_function => break :blk s,
+                        else => s = scopes.parent(s),
+                    }
+                }
+                break :blk s;
+            };
+            if (!enclosing_var_scope.isValid()) continue;
+            var vj: u32 = 0;
+            while (vj < n) : (vj += 1) {
+                if (kinds[vj] != .@"var") continue;
+                if (scope_ids[vj] != enclosing_var_scope) continue;
+                const var_pos = ast.nodeSpan(decls[vj]).start;
+                if (var_pos < catch_span.start or var_pos > catch_end) continue;
+                // Check if this var name matches any catch_param in this scope.
+                var pk: u32 = 0;
+                while (pk < n) : (pk += 1) {
+                    if (kinds[pk] != .catch_param) continue;
+                    if (scope_ids[pk] != csid) continue;
+                    if (!std.mem.eql(u8, names[pk], names[vj])) continue;
+                    try diags.append(allocator, .{
+                        .message = "Identifier has already been declared",
+                        .span = ast.nodeSpan(decls[vj]),
+                        .severity = .@"error",
+                    });
+                    break;
                 }
             }
         }

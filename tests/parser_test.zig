@@ -348,55 +348,61 @@ test "parse expressions fixture" {
 }
 
 // ── Lex-Var Redeclaration Conflict Detection ─────────────
+// These are binding early-errors detected by semantic analysis (diagnose_redeclare).
 
-fn expectErrors(source: []const u8) !void {
-    var tree = try parseSource(source);
+fn expectRedeclErrors(source: []const u8) !void {
+    var lr = try Lexer.tokenize(testing.allocator, source);
+    defer lr.deinit(testing.allocator);
+    var tree = try Parser.parse(testing.allocator, source, lr.tokens.slice());
     defer tree.deinit(testing.allocator);
-    try testing.expect(tree.errors.len > 0);
+    var sem = try es_parser.semantic.SemanticAnalyzer.analyzeWithOptions(
+        testing.allocator, &tree, .{ .diagnose_redeclare = true });
+    defer sem.deinit(testing.allocator);
+    try testing.expect(tree.errors.len > 0 or sem.diagnostics.len > 0);
 }
 
 test "lex-var conflict: const then var" {
-    try expectErrors("{ const f = 0; var f }");
+    try expectRedeclErrors("{ const f = 0; var f }");
 }
 
 test "lex-var conflict: let then var" {
-    try expectErrors("{ let f; var f }");
+    try expectRedeclErrors("{ let f; var f }");
 }
 
 test "lex-var conflict: class then var" {
-    try expectErrors("{ class f {} var f }");
+    try expectRedeclErrors("{ class f {} var f }");
 }
 
 test "lex-var conflict: async fn then var" {
-    try expectErrors("{ async function f() {} var f }");
+    try expectRedeclErrors("{ async function f() {} var f }");
 }
 
 test "lex-var conflict: var then const" {
-    try expectErrors("{ var f; const f = 0 }");
+    try expectRedeclErrors("{ var f; const f = 0 }");
 }
 
 test "lex-var conflict nested block" {
-    try expectErrors("{ let f; { var f } }");
+    try expectRedeclErrors("{ let f; { var f } }");
 }
 
 test "lex-var conflict nested if" {
-    try expectErrors("{ let f; if (x) { var f } }");
+    try expectRedeclErrors("{ let f; if (x) { var f } }");
 }
 
 test "lex-var conflict nested for" {
-    try expectErrors("{ let f; for (;;) { var f } }");
+    try expectRedeclErrors("{ let f; for (;;) { var f } }");
 }
 
 test "switch lex-var conflict" {
-    try expectErrors("switch (0) { case 1: const f = 0; default: var f }");
+    try expectRedeclErrors("switch (0) { case 1: const f = 0; default: var f }");
 }
 
 test "switch lex-lex conflict across cases" {
-    try expectErrors("switch (0) { case 1: async function f() {} default: const f = 0 }");
+    try expectRedeclErrors("switch (0) { case 1: async function f() {} default: const f = 0 }");
 }
 
 test "switch lex-lex same case" {
-    try expectErrors("switch (0) { case 1: let f; const f = 0 }");
+    try expectRedeclErrors("switch (0) { case 1: let f; const f = 0 }");
 }
 
 test "no false positive: var-var in block" {
@@ -406,9 +412,7 @@ test "no false positive: var-var in block" {
 }
 
 test "lex-var conflict: fn-decl and var in same block is SyntaxError" {
-    var tree = try parseSource("{ function f() {} var f }");
-    defer tree.deinit(testing.allocator);
-    try testing.expect(tree.errors.len > 0);
+    try expectRedeclErrors("{ function f() {} var f }");
 }
 
 test "no false positive: var in outer let in inner block" {
@@ -551,10 +555,8 @@ test "annexB: sloppy if-body function does not conflict with outer let" {
 }
 
 test "annexB exemption does not mask real lexical/var conflicts" {
-    // A genuine let-vs-var clash at top level is still an error.
-    var a = try parseSource("let g = 1;\nvar g;\n");
-    defer a.deinit(testing.allocator);
-    try testing.expect(a.errors.len >= 1);
+    // A genuine let-vs-var clash at top level is still an error (semantic).
+    try expectRedeclErrors("let g = 1;\nvar g;\n");
 }
 
 // ── TS: a statement-level decorator must decorate a class (TS1146) ──────────

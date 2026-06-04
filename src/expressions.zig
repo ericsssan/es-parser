@@ -7053,17 +7053,7 @@ fn parseBlockBodyWithStrictChecks(p: *Parser, params: ?SubRange, name: NodeIndex
         }
     }
 
-    const prev_fn_body = p.is_fn_body_block;
-    p.is_fn_body_block = true;
-    defer p.is_fn_body_block = prev_fn_body;
     const body = try p.parseBlock();
-    // Check that no formal parameter name is lex-re-declared in the function body.
-    // Applies to: methods, generators, async functions, and strict-mode functions.
-    if (params) |pr| {
-        if (p.in_method or p.in_generator or p.in_async or p.in_strict) {
-            try p.checkParamBodyLexConflict(pr, body);
-        }
-    }
     return body;
 }
 

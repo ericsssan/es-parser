@@ -224,409 +224,6 @@ fn isLabelledFunction(p: *const Parser, node: NodeIndex) bool {
     return isLabelledFunction(p, inner);
 }
 
-/// Check that bound names from a lex declaration in a for head (let/const) do not
-/// conflict with var-declared names in the body. Emits a diagnostic for each conflict.
-fn checkForLexVarConflict(self: *Parser, lex_decl: NodeIndex, body: NodeIndex) Error!void {
-    if (lex_decl == .none or body == .none or self.is_ts) return;
-    const tag = self.node_tags_ptr[lex_decl.toInt()];
-    if (tag != .let_decl and tag != .const_decl) return;
-    var lex_buf: [32][]const u8 = undefined;
-    var lex_n: usize = 0;
-    collectLexNamesInNode(self, lex_decl, &lex_buf, &lex_n);
-    if (lex_n == 0) return;
-    var var_buf: [128][]const u8 = undefined;
-    var var_n: usize = 0;
-    collectVarNamesInNode(self, body, &var_buf, &var_n);
-    for (lex_buf[0..lex_n]) |lex_name| {
-        for (var_buf[0..var_n]) |var_name| {
-            if (std.mem.eql(u8, lex_name, var_name)) {
-                try self.emitDiagnostic(self.currentSpan(),
-                    "Identifier '{s}' has already been declared", .{lex_name});
-                break;
-            }
-        }
-    }
-}
-
-/// Check that bound names in a for-in/of lex declaration are unique.
-fn checkForBindingNamesDup(self: *Parser, lex_decl: NodeIndex) Error!void {
-    if (lex_decl == .none or self.is_ts) return;
-    const tag = self.node_tags_ptr[lex_decl.toInt()];
-    if (tag != .let_decl and tag != .const_decl) return;
-    var buf: [32][]const u8 = undefined;
-    var n: usize = 0;
-    collectLexNamesInNode(self, lex_decl, &buf, &n);
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        var j: usize = i + 1;
-        while (j < n) : (j += 1) {
-            if (std.mem.eql(u8, buf[i], buf[j])) {
-                try self.emitDiagnostic(self.currentSpan(),
-                    "Identifier '{s}' has already been declared", .{buf[i]});
-                break;
-            }
-        }
-    }
-}
-
-/// Check that no name in catch_param's BoundNames appears in the LexicallyDeclaredNames
-/// of the catch body block (top-level only, not nested blocks). Also checks for duplicate
-/// names within catch_param itself.
-fn checkCatchBindingConflicts(self: *Parser, catch_param: NodeIndex, catch_body: NodeIndex) Error!void {
-    if (self.is_ts) return;
-    // Check for duplicate names within the catch parameter itself.
-    if (catch_param != .none) {
-        var dup_buf: [16][]const u8 = undefined;
-        var dup_n: usize = 0;
-        collectBindingName(self, catch_param, &dup_buf, &dup_n);
-        var i: usize = 0;
-        while (i < dup_n) : (i += 1) {
-            var j: usize = i + 1;
-            while (j < dup_n) : (j += 1) {
-                if (std.mem.eql(u8, dup_buf[i], dup_buf[j])) {
-                    try self.emitDiagnostic(self.currentSpan(),
-                        "Identifier '{s}' has already been declared", .{dup_buf[i]});
-                    return error.ParseError;
-                }
-            }
-        }
-    }
-    // Check catch param names against lex names declared at the TOP LEVEL of the catch body.
-    // Nested block contents are NOT included (LexicallyDeclaredNames is not transitive).
-    if (catch_param == .none or catch_body == .none) return;
-    const body_idx = catch_body.toInt();
-    if (body_idx >= self.nodes.len) return;
-    if (self.node_tags_ptr[body_idx] != .block_stmt) return;
-    const body_data = self.node_data_ptr[body_idx];
-    var param_buf: [16][]const u8 = undefined;
-    var param_n: usize = 0;
-    collectBindingName(self, catch_param, &param_buf, &param_n);
-    if (param_n == 0) return;
-    var lex_buf: [64][]const u8 = undefined;
-    var lex_n: usize = 0;
-    collectLexNamesInRange(self, body_data.lhs.toInt(), body_data.rhs.toInt(), &lex_buf, &lex_n);
-    for (param_buf[0..param_n]) |pname| {
-        for (lex_buf[0..lex_n]) |lname| {
-            if (std.mem.eql(u8, pname, lname)) {
-                try self.emitDiagnostic(self.currentSpan(),
-                    "Identifier '{s}' has already been declared", .{pname});
-                return error.ParseError;
-            }
-        }
-    }
-    // For destructuring catch patterns (array/object), var declarations inside the
-    // catch block also conflict. AnnexB B.3.5 exemption only applies to simple
-    // identifier catch bindings, not patterns.
-    const cp_tag = self.node_tags_ptr[catch_param.toInt()];
-    const is_pattern = cp_tag == .array_pattern or cp_tag == .object_pattern;
-    if (is_pattern) {
-        var var_buf: [64][]const u8 = undefined;
-        var var_n: usize = 0;
-        collectVarNamesInRange(self, body_data.lhs.toInt(), body_data.rhs.toInt(), &var_buf, &var_n);
-        for (param_buf[0..param_n]) |pname| {
-            for (var_buf[0..var_n]) |vname| {
-                if (std.mem.eql(u8, pname, vname)) {
-                    try self.emitDiagnostic(self.currentSpan(),
-                        "Identifier '{s}' has already been declared", .{pname});
-                    return error.ParseError;
-                }
-            }
-        }
-    }
-}
-
-/// Collect names from var_decl nodes in extra_data[start..end].
-/// Recurses into nested non-function blocks. Stops at function/class scope boundaries.
-fn collectVarNamesInRange(
-    p: *const Parser,
-    start: usize,
-    end: usize,
-    buf: [][]const u8,
-    count: *usize,
-) void {
-    if (start >= end or end > p.extra_data.items.len) return;
-    for (p.extra_data.items[start..end]) |raw| {
-        if (count.* >= buf.len) return;
-        if (raw == 0) continue; // skip .none (root sentinel) – though 0 = root
-        const node: NodeIndex = @enumFromInt(raw);
-        // node index 0 = root, which is never a statement in a block
-        if (node == .none) continue;
-        collectVarNamesInNode(p, node, buf, count);
-    }
-}
-
-fn collectVarNamesInNode(
-    p: *const Parser,
-    node: NodeIndex,
-    buf: [][]const u8,
-    count: *usize,
-) void {
-    if (node == .none or count.* >= buf.len) return;
-    const idx = node.toInt();
-    if (idx >= p.nodes.len) return;
-    const tag = p.node_tags_ptr[idx];
-    const data = p.node_data_ptr[idx];
-
-    switch (tag) {
-        .var_decl => {
-            // lhs/rhs are SubRange start/end (direct indices into extra_data)
-            const s = data.lhs.toInt();
-            const e = data.rhs.toInt();
-            if (s <= e and e <= p.extra_data.items.len) {
-                for (p.extra_data.items[s..e]) |decl_raw| {
-                    if (count.* >= buf.len) return;
-                    if (decl_raw == 0) continue;
-                    const decl: NodeIndex = @enumFromInt(decl_raw);
-                    if (decl == .none) continue;
-                    const di = decl.toInt();
-                    if (di >= p.nodes.len) continue;
-                    const binding = p.node_data_ptr[di].lhs;
-                    collectBindingName(p, binding, buf, count);
-                }
-            }
-        },
-        .block_stmt => {
-            // lhs/rhs are SubRange start/end (direct indices into extra_data)
-            collectVarNamesInRange(p, data.lhs.toInt(), data.rhs.toInt(), buf, count);
-        },
-        .if_stmt => {
-            // lhs = condition (expr, skip), rhs = consequent (statement)
-            collectVarNamesInNode(p, data.rhs, buf, count);
-        },
-        .if_else_stmt => {
-            // lhs = condition, rhs = extra index to IfData { consequent, alternate }
-            const extra_idx = data.rhs.toInt();
-            if (extra_idx + 1 < p.extra_data.items.len) {
-                const consequent: NodeIndex = @enumFromInt(p.extra_data.items[extra_idx]);
-                const alternate: NodeIndex = @enumFromInt(p.extra_data.items[extra_idx + 1]);
-                collectVarNamesInNode(p, consequent, buf, count);
-                collectVarNamesInNode(p, alternate, buf, count);
-            }
-        },
-        .while_stmt => {
-            // lhs = condition (expr, skip), rhs = body
-            collectVarNamesInNode(p, data.rhs, buf, count);
-        },
-        .do_while_stmt => {
-            // lhs = body, rhs = condition (expr, skip)
-            collectVarNamesInNode(p, data.lhs, buf, count);
-        },
-        .for_stmt => {
-            // lhs = extra index to ForData { init, condition, update }, rhs = body
-            // ForData: extra_data[lhs] = init, [lhs+1] = condition, [lhs+2] = update
-            const extra_idx = data.lhs.toInt();
-            if (extra_idx < p.extra_data.items.len) {
-                // init may be a var_decl
-                const init_node: NodeIndex = @enumFromInt(p.extra_data.items[extra_idx]);
-                collectVarNamesInNode(p, init_node, buf, count);
-            }
-            // body
-            collectVarNamesInNode(p, data.rhs, buf, count);
-        },
-        .for_in_stmt, .for_of_stmt, .for_await_of_stmt => {
-            // lhs = extra index to ForInOfData { binding, expr, body }
-            const extra_idx = data.lhs.toInt();
-            if (extra_idx + 2 < p.extra_data.items.len) {
-                const binding_node: NodeIndex = @enumFromInt(p.extra_data.items[extra_idx]);
-                const body_node: NodeIndex = @enumFromInt(p.extra_data.items[extra_idx + 2]);
-                // binding may be var_decl
-                collectVarNamesInNode(p, binding_node, buf, count);
-                collectVarNamesInNode(p, body_node, buf, count);
-            }
-        },
-        .labeled_stmt => {
-            // lhs = statement
-            collectVarNamesInNode(p, data.lhs, buf, count);
-        },
-        .with_stmt => {
-            // lhs = object expr (skip), rhs = body
-            collectVarNamesInNode(p, data.rhs, buf, count);
-        },
-        .try_stmt => {
-            // lhs = block, rhs = extra index to TryData { catch_node, finally_body }
-            collectVarNamesInNode(p, data.lhs, buf, count);
-            const extra_idx = data.rhs.toInt();
-            if (extra_idx + 1 < p.extra_data.items.len) {
-                const catch_node: NodeIndex = @enumFromInt(p.extra_data.items[extra_idx]);
-                const finally_body: NodeIndex = @enumFromInt(p.extra_data.items[extra_idx + 1]);
-                // catch_clause: lhs = param (skip), rhs = body block
-                if (catch_node != .none) {
-                    const ci = catch_node.toInt();
-                    if (ci < p.nodes.len and p.node_tags_ptr[ci] == .catch_clause) {
-                        collectVarNamesInNode(p, p.node_data_ptr[ci].rhs, buf, count);
-                    }
-                }
-                collectVarNamesInNode(p, finally_body, buf, count);
-            }
-        },
-        .switch_stmt => {
-            // lhs = discriminant (skip), rhs = extra index to SubRange of cases
-            const extra_idx = data.rhs.toInt();
-            if (extra_idx + 1 < p.extra_data.items.len) {
-                const case_start = p.extra_data.items[extra_idx];
-                const case_end = p.extra_data.items[extra_idx + 1];
-                if (case_start <= case_end and case_end <= p.extra_data.items.len) {
-                    for (p.extra_data.items[case_start..case_end]) |case_raw| {
-                        if (count.* >= buf.len) return;
-                        const case_node: NodeIndex = @enumFromInt(case_raw);
-                        if (case_node == .none) continue;
-                        const ci = case_node.toInt();
-                        if (ci >= p.nodes.len) continue;
-                        const ctag = p.node_tags_ptr[ci];
-                        const cdata = p.node_data_ptr[ci];
-                        // switch_case/switch_default: rhs = extra index to SubRange of stmts
-                        if (ctag == .switch_case or ctag == .switch_default) {
-                            const stmt_extra_idx = cdata.rhs.toInt();
-                            if (stmt_extra_idx + 1 < p.extra_data.items.len) {
-                                const ss = p.extra_data.items[stmt_extra_idx];
-                                const se = p.extra_data.items[stmt_extra_idx + 1];
-                                collectVarNamesInRange(p, ss, se, buf, count);
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        // Stop at function/class scope boundaries — vars inside are NOT in block scope
-        .fn_decl, .fn_expr,
-        .async_fn_decl, .async_fn_expr,
-        .generator_fn_decl, .generator_fn_expr,
-        .async_generator_fn_decl, .async_generator_fn_expr,
-        .class_decl, .class_expr,
-        .arrow_fn, .async_arrow_fn,
-        => {},
-        // All other nodes (expressions, declarations etc.) — skip
-        else => {},
-    }
-}
-
-/// Collect lexically-declared names from top-level statements in extra_data[start..end].
-/// "Lex" means: let_decl, const_decl, class_decl, fn_decl, async_fn_decl,
-/// generator_fn_decl, async_generator_fn_decl.
-/// Only collects at the TOP level (does NOT recurse into nested blocks).
-fn collectLexNamesInRange(
-    p: *const Parser,
-    start: usize,
-    end: usize,
-    buf: [][]const u8,
-    count: *usize,
-) void {
-    if (start >= end or end > p.extra_data.items.len) return;
-    for (p.extra_data.items[start..end]) |raw| {
-        if (count.* >= buf.len) return;
-        if (raw == 0) continue;
-        const node: NodeIndex = @enumFromInt(raw);
-        if (node == .none) continue;
-        collectLexNamesInNode(p, node, buf, count);
-    }
-}
-
-fn collectLexNamesInNode(
-    p: *const Parser,
-    node: NodeIndex,
-    buf: [][]const u8,
-    count: *usize,
-) void {
-    if (node == .none or count.* >= buf.len) return;
-    const idx = node.toInt();
-    if (idx >= p.nodes.len) return;
-    const tag = p.node_tags_ptr[idx];
-    const data = p.node_data_ptr[idx];
-
-    switch (tag) {
-        .let_decl, .const_decl => {
-            // lhs/rhs = SubRange start/end (declarator nodes)
-            const s = data.lhs.toInt();
-            const e = data.rhs.toInt();
-            if (s <= e and e <= p.extra_data.items.len) {
-                for (p.extra_data.items[s..e]) |decl_raw| {
-                    if (count.* >= buf.len) return;
-                    if (decl_raw == 0) continue;
-                    const decl: NodeIndex = @enumFromInt(decl_raw);
-                    if (decl == .none) continue;
-                    const di = decl.toInt();
-                    if (di >= p.nodes.len) continue;
-                    const binding = p.node_data_ptr[di].lhs;
-                    collectBindingName(p, binding, buf, count);
-                }
-            }
-        },
-        .class_decl => {
-            // lhs = extra index to ClassData { name, ... }
-            const extra_idx = data.lhs.toInt();
-            if (extra_idx < p.extra_data.items.len) {
-                const name_node: NodeIndex = @enumFromInt(p.extra_data.items[extra_idx]);
-                if (name_node != .none) {
-                    const ni = name_node.toInt();
-                    if (ni < p.nodes.len) {
-                        const tok = p.node_main_token_ptr[ni];
-                        const s = p.tok_starts_ptr[tok];
-                        const l = p.tok_lens_ptr[tok];
-                        if (s + l <= p.source.len and count.* < buf.len) {
-                            buf[count.*] = p.source[s .. s + l];
-                            count.* += 1;
-                        }
-                    }
-                }
-            }
-        },
-        .fn_decl, .async_fn_decl, .generator_fn_decl, .async_generator_fn_decl => {
-            // lhs = extra index to FnData { name, params, params_end, body, ... }
-            const extra_idx = data.lhs.toInt();
-            if (extra_idx < p.extra_data.items.len) {
-                const name_node: NodeIndex = @enumFromInt(p.extra_data.items[extra_idx]);
-                if (name_node != .none) {
-                    const ni = name_node.toInt();
-                    if (ni < p.nodes.len) {
-                        const tok = p.node_main_token_ptr[ni];
-                        const s = p.tok_starts_ptr[tok];
-                        const l = p.tok_lens_ptr[tok];
-                        if (s + l <= p.source.len and count.* < buf.len) {
-                            buf[count.*] = p.source[s .. s + l];
-                            count.* += 1;
-                        }
-                    }
-                }
-            }
-        },
-        else => {},
-    }
-}
-
-/// Collect ONLY plain FunctionDeclaration (fn_decl) names from a statement range.
-/// Used for AnnexB B.3.3.4/B.3.3.5: in sloppy mode, duplicate lex names are
-/// allowed in block/switch when all duplicates come from FunctionDeclarations.
-fn collectFnDeclNamesInRange(
-    p: *const Parser,
-    start: usize,
-    end: usize,
-    buf: [][]const u8,
-    count: *usize,
-) void {
-    if (start >= end or end > p.extra_data.items.len) return;
-    for (p.extra_data.items[start..end]) |raw| {
-        if (count.* >= buf.len) return;
-        if (raw == 0) continue;
-        const node: NodeIndex = @enumFromInt(raw);
-        if (node == .none) continue;
-        const idx = node.toInt();
-        if (idx >= p.nodes.len) continue;
-        if (p.node_tags_ptr[idx] != .fn_decl) continue;
-        const extra_idx = p.node_data_ptr[idx].lhs.toInt();
-        if (extra_idx >= p.extra_data.items.len) continue;
-        const name_node: NodeIndex = @enumFromInt(p.extra_data.items[extra_idx]);
-        if (name_node == .none) continue;
-        const ni = name_node.toInt();
-        if (ni >= p.nodes.len) continue;
-        const tok = p.node_main_token_ptr[ni];
-        const s = p.tok_starts_ptr[tok];
-        const l = p.tok_lens_ptr[tok];
-        if (s + l <= p.source.len) {
-            buf[count.*] = p.source[s .. s + l];
-            count.* += 1;
-        }
-    }
-}
 
 /// Recursive descent parser for JavaScript/ES2024.
 ///
@@ -737,23 +334,7 @@ pub const Parser = struct {
     /// Count of elided scope_open events emitted during parse. Zero means the
     /// compaction pass in parseInternal can be skipped entirely.
     elided_scope_count: u32 = 0,
-    /// Set to true when any block-level declaration (let/const/class/function_decl)
-    /// is emitted directly inside the current parseBlockStatement call. Saved and
-    /// restored at each parseBlockStatement entry so it reflects only the current
-    /// block's direct children. When false after parsing a block, the scope_open
-    /// for that block can be elided and the expensive event-scan skipped.
-    block_has_lexical_decl: bool = false,
-    /// Nesting depth relative to the innermost parseBlockStatement, used for
-    /// incremental dup-detection (JS mode only). Set to -1 at parseBlockStatement
-    /// entry so the block's own scope_open increments it to 0. emitScopeOpen
-    /// increments, emitScopeClose decrements; parseBlockStatement saves/restores.
-    block_dup_depth: i32 = 0,
-    /// Flat buffer of block-level declares for the dup-detection scan. Each
-    /// entry encodes (main_tok_idx << 32) | bk. parseBlockStatement uses a
-    /// [saved_len..] window into this slice as its own set of depth-0 declares,
-    /// then shrinks back to saved_len on exit (stack-of-ranges pattern).
-    block_decl_scratch: std.ArrayListUnmanaged(u64) = .empty,
-    /// Indices of object_literal nodes created during parsing (JS mode only).
+/// Indices of object_literal nodes created during parsing (JS mode only).
     /// The post-parse duplicate-__proto__ scan iterates this list instead of
     /// scanning ALL nodes — reduces an O(total_nodes) pass to O(object_literals).
     proto_check_nodes: std.ArrayListUnmanaged(u32) = .empty,
@@ -837,10 +418,6 @@ pub const Parser = struct {
     in_strict: bool,
     in_block: bool,
     in_class_field: bool,
-    /// One-shot flag: next parseBlock call is a FunctionBody StatementList.
-    /// FunctionBody uses TopLevelLexicallyDeclaredNames — FunctionDeclarations
-    /// don't participate in the lex/lex redecl check there.
-    is_fn_body_block: bool,
     in_constructor: bool,
     /// Set when the lexically-enclosing class has an `extends` clause.
     /// Required for `super(...)` calls in the constructor.
@@ -1058,7 +635,6 @@ pub const Parser = struct {
             .in_strict = is_strict_mode,
             .in_block = false,
             .in_class_field = false,
-            .is_fn_body_block = false,
             .in_constructor = false,
             .in_method = false,
             .in_conditional_extends = false,
@@ -1083,7 +659,6 @@ pub const Parser = struct {
         defer p.exported_names.deinit(allocator);
         defer p.pending_export_local_toks.deinit(allocator);
         defer p.module_decl_names.deinit(allocator);
-        defer p.block_decl_scratch.deinit(allocator);
         defer p.proto_check_nodes.deinit(allocator);
         defer p.param_names_scratch.deinit(allocator);
         defer if (p.ts_label_stack) |s| allocator.destroy(s);
@@ -1161,10 +736,6 @@ pub const Parser = struct {
             // garbage, and reading an unwritten entry as an event index then
             // wild-accesses the event stream (a ReleaseFast-only crash).
             @memset(p.ref_event_idx, 0);
-        }
-        // Pre-size the incremental dup-detection scratch (JS mode only).
-        if (p.emit_scope_events and !p.is_ts) {
-            try p.block_decl_scratch.ensureTotalCapacity(allocator, 64);
         }
 
         // Streaming mode: block until the producer publishes the first batch
@@ -1607,7 +1178,6 @@ pub const Parser = struct {
             ._pad = if (self.in_strict) @as(u16, 1) else 0,
             .node = @intFromEnum(node),
         });
-        if (!self.is_ts) self.block_dup_depth += 1;
         return idx;
     }
 
@@ -1627,7 +1197,6 @@ pub const Parser = struct {
             .aux = 0,
             .node = @intFromEnum(node),
         });
-        if (!self.is_ts) self.block_dup_depth -= 1;
     }
 
     pub inline fn emitDeclare(self: *Parser, kind: BindingKindU8, node: NodeIndex) !void {
@@ -1637,23 +1206,6 @@ pub const Parser = struct {
             .aux = @intFromEnum(kind),
             .node = @intFromEnum(node),
         });
-        // Track block-level declarations for scope-elision fast path in parseBlockStatement.
-        // Kinds that are always emitted inside their own scope (parameter, catch_param,
-        // fn_expr_name, class_expr_name, type_param) are not block-level. var doesn't keep
-        // block scope alive.  Everything else (let/const/class_decl/function_decl/TS decls)
-        // prevents scope elision for the current block.
-        switch (kind) {
-            .@"var", .parameter, .catch_param, .fn_expr_name, .class_expr_name, .type_param => {},
-            else => {
-                // In JS mode, record depth-0 declares for incremental dup detection.
-                if (!self.is_ts and self.block_dup_depth == 0) {
-                    const main_tok = self.node_main_token_ptr[@intFromEnum(node)];
-                    const entry: u64 = (@as(u64, main_tok) << 32) | @as(u64, @intFromEnum(kind));
-                    try self.block_decl_scratch.append(self.gpa, entry);
-                }
-                self.block_has_lexical_decl = true;
-            },
-        }
     }
 
     /// Given a `.declarator` node, emit a declare event for its binding.
@@ -2621,100 +2173,7 @@ pub const Parser = struct {
             }
         }
 
-        // Top-level lexical redeclaration check (mirror of block-scope logic).
-        if (self.emit_scope_events) {
-            const evs = self.ev_ptr[0..self.ev_len][program_scope_ev + 1 ..];
-            var depth: i32 = 0;
-            const Entry = struct { name: []const u8, kind: BindingKindU8, fn_flavor: u32 };
-            var names_buf: [128]Entry = undefined;
-            var names_n: usize = 0;
-            var var_names_buf: [128][]const u8 = undefined;
-            var var_names_n: usize = 0;
-            const allow_fn_dup = !self.is_module and !self.in_strict and self.annex_b;
-            for (evs) |ev| {
-                // Guard against corrupt events: reading past the live event count
-                // can land on uninitialized memory (an arena/GPA hands back dirty
-                // reused blocks; only page_allocator zero-fills). Skip an event
-                // whose kind byte isn't a valid EventKind OR whose node index is
-                // out of range — the latter otherwise feeds a garbage index into
-                // node_main_token_ptr[...] below → tok_starts_ptr[huge] → segfault
-                // (ReleaseFast only; the value is benign zero under zeroed pages).
-                const ev_kind_int = @intFromEnum(ev.kind);
-                if (ev_kind_int >= meta_compat.fieldCount(ScopeEventKind)) continue;
-                if (@as(usize, @intCast(ev.node)) >= self.nodes.len) continue;
-                switch (ev.kind) {
-                    .scope_open => if (ev.aux != @intFromEnum(ScopeKindU8.elided)) { depth += 1; },
-                    .scope_close => depth -= 1,
-                    .declare => if (depth == 0) {
-                        const bk: BindingKindU8 = @enumFromInt(ev.aux);
-                        // Collect var and function_decl names for lex-var conflict check.
-                        // In modules: var bindings conflict with lex bindings.
-                        // In scripts: var bindings AND function decls (which hoist as var)
-                        // conflict with lex bindings (let/const/class).
-                        // Annex B B.3.3 exemption: a sloppy function in an if/label body
-                        // (`function_decl_annex_b`) whose hoisted name would clash with a
-                        // lexical binding has that hoist suppressed and the early error
-                        // skipped — so it does not contribute a conflicting var-name.
-                        if (!self.is_ts and (bk == .@"var" or
-                            (!self.is_module and (bk == .function_decl or
-                                (bk == .function_decl_annex_b and !allow_fn_dup)))))
-                        {
-                            const vt = self.node_main_token_ptr[@intCast(ev.node)];
-                            const vs = self.tok_starts_ptr[vt];
-                            const vl = self.tok_lens_ptr[vt];
-                            if (vs + vl <= self.source.len and var_names_n < var_names_buf.len) {
-                                var_names_buf[var_names_n] = self.source[vs..vs + vl];
-                                var_names_n += 1;
-                            }
-                        }
-                        if (bk == .@"var" or bk == .parameter) continue;
-                        // Sloppy script top-level: function decls hoist as var-bindings;
-                        // any flavor pair coexists. Module: strict lexical check applies.
-                        if (!self.is_module and (bk == .function_decl or bk == .function_decl_annex_b)) continue;
-                        // TypeScript allows duplicate declarations (overloads, namespace merging).
-                        if (self.is_ts) continue;
-                        const main_tok_idx = self.node_main_token_ptr[@intCast(ev.node)];
-                        const tok_start = self.tok_starts_ptr[main_tok_idx];
-                        const tok_len = self.tok_lens_ptr[main_tok_idx];
-                        if (tok_start + tok_len > self.source.len) continue;
-                        const name = self.source[tok_start..tok_start + tok_len];
-                        const is_fn_decl = bk == .function_decl or bk == .function_decl_annex_b;
-                        const flavor: u32 = if (is_fn_decl) self.classifyFnDeclFlavor(main_tok_idx) else 0;
-                        var dup = false;
-                        for (names_buf[0..names_n]) |existing| {
-                            if (!std.mem.eql(u8, existing.name, name)) continue;
-                            const ex_is_fn = existing.kind == .function_decl or existing.kind == .function_decl_annex_b;
-                            if (allow_fn_dup and ex_is_fn and is_fn_decl
-                                and existing.fn_flavor == 0 and flavor == 0) continue;
-                            dup = true;
-                            break;
-                        }
-                        if (dup) {
-                            try self.emitDiagnostic(self.currentSpan(),
-                                "Identifier '{s}' has already been declared", .{name});
-                        } else if (names_n < names_buf.len) {
-                            names_buf[names_n] = .{ .name = name, .kind = bk, .fn_flavor = flavor };
-                            names_n += 1;
-                        }
-                    },
-                    else => {},
-                }
-            }
-            // Lex-vs-var conflict check for both script and module top level.
-            // Script: LexicallyDeclaredNames(ScriptBody) ∩ VarDeclaredNames(ScriptBody) must be empty.
-            // Module: LexicallyDeclaredNames(ModuleItemList) ∩ VarDeclaredNames(ModuleItemList) must be empty.
-            if (!self.is_ts and names_n > 0 and var_names_n > 0) {
-                for (names_buf[0..names_n]) |lex_entry| {
-                    for (var_names_buf[0..var_names_n]) |var_name| {
-                        if (std.mem.eql(u8, lex_entry.name, var_name)) {
-                            try self.emitDiagnostic(self.currentSpan(),
-                                "Identifier '{s}' has already been declared", .{lex_entry.name});
-                            break;
-                        }
-                    }
-                }
-            }
-        }
+
 
         // Duplicate __proto__ in object literals (not patterns) is a SyntaxError.
         // proto_check_nodes holds only the nodes created as object_literal during
@@ -3128,17 +2587,6 @@ pub const Parser = struct {
     /// Parse `{ ... }`.
     /// Classify a FunctionDeclaration's flavor by inspecting tokens around its name.
     /// Only plain (non-async, non-generator) FunctionDeclaration enjoys B.3.2 legacy semantics.
-    pub fn classifyFnDeclFlavor(self: *Parser, name_tok: TokenIndex) u32 {
-        // 0 = plain, 1 = async, 2 = generator, 3 = async-generator
-        var t: i64 = @intCast(name_tok);
-        while (t >= 0 and self.tokenTagAt(@intCast(t)) != .kw_function) : (t -= 1) {}
-        if (t < 0) return 0;
-        const fn_tok: TokenIndex = @intCast(t);
-        const is_gen = self.tokenExists(fn_tok + 1) and self.tokenTagAt(fn_tok + 1) == .asterisk;
-        const is_async = fn_tok > 0 and self.tokenTagAt(fn_tok - 1) == .kw_async;
-        return (if (is_async) @as(u32, 1) else 0) | (if (is_gen) @as(u32, 2) else 0);
-    }
-
     pub fn parseBlockStatement(self: *Parser) Error!NodeIndex {
         const lbrace = try self.expect(.l_brace);
         const prev_in_block = self.in_block;
@@ -3147,130 +2595,10 @@ pub const Parser = struct {
         const prev_in_case_clause = self.in_case_clause;
         self.in_case_clause = false;
         defer self.in_case_clause = prev_in_case_clause;
-        // Save and reset the block declaration flag. Nested parseBlockStatement calls
-        // save/restore their own copy, so this flag tracks only direct declarations in
-        // THIS block. After parsing, block_has_lexical_decl = true means keep the scope.
-        const prev_block_has_lexical_decl = self.block_has_lexical_decl;
-        self.block_has_lexical_decl = false;
-        defer self.block_has_lexical_decl = prev_block_has_lexical_decl;
-        // Incremental dup-detection: save depth/scratch-top so nested blocks can
-        // reuse the same buffer without interfering with this block's window.
-        // Set block_dup_depth = -1 so that the imminent emitScopeOpen brings it to 0,
-        // meaning only direct (depth-0) declares are recorded for THIS block.
-        const use_scratch = self.emit_scope_events and !self.is_ts;
-        const prev_block_dup_depth = self.block_dup_depth;
-        const block_decl_top = self.block_decl_scratch.items.len;
-        if (use_scratch) self.block_dup_depth = -1;
-        defer if (use_scratch) { self.block_dup_depth = prev_block_dup_depth; };
-        defer if (use_scratch) { self.block_decl_scratch.shrinkRetainingCapacity(block_decl_top); };
         const scope_ev = try self.emitScopeOpen(.block, .none);
-        // Capture FunctionBody flag BEFORE parsing inner statements — nested
-        // parseBlockStatement calls would otherwise consume it.
-        const is_fn_body = self.is_fn_body_block;
-        self.is_fn_body_block = false;
         const range = try self.parseStatementList(.r_brace);
         _ = try self.expect(.r_brace);
-
-        // Always keep block scopes so reference.from === variable.scope
-        // matches eslint-scope semantics. ESLint creates a block scope
-        // for every BlockStatement (ES6+) regardless of declarations;
-        // rules like prefer-const compare reference.from to declaration
-        // scope identity to decide whether a write counts as a
-        // reassignment in the same scope. Eliding empty block scopes
-        // collapsed bare-block writes onto the parent scope so the
-        // identity check spuriously matched.
-        //
-        // The duplicate-name dup check below still runs only when
-        // block_has_lexical_decl is set — that's a separate validation,
-        // unrelated to scope identity.
-        var keep_scope: bool = true;
-        if (self.emit_scope_events) {
-            const has_decl = self.block_has_lexical_decl;
-            if (!has_decl or self.is_ts) {
-                // No dup check needed — but we still keep the scope.
-                keep_scope = true;
-            } else {
-                // JS mode with block-level declarations: use incremental scratch
-                // for dup detection. block_decl_scratch.items[block_decl_top..] holds
-                // all depth-0 declares emitted during parseStatementList above —
-                // no event-stream scan needed.
-                keep_scope = true;
-                const Entry = struct { name: []const u8, kind: BindingKindU8, fn_flavor: u32 };
-                var names_buf: [64]Entry = undefined;
-                var names_n: usize = 0;
-                const allow_fn_dup = !self.is_module and !self.in_strict and self.annex_b;
-                for (self.block_decl_scratch.items[block_decl_top..]) |scratch_entry| {
-                    const main_tok_idx: TokenIndex = @truncate(scratch_entry >> 32);
-                    const bk: BindingKindU8 = @enumFromInt(@as(u8, @truncate(scratch_entry)));
-                    // FunctionBody: function decls skip redecl check (TopLevelLexicallyDeclaredNames).
-                    if (is_fn_body and (bk == .function_decl or bk == .function_decl_annex_b)) continue;
-                    const tok_start = self.tok_starts_ptr[main_tok_idx];
-                    const tok_len = self.tok_lens_ptr[main_tok_idx];
-                    if (tok_start + tok_len > self.source.len) continue;
-                    const name = self.source[tok_start..tok_start + tok_len];
-                    const flavor: u32 = if (bk == .function_decl or bk == .function_decl_annex_b) self.classifyFnDeclFlavor(main_tok_idx) else 0;
-                    var dup = false;
-                    for (names_buf[0..names_n]) |existing| {
-                        if (!std.mem.eql(u8, existing.name, name)) continue;
-                        // B.3.3: in sloppy script, only plain FunctionDeclaration pairs are allowed.
-                        if (allow_fn_dup and (existing.kind == .function_decl or existing.kind == .function_decl_annex_b) and
-                            (bk == .function_decl or bk == .function_decl_annex_b)
-                            and existing.fn_flavor == 0 and flavor == 0) continue;
-                        // AnnexB B.3.2.1: in sloppy mode, when fn-decl nested in
-                        // IfStatement/LabelledStatement body conflicts with prior
-                        // let/const/class at the same block scope, the AnnexB
-                        // extension is "not applied" — no early error.
-                        if (allow_fn_dup and bk == .function_decl_annex_b and
-                            (existing.kind == .let or existing.kind == .@"const" or existing.kind == .class_decl))
-                        {
-                            continue;
-                        }
-                        if (allow_fn_dup and existing.kind == .function_decl_annex_b and
-                            (bk == .let or bk == .@"const" or bk == .class_decl))
-                        {
-                            continue;
-                        }
-                        dup = true;
-                        break;
-                    }
-                    if (dup) {
-                        try self.emitDiagnostic(self.currentSpan(),
-                            "Identifier '{s}' has already been declared", .{name});
-                    } else if (names_n < names_buf.len) {
-                        names_buf[names_n] = .{ .name = name, .kind = bk, .fn_flavor = flavor };
-                        names_n += 1;
-                    }
-                }
-
-                // Check lex names against var names (lex-var conflict).
-                // Spec rule: "It is a Syntax Error if any element of the
-                // LexicallyDeclaredNames of StatementList also occurs in the
-                // VarDeclaredNames of StatementList." AnnexB has no exception to
-                // this specific rule (function decls ARE lexically declared in blocks).
-                if (names_n > 0 and !self.is_ts) {
-                    var var_names_buf: [128][]const u8 = undefined;
-                    var var_names_n: usize = 0;
-                    collectVarNamesInRange(self, range.start, range.end, &var_names_buf, &var_names_n);
-                    for (names_buf[0..names_n]) |lex_entry| {
-                        for (var_names_buf[0..var_names_n]) |var_name| {
-                            if (std.mem.eql(u8, lex_entry.name, var_name)) {
-                                try self.emitDiagnostic(self.currentSpan(),
-                                    "Identifier '{s}' has already been declared", .{lex_entry.name});
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if (keep_scope) {
-            try self.emitScopeClose(.none);
-        } else if (self.emit_scope_events) {
-            self.ev_ptr[scope_ev].aux = @intFromEnum(ScopeKindU8.elided);
-            self.elided_scope_count += 1;
-        }
-
+        try self.emitScopeClose(.none);
         const node = try self.addNode(.{
             .tag = .block_stmt,
             .main_token = lbrace,
@@ -3279,7 +2607,7 @@ pub const Parser = struct {
                 .rhs = NodeIndex.fromInt(range.end),
             },
         });
-        if (keep_scope) self.patchScopeOpenNode(scope_ev, node);
+        self.patchScopeOpenNode(scope_ev, node);
         return node;
     }
 
@@ -3791,7 +3119,6 @@ pub const Parser = struct {
             }
             try self.rejectForInOfInitializer(init, true);
             try self.validateForInOfBinding(init, false);
-            try checkForBindingNamesDup(self, init);
             expressions.reinterpretAsPattern(self, init);
             try expressions.validatePattern(self, init);
             try self.upgradePatternRefsToWrite(init);
@@ -3801,7 +3128,6 @@ pub const Parser = struct {
             try self.emitLoopTestEnd(.for_in, .none);
             try self.emitBranchOpen(.none);
             const body = try self.parseNonDeclStatement();
-            try checkForLexVarConflict(self, init, body);
             if (!self.in_strict and isLabelledFunction(self, body)) {
                 try self.emitDiagnostic(self.currentSpan(), "Labeled function declarations are not allowed in loop or if-statement bodies", .{});
             }
@@ -3847,7 +3173,6 @@ pub const Parser = struct {
             }
             try self.rejectForInOfInitializer(init, false);
             try self.validateForInOfBinding(init, true);
-            try checkForBindingNamesDup(self, init);
             expressions.reinterpretAsPattern(self, init);
             try expressions.validatePattern(self, init);
             try self.upgradePatternRefsToWrite(init);
@@ -3857,7 +3182,6 @@ pub const Parser = struct {
             try self.emitLoopTestEnd(.for_of, .none);
             try self.emitBranchOpen(.none);
             const body = try self.parseNonDeclStatement();
-            try checkForLexVarConflict(self, init, body);
             if (!self.in_strict and isLabelledFunction(self, body)) {
                 try self.emitDiagnostic(self.currentSpan(), "Labeled function declarations are not allowed in loop or if-statement bodies", .{});
             }
@@ -4107,7 +3431,14 @@ pub const Parser = struct {
                     if (is_using_decl) {
                         var names: [8][]const u8 = undefined;
                         var names_n: usize = 0;
-                        collectLexNamesInNode(self, init, &names, &names_n);
+                        // Collect binding names from const_decl declarators.
+                        const id = self.node_data_ptr[init.toInt()];
+                        var di: usize = id.lhs.toInt();
+                        while (di < id.rhs.toInt() and di < self.extra_data.items.len and names_n < names.len) : (di += 1) {
+                            const dn = NodeIndex.fromInt(self.extra_data.items[di]);
+                            if (dn == .none or dn.toInt() >= self.nodes.len) continue;
+                            collectBindingName(self, self.node_data_ptr[dn.toInt()].lhs, &names, &names_n);
+                        }
                         for (names[0..names_n]) |nm| {
                             if (std.mem.eql(u8, nm, "let")) {
                                 try self.emitDiagnostic(self.currentSpan(),
@@ -4277,7 +3608,6 @@ pub const Parser = struct {
 
         try self.emitBranchOpen(.none);
         const body = try self.parseNonDeclStatement();
-        try checkForLexVarConflict(self, init, body);
         if (!self.in_strict and isLabelledFunction(self, body)) {
             try self.emitDiagnostic(self.currentSpan(), "Labeled function declarations are not allowed in loop or if-statement bodies", .{});
         }
@@ -4342,120 +3672,6 @@ pub const Parser = struct {
         const cases = self.scratch.items[scratch_top..];
         const range = try self.listToSubRange(cases);
 
-        // Check for lex-lex and lex-var conflicts in the switch CaseBlock.
-        // The spec requires that all LexicallyDeclaredNames across all cases be
-        // unique, and that none conflict with VarDeclaredNames in the switch body.
-        if (!self.is_ts and self.emit_scope_events) {
-            // Collect all lex names from all case statement lists
-            var lex_names_buf: [128][]const u8 = undefined;
-            var lex_names_n: usize = 0;
-            for (cases) |case_raw| {
-                const case_node: NodeIndex = @enumFromInt(case_raw);
-                if (case_node == .none) continue;
-                const ci = case_node.toInt();
-                if (ci >= self.nodes.len) continue;
-                const ctag = self.node_tags_ptr[ci];
-                const cdata = self.node_data_ptr[ci];
-                if (ctag == .switch_case or ctag == .switch_default) {
-                    // rhs = extra index to SubRange of stmts
-                    const stmt_extra_idx = cdata.rhs.toInt();
-                    if (stmt_extra_idx + 1 < self.extra_data.items.len) {
-                        const ss = self.extra_data.items[stmt_extra_idx];
-                        const se = self.extra_data.items[stmt_extra_idx + 1];
-                        collectLexNamesInRange(self, ss, se, &lex_names_buf, &lex_names_n);
-                    }
-                }
-            }
-
-            if (lex_names_n > 0) {
-                // AnnexB B.3.3.5: in non-strict mode, duplicate lex names in a
-                // switch CaseBlock are allowed when ALL occurrences are from
-                // plain FunctionDeclarations (not async/generator/class/let/const).
-                var fn_decl_names_buf: [128][]const u8 = undefined;
-                var fn_decl_names_n: usize = 0;
-                if (!self.in_strict) {
-                    for (cases) |case_raw| {
-                        const case_node: NodeIndex = @enumFromInt(case_raw);
-                        if (case_node == .none) continue;
-                        const ci = case_node.toInt();
-                        if (ci >= self.nodes.len) continue;
-                        const ctag2 = self.node_tags_ptr[ci];
-                        const cdata2 = self.node_data_ptr[ci];
-                        if (ctag2 == .switch_case or ctag2 == .switch_default) {
-                            const stmt_extra_idx2 = cdata2.rhs.toInt();
-                            if (stmt_extra_idx2 + 1 < self.extra_data.items.len) {
-                                const ss2 = self.extra_data.items[stmt_extra_idx2];
-                                const se2 = self.extra_data.items[stmt_extra_idx2 + 1];
-                                collectFnDeclNamesInRange(self, ss2, se2, &fn_decl_names_buf, &fn_decl_names_n);
-                            }
-                        }
-                    }
-                }
-
-                // Check lex-lex duplicates across all cases
-                var checked_buf: [128][]const u8 = undefined;
-                var checked_n: usize = 0;
-                for (lex_names_buf[0..lex_names_n]) |lex_name| {
-                    var is_dup = false;
-                    for (checked_buf[0..checked_n]) |existing| {
-                        if (std.mem.eql(u8, existing, lex_name)) {
-                            is_dup = true;
-                            break;
-                        }
-                    }
-                    if (is_dup) {
-                        // AnnexB: allow if not strict, annex_b enabled, and all occurrences are fn_decl
-                        if (!self.in_strict and self.annex_b and fn_decl_names_n > 0) {
-                            var total: usize = 0;
-                            var fn_count: usize = 0;
-                            for (lex_names_buf[0..lex_names_n]) |n| {
-                                if (std.mem.eql(u8, n, lex_name)) total += 1;
-                            }
-                            for (fn_decl_names_buf[0..fn_decl_names_n]) |n| {
-                                if (std.mem.eql(u8, n, lex_name)) fn_count += 1;
-                            }
-                            if (fn_count == total) continue;
-                        }
-                        try self.emitDiagnostic(self.currentSpan(),
-                            "Identifier '{s}' has already been declared", .{lex_name});
-                    } else if (checked_n < checked_buf.len) {
-                        checked_buf[checked_n] = lex_name;
-                        checked_n += 1;
-                    }
-                }
-
-                // Collect var names from all case statement lists (recursive)
-                var var_names_buf: [128][]const u8 = undefined;
-                var var_names_n: usize = 0;
-                for (cases) |case_raw| {
-                    const case_node: NodeIndex = @enumFromInt(case_raw);
-                    if (case_node == .none) continue;
-                    const ci = case_node.toInt();
-                    if (ci >= self.nodes.len) continue;
-                    const ctag = self.node_tags_ptr[ci];
-                    const cdata = self.node_data_ptr[ci];
-                    if (ctag == .switch_case or ctag == .switch_default) {
-                        const stmt_extra_idx = cdata.rhs.toInt();
-                        if (stmt_extra_idx + 1 < self.extra_data.items.len) {
-                            const ss = self.extra_data.items[stmt_extra_idx];
-                            const se = self.extra_data.items[stmt_extra_idx + 1];
-                            collectVarNamesInRange(self, ss, se, &var_names_buf, &var_names_n);
-                        }
-                    }
-                }
-
-                // Check lex-var conflicts
-                for (checked_buf[0..checked_n]) |lex_name| {
-                    for (var_names_buf[0..var_names_n]) |var_name| {
-                        if (std.mem.eql(u8, lex_name, var_name)) {
-                            try self.emitDiagnostic(self.currentSpan(),
-                                "Identifier '{s}' has already been declared", .{lex_name});
-                            break;
-                        }
-                    }
-                }
-            }
-        }
 
         const range_extra = try self.addExtra(SubRange, .{
             .start = range.start,
@@ -5026,7 +4242,6 @@ pub const Parser = struct {
                 _ = try self.expect(.r_paren);
             }
             const catch_body = try self.parseBlockStatement();
-            try checkCatchBindingConflicts(self, catch_param, catch_body);
             try self.emitScopeClose(.none);
             catch_node = try self.addNode(.{
                 .tag = .catch_clause,
@@ -5506,15 +4721,10 @@ pub const Parser = struct {
         if (self.is_ts and self.in_ts_ambient) {
             try self.emitDiagnostic(self.currentSpan(), "An implementation cannot be declared in ambient contexts", .{});
         }
-        self.is_fn_body_block = true;
         const prev_fp_body = self.in_fn_params;
         self.in_fn_params = false; // body is outside params — clear for nested await/yield
         defer self.in_fn_params = prev_fp_body;
         const body = try self.parseBlockStatement();
-        // Param vs lex body conflict: applies to generators, async, methods, and strict.
-        if (self.in_async or self.in_generator or self.in_method or self.in_strict) {
-            try self.checkParamBodyLexConflict(params, body);
-        }
         try self.emitScopeClose(.none); // close function scope
 
         const tag: Node.Tag = if (is_async and is_generator)
@@ -6112,59 +5322,6 @@ pub const Parser = struct {
             const range = try self.parseStatementList(.r_brace);
             try self.emitScopeClose(.none);
 
-            // Detect duplicate lexical declarations and lex-vs-var conflicts in static block.
-            if (self.emit_scope_events and !self.is_ts) {
-                var sb_depth: i32 = 0;
-                const sb_evs = self.ev_ptr[0..self.ev_len][static_scope_ev + 1 ..];
-                const SbEntry = struct { name: []const u8 };
-                var sb_lex: [64]SbEntry = undefined;
-                var sb_lex_n: usize = 0;
-                var sb_var: [64]SbEntry = undefined;
-                var sb_var_n: usize = 0;
-                for (sb_evs) |ev| {
-                    switch (ev.kind) {
-                        .scope_open => if (ev.aux != @intFromEnum(ScopeKindU8.elided)) { sb_depth += 1; },
-                        .scope_close => sb_depth -= 1,
-                        .declare => if (sb_depth == 0) {
-                            const bk: BindingKindU8 = @enumFromInt(ev.aux);
-                            const main_tok_idx = self.node_main_token_ptr[@intCast(ev.node)];
-                            const tok_start = self.tok_starts_ptr[main_tok_idx];
-                            const tok_len = self.tok_lens_ptr[main_tok_idx];
-                            if (tok_start + tok_len > self.source.len) continue;
-                            const name = self.source[tok_start..tok_start + tok_len];
-                            if (bk == .@"var" or bk == .parameter) {
-                                if (sb_var_n < sb_var.len) {
-                                    sb_var[sb_var_n] = .{ .name = name };
-                                    sb_var_n += 1;
-                                }
-                            } else if (bk != .function_decl and bk != .function_decl_annex_b) {
-                                var dup = false;
-                                for (sb_lex[0..sb_lex_n]) |existing| {
-                                    if (std.mem.eql(u8, existing.name, name)) { dup = true; break; }
-                                }
-                                if (dup) {
-                                    try self.emitDiagnostic(self.currentSpan(),
-                                        "Identifier '{s}' has already been declared", .{name});
-                                } else if (sb_lex_n < sb_lex.len) {
-                                    sb_lex[sb_lex_n] = .{ .name = name };
-                                    sb_lex_n += 1;
-                                }
-                            }
-                        },
-                        else => {},
-                    }
-                }
-                // Check lex-vs-var conflict in static block.
-                for (sb_lex[0..sb_lex_n]) |lex_entry| {
-                    for (sb_var[0..sb_var_n]) |var_entry| {
-                        if (std.mem.eql(u8, lex_entry.name, var_entry.name)) {
-                            try self.emitDiagnostic(self.currentSpan(),
-                                "Identifier '{s}' has already been declared", .{lex_entry.name});
-                            break;
-                        }
-                    }
-                }
-            }
             self.in_loop = prev_in_loop;
             self.in_switch = prev_in_switch;
             self.in_function = prev_in_function;
@@ -6391,8 +5548,7 @@ pub const Parser = struct {
                     });
                 }
 
-                self.is_fn_body_block = true;
-                const body = try self.parseBlockStatement();
+                        const body = try self.parseBlockStatement();
 
                 const method_extra = try self.addExtra(ast.MethodData, .{
                     .params_start = params.start,
@@ -6809,8 +5965,7 @@ pub const Parser = struct {
                 }
             }
 
-            self.is_fn_body_block = true;
-            const body = try self.parseBlockStatement();
+                const body = try self.parseBlockStatement();
             try self.emitScopeClose(.none); // close method scope
 
             // Methods always reject duplicate params.
@@ -9546,39 +8701,6 @@ pub const Parser = struct {
         }
     }
 
-    /// Check that no formal parameter name also appears as a lex-declared name
-    /// in the function body block (top-level only). Applies to methods, generators,
-    /// async functions, and strict-mode functions.
-    pub fn checkParamBodyLexConflict(self: *Parser, params: SubRange, body: NodeIndex) !void {
-        if (self.is_ts) return;
-        if (body == .none) return;
-        const body_idx = body.toInt();
-        if (body_idx >= self.nodes.len) return;
-        if (self.node_tags_ptr[body_idx] != .block_stmt) return;
-        const body_data = self.node_data_ptr[body_idx];
-        // Collect lex names from top-level of body.
-        var lex_buf: [64][]const u8 = undefined;
-        var lex_n: usize = 0;
-        collectLexNamesInRange(self, body_data.lhs.toInt(), body_data.rhs.toInt(), &lex_buf, &lex_n);
-        if (lex_n == 0) return;
-        // Collect param names.
-        const names = &self.param_names_scratch;
-        names.clearRetainingCapacity();
-        var i = params.start;
-        while (i < params.end) : (i += 1) {
-            const pnode = NodeIndex.fromInt(self.extra_data.items[i]);
-            try self.collectParamNames(pnode, names);
-        }
-        for (names.items) |pname| {
-            for (lex_buf[0..lex_n]) |lname| {
-                if (std.mem.eql(u8, pname, lname)) {
-                    try self.emitDiagnostic(self.currentSpan(),
-                        "Identifier '{s}' has already been declared", .{pname});
-                    return error.ParseError;
-                }
-            }
-        }
-    }
 
     pub fn checkParamsStrictMode(self: *Parser, params: SubRange) !void {
         var i = params.start;

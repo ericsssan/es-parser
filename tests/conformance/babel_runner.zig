@@ -102,7 +102,7 @@ pub fn main(init: std.process.Init) !void {
             if (tree.errors.len > 0) break :blk ParseResult{ .has_error = true, .first_error = tree.errors[0].message };
 
             // Run semantic analysis to catch early errors (duplicate bindings, etc.)
-            var sem = es_parser.semantic.SemanticAnalyzer.analyzeWithOptions(file_alloc, &tree, .{ .is_module = is_module, .diagnose_redeclare = true }) catch break :blk ParseResult{ .has_error = false, .first_error = "" };
+            var sem = es_parser.semantic.SemanticAnalyzer.analyzeWithOptions(file_alloc, &tree, .{ .is_module = is_module, .diagnose_redeclare = true, .annex_b = opts.annex_b }) catch break :blk ParseResult{ .has_error = false, .first_error = "" };
             defer sem.deinit(file_alloc);
             if (sem.diagnostics.len > 0) break :blk ParseResult{ .has_error = true, .first_error = "semantic error" };
 
