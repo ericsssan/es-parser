@@ -1427,7 +1427,10 @@ fn checkRedeclarations(
         const scope_id = scope_ids[i];
         if (!scope_id.isValid()) continue;
         const cat: Cat = switch (kinds[i]) {
-            .let, .@"const", .class_decl => .lexical,
+            // import bindings are lexical (duplicate imports / import-vs-let are
+            // errors); catch params are lexical within their catch scope (catches
+            // `catch([a, a])` duplicate destructured names).
+            .let, .@"const", .class_decl, .import_binding, .catch_param => .lexical,
             // A Module's top-level function is lexical; elsewhere a function is
             // var-like (Script/function-body hoisting). The Annex B B.3.3 case
             // (`function_decl_annex_b` — a sloppy function nested in if/label) is
@@ -1614,18 +1617,25 @@ fn checkRedeclarations(
         if (pmap.count() > 0) {
             var bi: u32 = 0;
             while (bi < n) : (bi += 1) {
-                switch (kinds[bi]) {
-                    .let, .@"const", .class_decl => {},
+                const is_fn = switch (kinds[bi]) {
+                    .let, .@"const", .class_decl => false,
+                    .function_decl, .function_decl_annex_b => true,
                     else => continue,
-                }
+                };
                 const sid = scope_ids[bi];
                 if (!sid.isValid() or scopes.kind(sid) != .block) continue;
                 const par = scopes.parent(sid);
                 if (!par.isValid()) continue;
-                switch (scopes.kind(par)) {
-                    .function, .arrow_function, .catch_clause => {},
-                    else => continue,
-                }
+                // let/const/class conflict with a param in a function/arrow/catch
+                // body block. A function in the catch body also conflicts with the
+                // catch param, but a function at function-body top is var-scoped and
+                // may share a param's name — so functions only count under catch.
+                const ok = switch (scopes.kind(par)) {
+                    .catch_clause => true,
+                    .function, .arrow_function => !is_fn,
+                    else => false,
+                };
+                if (!ok) continue;
                 if (pmap.contains(.{ .scope = par.toInt(), .name = names[bi] })) {
                     try diags.append(allocator, .{
                         .message = "Identifier has already been declared",
