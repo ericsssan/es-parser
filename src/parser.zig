@@ -5760,9 +5760,14 @@ pub const Parser = struct {
             // Skip empty statements (semicolons) in class body
             if (self.eat(.semicolon) != null) continue;
 
+            const before = self.tok_i;
             const member = self.parseClassMember() catch |err| switch (err) {
                 error.ParseError => {
                     self.synchronize();
+                    // Guarantee forward progress: if recovery consumed nothing
+                    // (e.g. on a `<<<<<<<` conflict marker), advance one token so
+                    // the loop can't spin and exhaust memory appending error nodes.
+                    if (self.tok_i == before) _ = self.advance();
                     try self.pushErrorNode();
                     continue;
                 },

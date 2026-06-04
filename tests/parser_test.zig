@@ -579,3 +579,16 @@ test "ts: decorator on a class declaration is accepted" {
     defer c.deinit(testing.allocator);
     try expectNoErrors(&c);
 }
+
+// ── Robustness: malformed class body must not exhaust memory ────────────────
+
+test "parser: conflict markers in a class body recover without OOM" {
+    // Regression: the class-declaration body loop didn't force progress on a
+    // recovery that consumed no tokens (`<<<<<<<` after a valid member), so it
+    // spun appending error nodes until OutOfMemory. Must parse (with errors).
+    var a = try parseSource(
+        "class C {\n    v = 1;\n<<<<<<< HEAD\n    w = 2;\n=======\n    w = 3;\n>>>>>>> branch\n}\n",
+    );
+    defer a.deinit(testing.allocator);
+    try testing.expect(a.errors.len > 0);
+}

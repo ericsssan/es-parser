@@ -40,3 +40,11 @@ jobs:
 
       - name: Unit tests + conformance (test262-parser-tests)
         run: zig build test --summary all
+
+      # Robustness gate: run the full parse + scope/symbol/reference/CFG +
+      # redeclare pipeline over the ~19k-file TypeScript corpus. Fails the build
+      # if any file crashes/OOMs the pipeline (a hard crash aborts; a caught
+      # failure makes the runner exit non-zero). The corpus is present because
+      # checkout uses submodules: true.
+      - name: Semantic robustness gate (TypeScript corpus)
+        run: zig build conformance-semantic

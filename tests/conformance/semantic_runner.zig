@@ -55,8 +55,12 @@ pub fn main(init: std.process.Init) !void {
     }.lt);
 
     var total: u32 = 0;
-    var pass: u32 = 0;    // parsed + analyzed with no error diagnostic
-    var failed: u32 = 0;  // produced error-severity diagnostics or crashed
+    var clean: u32 = 0;       // parsed + analyzed with no error diagnostic
+    var with_errors: u32 = 0; // produced error-severity diagnostics (legitimate)
+    var crashed: u32 = 0;     // pipeline could not complete — lex/parse/sem error
+                              // or unreadable file. THIS is the gate signal: a
+                              // hard crash aborts the process (non-zero exit),
+                              // and any caught failure here makes us exit 1 too.
 
     // Aggregate structural counts across all fixtures.
     var total_scopes: u64 = 0;
@@ -73,9 +77,9 @@ pub fn main(init: std.process.Init) !void {
         const file_alloc = arena.allocator();
 
         const source = Io.Dir.cwd().readFileAlloc(
-            io, path, file_alloc, Io.Limit.limited(2 * 1024 * 1024),
+            io, path, file_alloc, Io.Limit.limited(16 * 1024 * 1024),
         ) catch {
-            failed += 1;
+            crashed += 1;
             if (!compact) try stdout.print("  FAIL (read error): {s}\n", .{path});
             continue;
         };
@@ -89,7 +93,7 @@ pub fn main(init: std.process.Init) !void {
 
         // Tokenize
         var lr = Lexer.tokenizeWithOptions(file_alloc, source, lang, false) catch {
-            failed += 1;
+            crashed += 1;
             if (!compact) try stdout.print("  FAIL (lex error): {s}\n", .{path});
             continue;
         };
@@ -100,7 +104,7 @@ pub fn main(init: std.process.Init) !void {
             .language = lang,
             .emit_events = true,
         }) catch {
-            failed += 1;
+            crashed += 1;
             if (!compact) try stdout.print("  FAIL (parse OOM): {s}\n", .{path});
             continue;
         };
@@ -124,7 +128,7 @@ pub fn main(init: std.process.Init) !void {
             .build_parents = true,
             .diagnose_redeclare = true,
         }) catch {
-            failed += 1;
+            crashed += 1;
             if (!compact) try stdout.print("  FAIL (sem OOM): {s}\n", .{path});
             continue;
         };
@@ -150,7 +154,7 @@ pub fn main(init: std.process.Init) !void {
         total_diag_warnings += sem_warnings;
 
         if (n_errs == 0) {
-            pass += 1;
+            clean += 1;
             if (!compact) {
                 try stdout.print(
                     "  OK  {s}  scopes={d} syms={d} refs={d}\n",
@@ -158,7 +162,7 @@ pub fn main(init: std.process.Init) !void {
                 );
             }
         } else {
-            failed += 1;
+            with_errors += 1;
             if (!compact) {
                 try stdout.print(
                     "  ERR {s}  scopes={d} syms={d} refs={d} errors={d}\n",
@@ -186,16 +190,27 @@ pub fn main(init: std.process.Init) !void {
         \\
         \\Semantic analysis results
         \\
-        \\  Files:    {d} total, {d} clean, {d} with errors
+        \\  Files:    {d} total, {d} clean, {d} with errors, {d} crashed
         \\  Scopes:   {d}
         \\  Symbols:  {d}
         \\  Refs:     {d}
         \\  Diagnostics:  {d} errors, {d} warnings
         \\
-        , .{ total, pass, failed,
+        , .{ total, clean, with_errors, crashed,
              total_scopes, total_symbols, total_refs,
              total_diag_errors, total_diag_warnings });
     try stdout.flush();
+
+    // Crash gate: `with_errors` files have legitimate diagnostics and are fine;
+    // `crashed` means the parse/semantic pipeline could not complete on a real
+    // input (OOM / hard failure). Any such file — or a hard crash that already
+    // aborted the process — fails the build. This makes the step a CI robustness
+    // gate over the whole corpus without depending on diagnostic counts.
+    if (crashed > 0) {
+        try stdout.print("\nFAILED: {d} file(s) crashed the parse/semantic pipeline.\n", .{crashed});
+        try stdout.flush();
+        std.process.exit(1);
+    }
 }
 
 /// Collect all `.js` / `.ts` / `.tsx` files under `base_dir` recursively.
