@@ -112,8 +112,18 @@ pub fn main(init: std.process.Init) !void {
             if (d.severity == .@"error") parse_errors += 1;
         }
 
-        // Semantic analysis.
-        var sem = SemanticAnalyzer.analyze(file_alloc, &tree) catch {
+        // Semantic analysis — enable every pass so the robustness sweep exercises
+        // the whole pipeline: scope/symbol/reference build, CFG + reachability
+        // (need_cfg), per-symbol ref ranges (build_ref_ranges), the parent-index
+        // build (build_parents), and the duplicate-binding early-error pass
+        // (diagnose_redeclare).
+        var sem = SemanticAnalyzer.analyzeWithOptions(file_alloc, &tree, .{
+            .is_module = true,
+            .need_cfg = true,
+            .build_ref_ranges = true,
+            .build_parents = true,
+            .diagnose_redeclare = true,
+        }) catch {
             failed += 1;
             if (!compact) try stdout.print("  FAIL (sem OOM): {s}\n", .{path});
             continue;
