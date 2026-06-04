@@ -119,7 +119,10 @@ pub fn main(init: std.process.Init) !void {
                 defer tokens.deinit(file_alloc);
                 var tree = Parser.parseWithLanguage(file_alloc, source, tokens.slice(), .js, is_module) catch break :blk .crashed;
                 defer tree.deinit(file_alloc);
-                break :blk if (tree.errors.len > 0) .has_errors else .ok;
+                if (tree.errors.len > 0) break :blk .has_errors;
+                var sem = es_parser.semantic.SemanticAnalyzer.analyzeWithOptions(file_alloc, &tree, .{ .is_module = is_module, .diagnose_redeclare = true }) catch break :blk .ok;
+                defer sem.deinit(file_alloc);
+                break :blk if (sem.diagnostics.len > 0) .has_errors else .ok;
             };
 
             switch (cat.mode) {

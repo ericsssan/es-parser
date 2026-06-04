@@ -1565,6 +1565,16 @@ fn checkRedeclarations(
                 .block, .switch_stmt, .static_block => {},
                 else => continue,
             }
+            // A block whose parent is a function/arrow/method scope is the
+            // function-body-top block. Function declarations there are var-scoped
+            // (merge with var, S10.2.1), so duplicates including generators are OK.
+            if (scopes.kind(sid) == .block) {
+                const parent_sid = scopes.parent(sid);
+                if (parent_sid.isValid()) switch (scopes.kind(parent_sid)) {
+                    .function, .arrow_function => continue,
+                    else => {},
+                };
+            }
             // Flavor: walk back from the name token to `function`; a generator
             // (`function*`) or async (`async function`) is never AnnexB-eligible.
             var t: i64 = main_tokens[decls[fi].toInt()];
