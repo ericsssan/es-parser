@@ -46,8 +46,8 @@ Add to your `build.zig.zon`:
 ```zig
 .dependencies = .{
     .es_parser = .{
-        .url = "https://github.com/ericsssan/es-parser/archive/refs/tags/v0.2.0.tar.gz",
-        .hash = "es_parser-0.2.0-C15LK1MYGABh-C55Tzrjpw_vpb0lN3IWzbYXewd_wRMv",
+        .url = "https://github.com/ericsssan/es-parser/archive/refs/tags/v0.2.1.tar.gz",
+        .hash = "es_parser-0.2.1-C15LK3w8GADeqnvtcjDACj27kVx7AWlQ1UN8WeCN4ikj",
     },
 },
 ```
