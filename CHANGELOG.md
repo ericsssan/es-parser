@@ -4,6 +4,39 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1]
+
+A robustness, tooling, and newer-Zig-compatibility release. No public API
+changes (`Ast` gains an additive `is_ts` field).
+
+### Fixed
+
+- **Parser memory-exhaustion on malformed input (DoS-class).** The class-body
+  loop for class *declarations* recovered from a parse error without forcing
+  token progress, so input where recovery consumed nothing — e.g. a git conflict
+  marker (`<<<<<<<`) after a valid member — spun, appending error nodes until
+  OutOfMemory. A 97-byte file could exhaust the parser. It now guarantees
+  one-token progress, matching the class-expression loop.
+- **Newer Zig support.** Abstracted the `@typeInfo(T).@"struct"/.@"enum".fields`
+  API change (split into `field_names`/`field_types`/`field_values`) behind a
+  small compat shim, so the codebase builds across `0.17.0-dev.305` through
+  `dev.657`. Also restored the `@hasField` guard around `b.args` in `build.zig`.
+
+### Changed
+
+- **`diagnose_redeclare` is now JavaScript-only.** It models a JS duplicate-
+  binding early error; TypeScript declaration merging (function overloads,
+  namespace/interface/class merges) makes the rule inapplicable, so it is skipped
+  for TS. (Default-off, so most consumers are unaffected.) TypeScript function
+  overloads are no longer flagged as redeclarations.
+- **Conformance tooling.** Each `conformance-*` build step now runs a correct
+  default fixture path with no arguments (the current Zig build system drops
+  trailing `--` args). `conformance-semantic` is a CI **crash gate**: it runs the
+  full parse + scope/symbol/reference/CFG/redeclare pipeline over the ~19k-file
+  TypeScript corpus and fails the build if any file crashes the pipeline.
+- CI is pinned to the declared `minimum_zig_version` (`dev.607`); the Nightly
+  workflow tracks `master` as an early-warning canary.
+
 ## [0.2.0]
 
 Headline: the tokenizer is rewritten as a single-pass scalar lexer, and
