@@ -2,18 +2,18 @@
 
 A fast JavaScript / TypeScript / JSX parser written in Zig.
 
-Recursive-descent parser with a `MultiArrayList`-backed AST, a SIMD/bitmap
-lexer, an event-driven semantic layer (scope tree, symbol table, reference
-resolution), and a four-tier diagnostic system (error / warning / info / hint).
-Extracted from the Ez linter.
+Recursive-descent parser with a `MultiArrayList`-backed AST, a single-pass
+scalar lexer (SIMD ASCII-identifier fast path), an event-driven semantic layer
+(scope tree, symbol table, reference resolution), and a four-tier diagnostic
+system (error / warning / info / hint). Extracted from the Ez linter.
 
 ## Conformance
 
 | Suite | Result |
 |-------|--------|
 | [tc39/test262-parser-tests](https://github.com/tc39/test262-parser-tests) | must-parse 3,966 / 3,966 · must-reject 1,389 / 1,389 |
-| TypeScript compiler tests (`tests/cases`) | 19,128 / 19,136 |
-| Babel parser fixtures — valid | 2,041 / 2,041 |
+| TypeScript compiler tests (`tests/cases`) | 19,120 / 19,136 |
+| Babel parser fixtures — valid | 1,928 / 1,928 |
 | Babel parser fixtures — invalid (correctly rejected) | 1,548 / 1,548 |
 
 The remaining TypeScript failures require cross-file type analysis or
@@ -23,7 +23,7 @@ transpile-level error recovery, which a single-file parser does not perform.
 
 - **Languages**: JS, TS, JSX, TSX, `.d.ts` (also `.mjs`, `.cjs`, `.mts`, `.cts`)
 - **ES2025**: async/await, generators, optional chaining, nullish coalescing, import attributes, `using` declarations, decorators
-- **SIMD lexer**: bitmap-accelerated tokenization
+- **Single-pass lexer**: SIMD-accelerated scalar tokenization
 - **Scope analysis**: lexical scopes, symbol table, reference resolution
 - **CFG**: control-flow graph for reachability analysis
 - **Diagnostics**: four severity tiers (error / warning / info / hint)
@@ -103,7 +103,9 @@ defer sem.deinit(allocator);
 // sem.scopes      — scope tree (ScopeTree)
 // sem.symbols     — symbol table (SymbolTable)
 // sem.references  — reference list (ReferenceTable)
-// sem.diagnostics — early errors (duplicate bindings, etc.)
+// sem.diagnostics — semantic diagnostics. Duplicate lexical-binding early
+//                   errors are opt-in: analyzeWithOptions(allocator, &tree,
+//                   .{ .is_module = true, .diagnose_redeclare = true }).
 ```
 
 ## Building and testing
