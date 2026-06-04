@@ -1417,7 +1417,10 @@ fn checkRedeclarations(
             // var-like (Script/function-body hoisting). The Annex B B.3.3 case
             // (`function_decl_annex_b` — a sloppy function nested in if/label) is
             // exempt from the redeclaration early error, so it is skipped entirely.
-            .function_decl => if (scopes.kind(scope_id) == .module) .lexical else .varlike,
+            // In TypeScript, function declarations merge (overload signatures +
+            // implementation share a name), so a function is never lexical there —
+            // two `function f` decls must not be flagged as a redeclaration.
+            .function_decl => if (!ast.is_ts and scopes.kind(scope_id) == .module) .lexical else .varlike,
             .@"var" => .varlike,
             else => continue,
         };

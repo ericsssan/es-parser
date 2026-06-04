@@ -281,6 +281,29 @@ fn redeclareDiagCount(source: []const u8, is_module: bool) !usize {
     return r.diagnostics.len;
 }
 
+/// Same as `redeclareDiagCount` but parses as TypeScript (module mode).
+fn redeclareDiagCountTs(source: []const u8) !usize {
+    const allocator = testing.allocator;
+    var _lr = try Lexer.tokenizeWithLanguage(allocator, source, .ts);
+    defer _lr.deinit(allocator);
+    var tokens = _lr.tokens;
+    var tree = try Parser.parseWithOptions(allocator, source, tokens.slice(), .{ .language = .ts, .is_module = true, .emit_events = true });
+    defer tree.deinit(allocator);
+    var r = try semantic.SemanticAnalyzer.analyzeWithOptions(allocator, &tree, .{ .is_module = true, .diagnose_redeclare = true });
+    defer r.deinit(allocator);
+    return r.diagnostics.len;
+}
+
+test "redeclare: TS function overloads are not flagged, real TS dups still are" {
+    // Overload signatures + implementation share a name — valid TS, must NOT flag.
+    try testing.expectEqual(@as(usize, 0), try redeclareDiagCountTs(
+        "function f(x: number): void;\nfunction f(x: string): void;\nfunction f(x: any): void {}\nexport { f };\n",
+    ));
+    // But genuine duplicate lexical bindings are still errors in TS.
+    try testing.expect(try redeclareDiagCountTs("class C {}\nclass C {}\nexport { C };\n") >= 1);
+    try testing.expect(try redeclareDiagCountTs("let g = 1;\nfunction g() {}\nexport { g };\n") >= 1);
+}
+
 test "redeclare: lexical duplicate bindings are flagged" {
     // class + class, class + var, class + let — all duplicate lexical bindings.
     try testing.expect(try redeclareDiagCount("class A {}\nclass A {}\n", false) >= 1);

@@ -1277,6 +1277,7 @@ pub const Parser = struct {
 
         return Ast{
             .source = source,
+            .is_ts = p.is_ts,
             .nodes = p.nodes.toOwnedSlice(),
             .tokens = p.tokens,
             .extra_data = extra_data_slice,

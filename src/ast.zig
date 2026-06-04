@@ -718,6 +718,10 @@ pub const JsxOpeningData = struct {
 /// The complete AST for a JavaScript source file.
 pub const Ast = struct {
     source: []const u8,
+    /// True when parsed as TypeScript (ts/tsx/dts). Lets later passes apply
+    /// TS-specific semantics — e.g. function/namespace declaration merging, so
+    /// duplicate `function f` overloads are not flagged as redeclarations.
+    is_ts: bool = false,
     nodes: NodeList.Slice,
     tokens: TokenList.Slice,
     extra_data: []const u32,
