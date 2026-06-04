@@ -1569,5 +1569,50 @@ fn checkRedeclarations(
         }
     }
 
+    // ── Pass 4: parameter vs body-block lexical ───────────────────────────────
+    // A parameter (or catch parameter) conflicts with a let/const/class in the
+    // function/catch *body block* (`function(a){ let a; }`, `catch(e){ let e; }`).
+    // The param lives in the function/catch scope; the body lexical in its
+    // immediate child block. Restricting to that child (parent is a function/
+    // arrow/catch scope) means a NESTED block legally shadows the param. `var`
+    // is allowed to redeclare a param, so only let/const/class are checked.
+    {
+        var pmap = std.HashMapUnmanaged(RedeclKey, void, RedeclCtx, std.hash_map.default_max_load_percentage){};
+        defer pmap.deinit(sa);
+        var pi: u32 = 0;
+        while (pi < n) : (pi += 1) {
+            switch (kinds[pi]) {
+                .parameter, .catch_param => {},
+                else => continue,
+            }
+            if (!scope_ids[pi].isValid()) continue;
+            try pmap.put(sa, .{ .scope = scope_ids[pi].toInt(), .name = names[pi] }, {});
+        }
+        if (pmap.count() > 0) {
+            var bi: u32 = 0;
+            while (bi < n) : (bi += 1) {
+                switch (kinds[bi]) {
+                    .let, .@"const", .class_decl => {},
+                    else => continue,
+                }
+                const sid = scope_ids[bi];
+                if (!sid.isValid() or scopes.kind(sid) != .block) continue;
+                const par = scopes.parent(sid);
+                if (!par.isValid()) continue;
+                switch (scopes.kind(par)) {
+                    .function, .arrow_function, .catch_clause => {},
+                    else => continue,
+                }
+                if (pmap.contains(.{ .scope = par.toInt(), .name = names[bi] })) {
+                    try diags.append(allocator, .{
+                        .message = "Identifier has already been declared",
+                        .span = ast.nodeSpan(decls[bi]),
+                        .severity = .@"error",
+                    });
+                }
+            }
+        }
+    }
+
     return diags.toOwnedSlice(allocator);
 }
