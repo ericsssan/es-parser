@@ -1094,30 +1094,19 @@ fn resolveFullImpl(
     // (O(log N) per level across every lexical scope).
     if (do_scope and !skip_resolve) {
         const scope_count: u32 = @intCast(scopes.len());
-        const kinds = scopes.list.items(.kind);
         for (unresolved_refs.items) |ur| {
             const ref_id = ur.ref_id;
             const ref_scope = references.getScope(ref_id);
             if (!ref_scope.isValid()) continue;
             const name_hash = ur.name_hash;
 
-            // Find the nearest var-scope enclosing ref_scope.
-            var vsid = ref_scope;
-            while (vsid.toInt() < scope_count) {
-                switch (kinds[vsid.toInt()]) {
-                    .global, .module, .function, .static_block, .class_field_initializer, .arrow_function => break,
-                    else => {
-                        const p = scopes.parent(vsid);
-                        if (!p.isValid() or p.toInt() == vsid.toInt()) break;
-                        vsid = p;
-                    },
-                }
-            }
-
             // Walk var-scope ancestors first — O(1) hash lookup per level.
             // This catches forward refs to var/function_decl (their decl_map
             // entries are keyed by var-scope id).
+            // nearestVarScope and outerVarScope are O(1) via the precomputed
+            // var_scope field on each scope entry.
             var resolved_in_var_walk = false;
+            var vsid = scopes.nearestVarScope(ref_scope);
             while (vsid.toInt() < scope_count) {
                 const hk = name_hash ^ (@as(u64, vsid.toInt()) *% 0x9e3779b97f4a7c15);
                 if (hoist_map.get(hk)) |sym_id| {
@@ -1129,21 +1118,9 @@ fn resolveFullImpl(
                     resolved_in_var_walk = true;
                     break;
                 }
-                var p = scopes.parent(vsid);
-                if (!p.isValid() or p.toInt() == vsid.toInt()) break;
-                // Advance p to the next var-scope.
-                while (p.toInt() < scope_count) {
-                    switch (kinds[p.toInt()]) {
-                        .global, .module, .function, .static_block, .class_field_initializer, .arrow_function => break,
-                        else => {
-                            const pp = scopes.parent(p);
-                            if (!pp.isValid() or pp.toInt() == p.toInt()) break;
-                            p = pp;
-                        },
-                    }
-                }
-                if (p.toInt() == vsid.toInt()) break;
-                vsid = p;
+                const next = scopes.outerVarScope(vsid);
+                if (!next.isValid() or next.toInt() == vsid.toInt()) break;
+                vsid = next;
             }
 
             // If the var-scope walk didn't resolve, walk the FULL lexical

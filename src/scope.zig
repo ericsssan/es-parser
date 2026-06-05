@@ -112,6 +112,10 @@ pub const ScopeTree = struct {
         node_id: ast.NodeIndex,
         bindings_start: u32,
         bindings_count: u32,
+        /// Nearest enclosing var-scope (function, arrow_function, static_block,
+        /// class_field_initializer, module, global) — including self if this
+        /// scope is itself a var-scope.  Set once at addScope time; O(1) lookup.
+        var_scope: ScopeId,
     };
 
     /// Column-wise scope storage. Access a column with `list.items(.kind)` etc.
@@ -204,6 +208,13 @@ pub const ScopeTree = struct {
             }
         }
 
+        const var_scope: ScopeId = if (scope_flags.is_var_scope)
+            id
+        else if (parent_id.isValid())
+            self.list.items(.var_scope)[parent_id.toInt()]
+        else
+            .none;
+
         try self.list.append(self.gpa, .{
             .kind = scope_kind,
             .flags = scope_flags,
@@ -214,6 +225,7 @@ pub const ScopeTree = struct {
             .node_id = node_id,
             .bindings_start = 0,
             .bindings_count = 0,
+            .var_scope = var_scope,
         });
 
         // Link into the parent's child list — O(1) via last_child pointer.
@@ -270,13 +282,19 @@ pub const ScopeTree = struct {
 
     /// Find the nearest enclosing var-scope (function or global).
     /// `var` declarations hoist to this scope.
+    /// O(1): reads the precomputed `var_scope` field set at addScope time.
     pub fn nearestVarScope(self: *const ScopeTree, id: ScopeId) ScopeId {
-        var cur = id;
-        while (cur.isValid()) {
-            if (self.getFlags(cur).is_var_scope) return cur;
-            cur = self.parent(cur);
-        }
-        return .none;
+        if (!id.isValid()) return .none;
+        return self.list.items(.var_scope)[id.toInt()];
+    }
+
+    /// Nearest var-scope of the parent of `id` — i.e. the next var-scope up
+    /// the tree.  Returns `.none` if `id` has no parent or no enclosing
+    /// var-scope above it.  O(1) via the precomputed `var_scope` column.
+    pub fn outerVarScope(self: *const ScopeTree, id: ScopeId) ScopeId {
+        const p = self.parent(id);
+        if (!p.isValid()) return .none;
+        return self.list.items(.var_scope)[p.toInt()];
     }
 
     /// Find the nearest enclosing function scope.
