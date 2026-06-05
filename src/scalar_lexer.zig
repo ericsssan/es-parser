@@ -509,11 +509,16 @@ pub fn tokenizeScalarFull(alloc: std.mem.Allocator, src: []const u8, language: L
     var tokens = try tokenizeScalarWithOptions(alloc, src, language, o);
     errdefer tokens.deinit(alloc);
     const count: u32 = @intCast(sink.starts.items.len);
+    const comment_starts = try sink.starts.toOwnedSlice(alloc);
+    errdefer alloc.free(comment_starts);
+    const comment_ends = try sink.ends.toOwnedSlice(alloc);
+    errdefer alloc.free(comment_ends);
+    const comment_kinds = try sink.kinds.toOwnedSlice(alloc);
     return .{
         .tokens = tokens,
-        .comment_starts = try sink.starts.toOwnedSlice(alloc),
-        .comment_ends = try sink.ends.toOwnedSlice(alloc),
-        .comment_kinds = try sink.kinds.toOwnedSlice(alloc),
+        .comment_starts = comment_starts,
+        .comment_ends = comment_ends,
+        .comment_kinds = comment_kinds,
         .comment_count = count,
     };
 }

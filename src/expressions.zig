@@ -5455,6 +5455,20 @@ fn parseNewExpression(p: *Parser) Error!NodeIndex {
         if (!p.is_ts) return error.ParseError;
     }
 
+    // TS: `new Foo<T>(args)` — consume optional type arguments before the
+    // argument list so the type params don't become a phantom inner NewExpression.
+    if (p.is_ts and p.peek() == .less_than) {
+        const lt_tok: u32 = @intCast(p.tok_i);
+        if (tryParseTsTypeArguments(p)) |type_args_range| {
+            const range_extra = try p.addExtra(SubRange, type_args_range);
+            callee = try p.addNode(.{
+                .tag = .ts_instantiation_expr,
+                .main_token = lt_tok,
+                .data = .{ .lhs = callee, .rhs = NodeIndex.fromInt(range_extra) },
+            });
+        }
+    }
+
     // Optional argument list.
     if (p.peek() == .l_paren) {
         const args_range = try parseArgumentList(p);

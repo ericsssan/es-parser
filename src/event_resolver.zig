@@ -1260,12 +1260,17 @@ fn resolveFullImpl(
             .ref_by_sym = ref_by_sym,
             .ref_event_to_id = try ref_event_to_id.toOwnedSlice(allocator),
         },
-        .cfg_only => CfgPart{
-            .code_path_result = cpb_result,
-            .node_reachable = node_reachable,
-            .loop_exit_reachable = loop_exit_reachable,
-            .ref_event_seg_ids = try ref_event_seg_ids.toOwnedSlice(allocator),
-            .ref_event_alive = try ref_event_alive.toOwnedSlice(allocator),
+        .cfg_only => blk: {
+            const seg_ids = try ref_event_seg_ids.toOwnedSlice(allocator);
+            errdefer allocator.free(seg_ids);
+            const alive = try ref_event_alive.toOwnedSlice(allocator);
+            break :blk CfgPart{
+                .code_path_result = cpb_result,
+                .node_reachable = node_reachable,
+                .loop_exit_reachable = loop_exit_reachable,
+                .ref_event_seg_ids = seg_ids,
+                .ref_event_alive = alive,
+            };
         },
     };
 }
