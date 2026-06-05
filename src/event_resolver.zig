@@ -592,6 +592,9 @@ fn resolveFullImpl(
                     std.atomic.spinLoopHint();
                     raw_node = @truncate(@atomicLoad(u64, ev_u64, .acquire) >> 32);
                     if (raw_node != std.math.maxInt(u32)) break;
+                    // Parse error: node was never patched — accept as-is (will be
+                    // treated as .none and skipped by the out-of-range guard below).
+                    if (opts.streaming.?.parse_done.load(.acquire)) break;
                 }
             }
             const node: NodeIndex = @enumFromInt(raw_node);
@@ -936,6 +939,7 @@ fn resolveFullImpl(
                     std.atomic.spinLoopHint();
                     node_raw = @truncate(@atomicLoad(u64, ev_u64, .acquire) >> 32);
                     if (node_raw != std.math.maxInt(u32)) break;
+                    if (opts.streaming.?.parse_done.load(.acquire)) break;
                 }
             }
             // Defensive: skip CFG/loop processing if node is unpatched (still .none)
