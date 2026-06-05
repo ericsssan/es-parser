@@ -210,8 +210,8 @@ fn fuzzParseJs(_: void, smith: *std.testing.Smith) !void {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    var toks = try es.Lexer.tokenizeWithLanguage(alloc, src, .js);
-    var tree = try es.Parser.parseWithOptions(alloc, src, toks.tokens.slice(), .{ .emit_events = true });
+    var toks = es.Lexer.tokenizeWithLanguage(alloc, src, .js) catch return;
+    var tree = es.Parser.parseWithOptions(alloc, src, toks.tokens.slice(), .{ .emit_events = true }) catch return;
     _ = &toks;
     _ = &tree;
 }
@@ -226,8 +226,8 @@ fn fuzzParseJsModule(_: void, smith: *std.testing.Smith) !void {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    var toks = try es.Lexer.tokenizeWithLanguage(alloc, src, .js);
-    var tree = try es.Parser.parseWithOptions(alloc, src, toks.tokens.slice(), .{ .is_module = true, .emit_events = true });
+    var toks = es.Lexer.tokenizeWithLanguage(alloc, src, .js) catch return;
+    var tree = es.Parser.parseWithOptions(alloc, src, toks.tokens.slice(), .{ .is_module = true, .emit_events = true }) catch return;
     _ = &toks;
     _ = &tree;
 }
@@ -242,8 +242,8 @@ fn fuzzParseTs(_: void, smith: *std.testing.Smith) !void {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    var toks = try es.Lexer.tokenizeWithLanguage(alloc, src, .ts);
-    var tree = try es.Parser.parseWithOptions(alloc, src, toks.tokens.slice(), .{ .language = .ts, .emit_events = true });
+    var toks = es.Lexer.tokenizeWithLanguage(alloc, src, .ts) catch return;
+    var tree = es.Parser.parseWithOptions(alloc, src, toks.tokens.slice(), .{ .language = .ts, .emit_events = true }) catch return;
     _ = &toks;
     _ = &tree;
 }
@@ -260,8 +260,8 @@ fn fuzzParseJsx(_: void, smith: *std.testing.Smith) !void {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    var toks = try es.Lexer.tokenizeWithLanguage(alloc, src, .jsx);
-    var tree = try es.Parser.parseWithOptions(alloc, src, toks.tokens.slice(), .{ .language = .jsx, .emit_events = true });
+    var toks = es.Lexer.tokenizeWithLanguage(alloc, src, .jsx) catch return;
+    var tree = es.Parser.parseWithOptions(alloc, src, toks.tokens.slice(), .{ .language = .jsx, .emit_events = true }) catch return;
     _ = &toks;
     _ = &tree;
 }
@@ -276,8 +276,8 @@ fn fuzzParseTsx(_: void, smith: *std.testing.Smith) !void {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    var toks = try es.Lexer.tokenizeWithLanguage(alloc, src, .tsx);
-    var tree = try es.Parser.parseWithOptions(alloc, src, toks.tokens.slice(), .{ .language = .tsx, .emit_events = true });
+    var toks = es.Lexer.tokenizeWithLanguage(alloc, src, .tsx) catch return;
+    var tree = es.Parser.parseWithOptions(alloc, src, toks.tokens.slice(), .{ .language = .tsx, .emit_events = true }) catch return;
     _ = &toks;
     _ = &tree;
 }
@@ -295,8 +295,8 @@ fn fuzzParseGlobalReturn(_: void, smith: *std.testing.Smith) !void {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    var toks = try es.Lexer.tokenizeWithLanguage(alloc, src, .js);
-    var tree = try es.Parser.parseWithOptions(alloc, src, toks.tokens.slice(), .{ .global_return = true, .emit_events = true });
+    var toks = es.Lexer.tokenizeWithLanguage(alloc, src, .js) catch return;
+    var tree = es.Parser.parseWithOptions(alloc, src, toks.tokens.slice(), .{ .global_return = true, .emit_events = true }) catch return;
     _ = &toks;
     _ = &tree;
 }
@@ -311,8 +311,8 @@ fn fuzzParseNoAnnexB(_: void, smith: *std.testing.Smith) !void {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    var toks = try es.Lexer.tokenizeWithLanguage(alloc, src, .js);
-    var tree = try es.Parser.parseWithOptions(alloc, src, toks.tokens.slice(), .{ .annex_b = false, .emit_events = true });
+    var toks = es.Lexer.tokenizeWithLanguage(alloc, src, .js) catch return;
+    var tree = es.Parser.parseWithOptions(alloc, src, toks.tokens.slice(), .{ .annex_b = false, .emit_events = true }) catch return;
     _ = &toks;
     _ = &tree;
 }
@@ -327,13 +327,13 @@ fn fuzzParseTsDecorators(_: void, smith: *std.testing.Smith) !void {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    var toks = try es.Lexer.tokenizeWithLanguage(alloc, src, .ts);
-    var tree = try es.Parser.parseWithOptions(alloc, src, toks.tokens.slice(), .{
+    var toks = es.Lexer.tokenizeWithLanguage(alloc, src, .ts) catch return;
+    var tree = es.Parser.parseWithOptions(alloc, src, toks.tokens.slice(), .{
         .language = .ts,
         .is_module = true,
         .experimental_decorators = true,
         .emit_events = true,
-    });
+    }) catch return;
     _ = &toks;
     _ = &tree;
 }
@@ -348,8 +348,8 @@ fn fuzzParseDts(_: void, smith: *std.testing.Smith) !void {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    var toks = try es.Lexer.tokenizeWithLanguage(alloc, src, .dts);
-    var tree = try es.Parser.parseWithOptions(alloc, src, toks.tokens.slice(), .{ .language = .dts, .is_module = true, .emit_events = true });
+    var toks = es.Lexer.tokenizeWithLanguage(alloc, src, .dts) catch return;
+    var tree = es.Parser.parseWithOptions(alloc, src, toks.tokens.slice(), .{ .language = .dts, .is_module = true, .emit_events = true }) catch return;
     _ = &toks;
     _ = &tree;
 }
@@ -404,8 +404,8 @@ fn fuzzSemantic(_: void, smith: *std.testing.Smith) !void {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    var toks = try es.Lexer.tokenizeWithLanguage(alloc, src, .js);
-    var tree = try es.Parser.parseWithOptions(alloc, src, toks.tokens.slice(), .{ .emit_events = true });
+    var toks = es.Lexer.tokenizeWithLanguage(alloc, src, .js) catch return;
+    var tree = es.Parser.parseWithOptions(alloc, src, toks.tokens.slice(), .{ .emit_events = true }) catch return;
     _ = &toks;
     if (tree.errors.len > 0) return;
     var sem = es.semantic.SemanticAnalyzer.analyzeWithOptions(alloc, &tree, .{
@@ -424,8 +424,8 @@ fn fuzzSemanticTs(_: void, smith: *std.testing.Smith) !void {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    var toks = try es.Lexer.tokenizeWithLanguage(alloc, src, .ts);
-    var tree = try es.Parser.parseWithOptions(alloc, src, toks.tokens.slice(), .{ .language = .ts, .is_module = true, .emit_events = true });
+    var toks = es.Lexer.tokenizeWithLanguage(alloc, src, .ts) catch return;
+    var tree = es.Parser.parseWithOptions(alloc, src, toks.tokens.slice(), .{ .language = .ts, .is_module = true, .emit_events = true }) catch return;
     _ = &toks;
     if (tree.errors.len > 0) return;
     var sem = es.semantic.SemanticAnalyzer.analyzeWithOptions(alloc, &tree, .{
@@ -447,8 +447,8 @@ fn fuzzSemanticNoCfg(_: void, smith: *std.testing.Smith) !void {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    var toks = try es.Lexer.tokenizeWithLanguage(alloc, src, .js);
-    var tree = try es.Parser.parseWithOptions(alloc, src, toks.tokens.slice(), .{ .emit_events = true });
+    var toks = es.Lexer.tokenizeWithLanguage(alloc, src, .js) catch return;
+    var tree = es.Parser.parseWithOptions(alloc, src, toks.tokens.slice(), .{ .emit_events = true }) catch return;
     _ = &toks;
     if (tree.errors.len > 0) return;
     var sem = es.semantic.SemanticAnalyzer.analyzeWithOptions(alloc, &tree, .{
@@ -467,8 +467,8 @@ fn fuzzSemanticParents(_: void, smith: *std.testing.Smith) !void {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    var toks = try es.Lexer.tokenizeWithLanguage(alloc, src, .js);
-    var tree = try es.Parser.parseWithOptions(alloc, src, toks.tokens.slice(), .{ .emit_events = true });
+    var toks = es.Lexer.tokenizeWithLanguage(alloc, src, .js) catch return;
+    var tree = es.Parser.parseWithOptions(alloc, src, toks.tokens.slice(), .{ .emit_events = true }) catch return;
     _ = &toks;
     if (tree.errors.len > 0) return;
     var sem = es.semantic.SemanticAnalyzer.analyzeWithOptions(alloc, &tree, .{
@@ -487,8 +487,8 @@ fn fuzzSemanticNoAnnexB(_: void, smith: *std.testing.Smith) !void {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    var toks = try es.Lexer.tokenizeWithLanguage(alloc, src, .js);
-    var tree = try es.Parser.parseWithOptions(alloc, src, toks.tokens.slice(), .{ .annex_b = false, .emit_events = true });
+    var toks = es.Lexer.tokenizeWithLanguage(alloc, src, .js) catch return;
+    var tree = es.Parser.parseWithOptions(alloc, src, toks.tokens.slice(), .{ .annex_b = false, .emit_events = true }) catch return;
     _ = &toks;
     if (tree.errors.len > 0) return;
     var sem = es.semantic.SemanticAnalyzer.analyzeWithOptions(alloc, &tree, .{
