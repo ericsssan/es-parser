@@ -842,6 +842,8 @@ pub const CodePathBuilder = struct {
         var result: std.ArrayListUnmanaged(SegmentId) = .empty;
         var seen = std.AutoHashMap(SegmentId, void).init(self.allocator);
         defer seen.deinit();
+        try seen.ensureTotalCapacity(@intCast(segments.len));
+        try result.ensureTotalCapacity(self.allocator, segments.len);
 
         const aps_arr = self.segments.items(.all_prev_start);
         const ape_arr = self.segments.items(.all_prev_end);
