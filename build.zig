@@ -57,6 +57,20 @@ pub fn build(b: *std.Build) void {
     const semantic_tests = b.addTest(.{ .root_module = semantic_test_mod });
     const run_semantic_tests = b.addRunArtifact(semantic_tests);
 
+    // ── Fuzz tests ────────────────────────────────────────
+    // Run normally: each corpus entry is fed once (regression mode).
+    // Run with `zig build test --fuzz` to engage the coverage-directed
+    // mutation engine for continuous bug-finding.
+    const fuzz_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/fuzz_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    fuzz_test_mod.addImport("es_parser", lib_mod);
+    const fuzz_tests = b.addTest(.{ .root_module = fuzz_test_mod });
+    const run_fuzz_tests = b.addRunArtifact(fuzz_tests);
+
     // ── Conformance: test262-parser-tests (always run, submodule included) ──
     // Shared ReleaseFast build of the parser, reused by the bundled test-step
     // runner below and every standalone conformance runner.
@@ -83,6 +97,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_parser_tests.step);
     test_step.dependOn(&run_lexer_tests.step);
     test_step.dependOn(&run_semantic_tests.step);
+    test_step.dependOn(&run_fuzz_tests.step);
     test_step.dependOn(&ptr_cmd.step);
 
     // ── Conformance runners ───────────────────────────────

@@ -368,6 +368,7 @@ fn scanHighIdentRun(src: []const u8, start: u32, n: u32) u32 {
         const bb = src[back];
         if (bb < 0x80) break;
         const bl: u32 = @intCast(std.unicode.utf8ByteSequenceLength(bb) catch 1);
+        if (back + bl > n) { trim_end = back; continue; } // truncated sequence at EOF
         const bcp = decodeKnownLen(src, back, bl);
         if (uid.isIdContinueJS(@intCast(bcp))) break;
         trim_end = back;
