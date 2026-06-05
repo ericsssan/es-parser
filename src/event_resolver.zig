@@ -384,7 +384,7 @@ fn resolveFullImpl(
     // (name_hash ^ scope_id * prime) → SymbolId.  The retry pass uses this
     // for O(1) lookups per var-scope level instead of O(log N) binary search.
     var hoist_map = std.HashMapUnmanaged(u64, SymbolId, NameHashCtx, 80){};
-    try hoist_map.ensureTotalCapacity(sa, @intCast(est_syms / 4));
+    try hoist_map.ensureTotalCapacity(sa, @intCast(est_syms / 2));
 
     // Sibling-canonical map: when `var x` is redeclared in the same scope,
     // ESLint scope analysis treats all such declarations as ONE Variable.
