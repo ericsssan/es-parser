@@ -331,10 +331,7 @@ pub const Parser = struct {
     /// this in the 8-byte alignment group adjacent to ev_ptr, keeping both on
     /// the same cache line. The actual event count always fits in u32.
     ev_len: usize = 0,
-    /// Count of elided scope_open events emitted during parse. Zero means the
-    /// compaction pass in parseInternal can be skipped entirely.
-    elided_scope_count: u32 = 0,
-/// Indices of object_literal nodes created during parsing (JS mode only).
+    /// Indices of object_literal nodes created during parsing (JS mode only).
     /// The post-parse duplicate-__proto__ scan iterates this list instead of
     /// scanning ALL nodes — reduces an O(total_nodes) pass to O(object_literals).
     proto_check_nodes: std.ArrayListUnmanaged(u32) = .empty,
