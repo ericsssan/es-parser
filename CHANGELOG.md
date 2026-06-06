@@ -26,6 +26,42 @@ A TypeScript error-recovery and correctness release. No public API changes.
   (e.g. `/[\q{\u{1f476}\u{1f3fb}}]/v`). The inner `}` from `\u{...}` no longer
   prematurely terminates the `\q{...}` skip, fixing a spurious class-syntax error.
 
+## [0.2.2]
+
+A performance, correctness, and semantic-analysis release.
+
+### Fixed
+
+- **`new Foo<T>(args)` parsed incorrectly.** TypeScript instantiation expressions
+  inside `new` were not consuming the type arguments before checking for an argument
+  list, producing `CallExpression(NewExpression(TSInstantiationExpression), args)`
+  instead of `NewExpression(TSInstantiationExpression, args)`.
+- **Memory leaks on error paths.** Two `toOwnedSlice` struct-literal sites in
+  `scalar_lexer.zig` and `event_resolver.zig` leaked their already-allocated slices
+  when a subsequent allocation failed. Fixed by binding each slice before constructing
+  the return value with `errdefer`.
+- **Event-resolver streaming spin-wait hang** on parse-error files.
+
+### Performance
+
+- **`nearestVarScope` / `outerVarScope` are now O(1).** Each scope pre-computes its
+  nearest enclosing var-scope at creation time, replacing two depth-first while-loop
+  traversals with single array reads.
+- **`hoist_map` initial capacity doubled** (`est_syms / 4` → `/ 2`), covering the
+  common case without an extra grow+rehash. Measured +3% on the scope-analysis pass
+  over large TypeScript files.
+
+### Changed
+
+- **Lean parser port (increment 1).** Block-scope lexical-vs-var and duplicate
+  function-declaration redeclaration checks moved from the parser to the semantic
+  analyzer, measured at ~9% win on modern JS. The `diagnose_redeclare` option now
+  covers import bindings, catch parameters, and catch-scope function declarations.
+- **Parent map built in semantic, not parse.** Removes the byte-span-AST overhead
+  from the parse phase; parents are derived on demand by the semantic pass.
+- **Async-arrow parameters now have their own scope.** Fixes missing declares for
+  async arrow functions.
+
 ## [0.2.1]
 
 A robustness, tooling, and newer-Zig-compatibility release. No public API
