@@ -519,21 +519,31 @@ fn parsePrimaryTypeInner(p: *Parser) Error!NodeIndex {
         },
 
         // ── Generic function type: <T>(x: T) => T ─────────────
+        // Open the function scope BEFORE parsing type parameters so that T
+        // lands in the function type's scope.  parseFunctionTypeWithScope
+        // receives the pre-opened scope and skips opening a second one.
         .less_than => {
+            const fn_scope_ev = try p.emitScopeOpen(.function, .none);
+            const prev_eftp = p.emit_fn_type_params;
+            p.emit_fn_type_params = true;
             const tp_range = try parseTypeParameterList(p);
+            p.emit_fn_type_params = prev_eftp;
+            if (p.peek() == .l_paren) {
+                const inner = try parseFunctionTypeWithScope(p, fn_scope_ev);
+                if (p.node_tags_ptr[inner.toInt()] == .ts_function_type) {
+                    const fn_data_idx = @intFromEnum(p.node_data_ptr[inner.toInt()].lhs);
+                    p.extra_data.items[fn_data_idx + 5] = tp_range.start;
+                    p.extra_data.items[fn_data_idx + 6] = tp_range.end;
+                }
+                return inner;
+            }
+            // Fallback: close the pre-opened scope and let the normal path handle it.
+            try p.emitScopeClose(.none);
             const inner = try parseParenthesizedOrFunctionType(p);
-            // If the inner shape is a function type, splice the type
-            // parameters into its FnData so downstream consumers can
-            // bind T at call sites.  FnData layout: name, params,
-            // params_end, body, return_type, type_params,
-            // type_params_end → the last two slots are positions
-            // 5/6 from the FnData index.
             if (p.node_tags_ptr[inner.toInt()] == .ts_function_type) {
                 const fn_data_idx = @intFromEnum(p.node_data_ptr[inner.toInt()].lhs);
                 p.extra_data.items[fn_data_idx + 5] = tp_range.start;
                 p.extra_data.items[fn_data_idx + 6] = tp_range.end;
-                // (type_params are spliced in above, so their parents are now
-                // derivable from the final tree by buildParentsOnly — no fixup.)
             }
             return inner;
         },
@@ -876,10 +886,17 @@ fn parseParenthesizedTypeSimple(p: *Parser) Error!NodeIndex {
 
 /// Parse a function type: `(param: Type, ...) => ReturnType`.
 fn parseFunctionType(p: *Parser) Error!NodeIndex {
+    return parseFunctionTypeWithScope(p, null);
+}
+
+/// Core TSFunctionType parser.  When `pre_scope_ev` is non-null the scope was
+/// already opened by the caller (generic function type `<T>(...) => T`),
+/// otherwise we open it here so type parameters and params share one scope.
+fn parseFunctionTypeWithScope(p: *Parser, pre_scope_ev: ?u32) Error!NodeIndex {
     // Open a function scope for the parameters so they appear as scope variables.
     // ESLint/TypeScript-ESLint creates a function scope for TSFunctionType, enabling
     // no-shadow to detect when a function type parameter shadows an outer variable.
-    const fn_type_scope_ev = try p.emitScopeOpen(.function, .none);
+    const fn_type_scope_ev: u32 = pre_scope_ev orelse try p.emitScopeOpen(.function, .none);
 
     const open_tok = p.advance(); // consume `(`
 
@@ -2267,11 +2284,14 @@ pub fn parseInterfaceMember(p: *Parser) Error!NodeIndex {
 
     // ── Method signature: `name<T>(params): ReturnType` ──────
     if (p.peek() == .less_than or p.peek() == .l_paren) {
-        // Optional type parameters — store as SubRange so adapter can expose
-        // node.typeParameters to rules like @typescript-eslint/method-signature-style.
+        // Optional type parameters — emit as type_param symbols in the enclosing
+        // scope so no-unnecessary-type-parameters can find them via getScope().
         var type_params_range: ast.SubRange = .{ .start = 0, .end = 0 };
         if (p.peek() == .less_than) {
+            const prev_eftp = p.emit_fn_type_params;
+            p.emit_fn_type_params = true;
             type_params_range = try parseTypeParameterList(p);
+            p.emit_fn_type_params = prev_eftp;
         }
 
         _ = try p.expect(.l_paren);
@@ -2332,10 +2352,14 @@ pub fn parseInterfaceMember(p: *Parser) Error!NodeIndex {
 /// Parse a call or construct signature (shared logic).
 /// is_construct: true for `new ()` (construct), false for `()` (call).
 fn parseCallOrConstructSignature(p: *Parser, member_tok: TokenIndex, is_construct: bool) Error!NodeIndex {
-    // Optional type parameters
+    // Optional type parameters — emit as type_param symbols in the enclosing
+    // scope so no-unnecessary-type-parameters can find them via getScope().
     var sig_type_params_range = ast.SubRange{ .start = 0, .end = 0 };
     if (p.peek() == .less_than) {
+        const prev_eftp = p.emit_fn_type_params;
+        p.emit_fn_type_params = true;
         sig_type_params_range = try parseTypeParameterList(p);
+        p.emit_fn_type_params = prev_eftp;
     }
 
     _ = try p.expect(.l_paren);
