@@ -310,8 +310,8 @@ pub const Parser = struct {
     /// Direct-indexed cache of node-id → event-index for the most recent
     /// reference event for that node. Indexed by NodeIndex value; sentinel
     /// 0xFFFFFFFF means "no recent reference event". Eliminates O(N) backward
-    /// scans in cancelReferenceForNode, upgradeReferenceKindUnbounded, and
-    /// convertRefToDeclare. Sized to estimated_node_count at parse start;
+    /// scans in cancelReferenceForNode and upgradeReferenceKindUnbounded.
+    /// Sized to estimated_node_count at parse start;
     /// auto-grows alongside nodes. Direct array beats AutoHashMap because
     /// emitReference fires per-reference (~1.8M times on typescript.js) and
     /// each put incurred wyhash + bucket probe + amortized grow.
@@ -1735,25 +1735,6 @@ pub const Parser = struct {
             .assignment_pattern => try self.upgradePatternRefsToWrite(data.lhs),
             .grouping_expr => try self.upgradePatternRefsToWrite(data.lhs),
             else => {},
-        }
-    }
-
-    /// Walk back through ALL emitted events (unbounded) to find a reference
-    /// event for `node` and convert it into a declare event with the given
-    /// binding kind.  Used for arrow parameters where the param identifier
-    /// was speculatively parsed as an expression (emitting reference) before
-    /// being reinterpreted as a binding.
-    pub fn convertRefToDeclare(self: *Parser, node: NodeIndex, kind: BindingKindU8) void {
-        if (!self.emit_scope_events) return;
-        const node_u32 = @intFromEnum(node);
-        // ref_event_idx is always sized to nodes.capacity and node indices are always
-        // < nodes.len <= nodes.capacity, so the load is always in bounds.
-        const idx = self.ref_event_idx[node_u32];
-        if (idx == 0) return;
-        const ev_idx = idx - 1;
-        if (ev_idx < self.ev_len and self.ev_ptr[ev_idx].kind == .reference and self.ev_ptr[ev_idx].node == node_u32) {
-            self.ev_ptr[ev_idx] = .{ .kind = .declare, .aux = @intFromEnum(kind), .node = node_u32 };
-            self.ref_event_idx[node_u32] = 0;
         }
     }
 
@@ -8355,38 +8336,6 @@ pub const Parser = struct {
             .data = .{ .lhs = .none, .rhs = .none },
         });
     }
-
-    /// Expression-position identifier: produces the AST node AND emits a
-    /// `reference(.read)` semantic event.
-    pub fn parseIdentifierRef(self: *Parser) !NodeIndex {
-        const tok = self.advance();
-        // Spec: an IdentifierName that decodes (via \u escape) to a
-        // ReservedWord is a SyntaxError when used as IdentifierReference.
-        // The Lexer emits these as .identifier (since the surface form
-        // isn't the keyword); we validate decoded form here.
-        const tag = self.tokenTagAt(tok);
-        if (tag == .identifier) {
-            const text = self.tokenText(tok);
-            if (std.mem.indexOf(u8, text, "\\u")) |_| {
-                var resolved_buf: [256]u8 = undefined;
-                if (resolveUnicodeEscapesParser(text, &resolved_buf)) |resolved| {
-                    if (isAlwaysReservedStr(resolved)) {
-                        try self.emitDiagnostic(self.currentSpan(),
-                            "'{s}' is a reserved word and cannot be used as an identifier", .{resolved});
-                        return error.ParseError;
-                    }
-                }
-            }
-        }
-        const node = try self.addNode(.{
-            .tag = .identifier,
-            .main_token = tok,
-            .data = .{ .lhs = .none, .rhs = .none },
-        });
-        try self.emitReference(.read, node);
-        return node;
-    }
-
 
     /// Check if a keyword tag is one of the "always reserved" keywords in JavaScript —
     /// words that can never be used as identifiers regardless of strict mode.

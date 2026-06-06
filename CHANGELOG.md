@@ -24,6 +24,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Fused-lexing token source` doc comment left orphaned after fusion was removed.
   No behavior change.
 
+### Removed
+
+- **Two unreachable `pub` Parser methods.** `convertRefToDeclare` and
+  `parseIdentifierRef` were extraction leftovers carried over from the original
+  Ez linter with no remaining callers. `parseIdentifierRef` was a stale duplicate
+  of the live `parseIdentifierRef` in `expressions.zig`; the arrow ref→declare
+  path that `convertRefToDeclare` once served is handled by `cancelReferenceForNode`
+  + `emitDeclaresFromPatternImpl`. Both required mid-parse internal `Parser` state
+  and were never part of the documented API (`Parser.parse` / `parseWithOptions`),
+  so removing them affects no supported usage.
+
 ## [0.2.5]
 
 A robustness and performance release. No public API changes.
