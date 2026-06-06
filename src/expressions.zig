@@ -1088,13 +1088,30 @@ fn validateRegexVFlagClass(p: *Parser, body: []const u8, i_ptr: *usize) Error!vo
                 }
             }
             i += 2;
-            // For \p{...}, \P{...}, \q{...}, \u{...} skip past the brace
-            // body — these wrap a name / codepoint hex and the inner `{`/`}`
-            // are NOT class-syntax punctuation.  Same for \k<name>.
-            if ((e == 'p' or e == 'P' or e == 'q' or e == 'u') and i < body.len and body[i] == '{') {
+            // For \p{...}, \P{...}, \u{...} skip past the brace body.
+            // For \q{...}, its content is a ClassStringDisjunction that may
+            // itself contain \u{...} escapes — use a nested-escape-aware skip
+            // so the inner `}` isn't mistaken for the closing brace of \q{}.
+            // Same for \k<name>.
+            if ((e == 'p' or e == 'P' or e == 'u') and i < body.len and body[i] == '{') {
                 i += 1;
                 while (i < body.len and body[i] != '}') : (i += 1) {}
                 if (i < body.len) i += 1;
+            } else if (e == 'q' and i < body.len and body[i] == '{') {
+                i += 1; // skip {
+                while (i < body.len and body[i] != '}') {
+                    if (body[i] == '\\' and i + 1 < body.len) {
+                        i += 2;
+                        if (i < body.len and body[i] == '{') {
+                            i += 1;
+                            while (i < body.len and body[i] != '}') : (i += 1) {}
+                            if (i < body.len) i += 1;
+                        }
+                    } else {
+                        i += 1;
+                    }
+                }
+                if (i < body.len) i += 1; // skip closing }
             } else if (e == 'k' and i < body.len and body[i] == '<') {
                 i += 1;
                 while (i < body.len and body[i] != '>') : (i += 1) {}
@@ -6032,8 +6049,8 @@ fn parseAssignment(p: *Parser, left: NodeIndex) Error!NodeIndex {
     if (op_tag != .equal) {
         switch (left_tag) {
             .array_literal, .array_pattern, .object_literal, .object_pattern => {
-                try p.emitError("Invalid left-hand side in compound assignment");
-                return error.ParseError;
+                try p.emitDiagnostic(p.currentSpan(), "Invalid left-hand side in compound assignment", .{});
+                if (!p.is_ts) return error.ParseError;
             },
             else => {},
         }
@@ -6041,7 +6058,8 @@ fn parseAssignment(p: *Parser, left: NodeIndex) Error!NodeIndex {
 
     // Validate assignment target — reject literals, binary exprs, calls, optional chains, etc.
     // Parenthesized simple targets: (x) = 1, ((x)) = 1, (a.b) = 1 are valid
-    // But parenthesized destructuring patterns: ([a]) = 1, ({a}) = 1 are NOT valid
+    // But parenthesized destructuring patterns: ([a]) = 1, ({a}) = 1 are NOT valid.
+    // The spec-correct form wraps the entire assignment: ([a] = 1), ({a} = 1).
     const effective_left_tag = if (left_tag == .grouping_expr) unwrapGroupingTag(p, left) else left_tag;
     if (left_tag == .grouping_expr and op_tag == .equal) {
         if (effective_left_tag == .array_literal or effective_left_tag == .array_pattern or

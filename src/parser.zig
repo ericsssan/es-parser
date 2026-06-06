@@ -7654,7 +7654,7 @@ pub const Parser = struct {
                     const ct = self.node_tags_ptr[child.toInt()];
                     if (ct == .assignment_pattern) {
                         try self.emitDiagnostic(self.currentSpan(), "Shorthand property with default is only allowed in destructuring patterns", .{});
-                        return error.ParseError;
+                        if (!self.is_ts) return error.ParseError;
                     }
                     try self.validateNoCoverInitName(child);
                 }

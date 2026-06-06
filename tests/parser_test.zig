@@ -594,3 +594,58 @@ test "parser: conflict markers in a class body recover without OOM" {
     defer a.deinit(testing.allocator);
     try testing.expect(a.errors.len > 0);
 }
+
+// ── Index signature error recovery ──────────────────────────────────────────
+
+fn hasErrorNode(tree: *const ast.Ast) bool {
+    for (tree.nodes.items(.tag)) |t| { if (t == .error_node) return true; }
+    return false;
+}
+
+test "index signature without value type recovers" {
+    var tree = try parseTs("type Foo = { [key: string]; };");
+    defer tree.deinit(testing.allocator);
+    try testing.expect(!hasErrorNode(&tree));
+}
+
+test "empty index signature recovers" {
+    var tree = try parseTs("type Foo = { []; };");
+    defer tree.deinit(testing.allocator);
+    try testing.expect(!hasErrorNode(&tree));
+}
+
+// ── Ambient module declarations ──────────────────────────────────────────────
+
+test "declare module without body or semicolon" {
+    var tree = try parseTs("declare module '_'");
+    defer tree.deinit(testing.allocator);
+    try testing.expect(!hasErrorNode(&tree));
+}
+
+test "declare wildcard ambient module without body" {
+    var tree = try parseTs("declare module '*.svg'");
+    defer tree.deinit(testing.allocator);
+    try testing.expect(!hasErrorNode(&tree));
+}
+
+// ── Regex v-flag \q{} set notation ──────────────────────────────────────────
+
+test "regex v-flag \\q{} with nested \\u{} escapes" {
+    var tree = try parseSource("var r = /^[\\q{\\u{1f476}\\u{1f3fb}}]$/v;");
+    defer tree.deinit(testing.allocator);
+    try testing.expect(!hasErrorNode(&tree));
+}
+
+// ── Issue #8: TS error-recovery for invalid assignment/property forms ────────
+
+test "#8a compound assign to paren object literal" {
+    var tree = try parseTs("let _ = ({} *= {});");
+    defer tree.deinit(testing.allocator);
+    try testing.expect(!hasErrorNode(&tree));
+}
+
+test "#8b shorthand property with initializer in object literal" {
+    var tree = try parseTs("const x = { y = 1 };");
+    defer tree.deinit(testing.allocator);
+    try testing.expect(!hasErrorNode(&tree));
+}

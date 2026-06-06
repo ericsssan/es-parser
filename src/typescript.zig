@@ -2029,9 +2029,17 @@ fn parseNamespaceOrModule(p: *Parser, node_tag: Node.Tag) Error!NodeIndex {
         }
     }
 
-    // Ambient module with no body: `declare module "foo";`
+    // Ambient module with no body: `declare module "foo";` or `declare module '*.svg'`
+    // (the latter omits the semicolon — valid TypeScript .d.ts shorthand).
     if (p.peek() == .semicolon) {
         _ = p.advance();
+        return p.addNode(.{
+            .tag = node_tag,
+            .main_token = main_tok,
+            .data = .{ .lhs = name_node, .rhs = .none },
+        });
+    }
+    if (p.node_tags_ptr[name_node.toInt()] == .string_literal and p.peek() != .l_brace) {
         return p.addNode(.{
             .tag = node_tag,
             .main_token = main_tok,
@@ -2156,6 +2164,10 @@ pub fn parseInterfaceMember(p: *Parser) Error!NodeIndex {
     // Only treat as index signature if `[identifierOrKeyword :` pattern (colon inside brackets).
     // Keyword names like `module`, `type`, `from` are valid index parameter names.
     // Otherwise it's a computed property `[expr]: Type;` handled below.
+    // TS1096: `[]` (empty) is also routed here for error-recovery.
+    if (p.peek() == .l_bracket and p.peekAt(1) == .r_bracket) {
+        return parseIndexSignature(p);
+    }
     if (p.peek() == .l_bracket and
         (((p.peekAt(1) == .identifier or p.peekAt(1).isKeyword()) and p.peekAt(2) == .colon) or
         (p.peekAt(1) == .kw_readonly and (p.peekAt(2) == .identifier or p.peekAt(2).isKeyword()) and p.peekAt(3) == .colon)))
@@ -2384,6 +2396,29 @@ fn parseCallOrConstructSignature(p: *Parser, member_tok: TokenIndex, is_construc
 pub fn parseIndexSignature(p: *Parser) Error!NodeIndex {
     const bracket_tok = p.advance(); // consume `[`
 
+    // TS1096: empty index signature `[]` — recover by producing a bare node.
+    if (p.peek() == .r_bracket) {
+        try p.emitDiagnostic(p.currentSpan(), "An index signature must have exactly one parameter", .{});
+        _ = p.advance(); // consume `]`
+        var value_type_annotation = NodeIndex.none;
+        if (p.peek() == .colon) {
+            const value_colon_tok: u32 = p.tokIdx();
+            _ = p.advance();
+            const value_type = try parseType(p);
+            value_type_annotation = try p.addNode(.{
+                .tag = .ts_type_annotation,
+                .main_token = value_colon_tok,
+                .data = .{ .lhs = value_type, .rhs = .none },
+            });
+        }
+        try consumeMemberSeparator(p);
+        return p.addNode(.{
+            .tag = .ts_index_signature,
+            .main_token = bracket_tok,
+            .data = .{ .lhs = .none, .rhs = value_type_annotation },
+        });
+    }
+
     // Parameter name — stored in lhs so JS can expose `parameters: [identifier]`
     const param_ident = try p.parseIdentifier();
 
@@ -2435,14 +2470,21 @@ pub fn parseIndexSignature(p: *Parser) Error!NodeIndex {
 
     // Colon and value type. Wrap in TSTypeAnnotation so member.typeAnnotation
     // returns the wrapper (ESTree shape), not the bare value type.
-    const value_colon_tok: u32 = p.tokIdx();
-    _ = try p.expect(.colon);
-    const value_type = try parseType(p);
-    const value_type_annotation = try p.addNode(.{
-        .tag = .ts_type_annotation,
-        .main_token = value_colon_tok,
-        .data = .{ .lhs = value_type, .rhs = .none },
-    });
+    // TS1005: value type is required but tsc recovers — emit a warning and
+    // continue so downstream rules see a TSIndexSignature node, not ErrorNode.
+    var value_type_annotation = NodeIndex.none;
+    if (p.peek() == .colon) {
+        const value_colon_tok: u32 = p.tokIdx();
+        _ = p.advance();
+        const value_type = try parseType(p);
+        value_type_annotation = try p.addNode(.{
+            .tag = .ts_type_annotation,
+            .main_token = value_colon_tok,
+            .data = .{ .lhs = value_type, .rhs = .none },
+        });
+    } else {
+        try p.emitDiagnostic(p.currentSpan(), "An index signature must have a type annotation", .{});
+    }
 
     try consumeMemberSeparator(p);
 
