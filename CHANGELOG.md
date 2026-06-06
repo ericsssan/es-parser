@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.4]
+
+A TypeScript scope-analysis release. No public API changes.
+
+### Added
+
+- **Type-parameter names emitted as scope symbols in four more contexts.**
+  Previously only function declarations bound their type parameters as
+  `type_param` symbols. Type parameters now also appear as scope variables for:
+  - **Class declarations** (`class Foo<T>`), bound in the class scope.
+  - **Generic function types** (`<T>(x: T) => T`), bound in the function type's
+    scope alongside its parameters (the scope is opened before the type
+    parameter list so `T` and the params share one scope).
+  - **Interface call and construct signatures** (`interface I { <T>(x: T): T }`).
+  - **Interface method signatures** (`interface I { m<T>(x: T): T }`).
+
+  This lets typescript-eslint rules such as `no-unnecessary-type-parameters`
+  and `no-shadow` resolve type-parameter names via `getScope().set.get(name)`.
+
 ## [0.2.3]
 
 A TypeScript error-recovery and correctness release. No public API changes.
