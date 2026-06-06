@@ -524,10 +524,18 @@ fn parsePrimaryTypeInner(p: *Parser) Error!NodeIndex {
         // receives the pre-opened scope and skips opening a second one.
         .less_than => {
             const fn_scope_ev = try p.emitScopeOpen(.function, .none);
-            const prev_eftp = p.emit_fn_type_params;
-            p.emit_fn_type_params = true;
-            const tp_range = try parseTypeParameterList(p);
-            p.emit_fn_type_params = prev_eftp;
+            // Parse the type parameters into the pre-opened scope.  Ownership of
+            // closing that scope transfers to parseFunctionTypeWithScope (success
+            // path) or the explicit close in the fallback below — so the errdefer
+            // is scoped to JUST this parse, where the scope would otherwise leak
+            // and the flag would stay stuck `true` after error recovery.
+            const tp_range = tp: {
+                errdefer p.emitScopeClose(.none) catch {};
+                const prev_eftp = p.emit_fn_type_params;
+                p.emit_fn_type_params = true;
+                defer p.emit_fn_type_params = prev_eftp;
+                break :tp try parseTypeParameterList(p);
+            };
             if (p.peek() == .l_paren) {
                 const inner = try parseFunctionTypeWithScope(p, fn_scope_ev);
                 if (p.node_tags_ptr[inner.toInt()] == .ts_function_type) {

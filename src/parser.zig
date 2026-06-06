@@ -4817,11 +4817,13 @@ pub const Parser = struct {
 
         // TS type parameters: class Foo<T, U> — emit as type_param symbols so
         // rules like no-unnecessary-type-parameters can find them in the class scope.
+        // Save/restore (rather than reset-to-false) keeps the flag correct under
+        // nesting, and `defer` restores it even if parseTypeParameterList errors.
         const class_type_params = if (self.is_ts and self.peek() == .less_than) blk: {
+            const prev_eftp = self.emit_fn_type_params;
             self.emit_fn_type_params = true;
-            const r = try typescript.parseTypeParameterList(self);
-            self.emit_fn_type_params = false;
-            break :blk r;
+            defer self.emit_fn_type_params = prev_eftp;
+            break :blk try typescript.parseTypeParameterList(self);
         } else ast.SubRange{ .start = 0, .end = 0 };
 
         // Class definitions (including extends clause and body) are always strict mode code.
