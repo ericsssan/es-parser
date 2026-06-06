@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Internal parser cleanup: removed dead code and corrected a stale header.**
+  The `Lex/Var redeclaration conflict helpers` were ported to the semantic
+  analyzer (`event_resolver.checkRedeclarations`), but the parser's section
+  header still claimed that role. Retitled it to reflect that the remaining
+  helpers are scope-free syntactic statement validators, and deleted the dead
+  `isIterationOrLabeledIteration` function — its `continue label` validation is
+  now done at parse time via the label stack. No behavior change.
+
 ## [0.2.5]
 
 A robustness and performance release. No public API changes.
