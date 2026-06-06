@@ -46,7 +46,7 @@ hash for you:
 
 ```sh
 # Pin to a release tag (recommended):
-zig fetch --save https://github.com/ericsssan/es-parser/archive/refs/tags/v0.2.4.tar.gz
+zig fetch --save https://github.com/ericsssan/es-parser/archive/refs/tags/v0.2.5.tar.gz
 
 # …or track the main branch:
 zig fetch --save git+https://github.com/ericsssan/es-parser

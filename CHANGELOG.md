@@ -4,6 +4,33 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.5]
+
+A robustness and performance release. No public API changes.
+
+### Fixed
+
+- **Out-of-bounds node access during semantic analysis of error-recovered input.**
+  On malformed input the parser can emit a scope event whose node index points
+  one past the end of the node array (a node the error recovery unwound before
+  creating). The `declare` / `reference` / `label` handlers in the event resolver
+  now bound-check the node index before dereferencing it — mirroring the existing
+  loop-event guard. This was a silent out-of-bounds read in `ReleaseFast` (a
+  bounds panic in `ReleaseSafe`); valid input is unaffected, since every real
+  event's node index is in range. Found by mutation fuzzing under a poison
+  allocator (≈180k mutated inputs); a minimal repro is covered by a regression test.
+- **Type-parameter symbol emission flag is now exception-safe on error paths.** A
+  parse error inside a type-parameter list could leave the internal
+  `emit_fn_type_params` flag stuck on and emit spurious `type_param` symbols
+  downstream; it is now restored via `defer`/`errdefer`.
+
+### Performance
+
+- **Lexer token-append loop caches its SoA column base pointers.** The token
+  buffer's column pointers were recomputed on every append; hoisting them (and
+  widening the initial token-buffer presize) cuts per-token work. Lexing is
+  ~1–6% faster — largest on dense/minified input — with byte-identical output.
+
 ## [0.2.4]
 
 A TypeScript scope-analysis release. No public API changes.
