@@ -370,3 +370,26 @@ test "redeclare: legal redeclarations are not flagged" {
     // Annex B: a sloppy function nested in `if` does not conflict with an outer let.
     try testing.expectEqual(@as(usize, 0), try redeclareDiagCount("let f = 1;\nif (false) function _f() {} else function f() {}\n", false));
 }
+
+test "regression: analyze does not index past the node array on error-recovered TSX" {
+    // Malformed TSX that the parser error-recovers into a tree whose scope-event
+    // stream references a node index one past the end of the node array (an event
+    // for a node the recovery never created). event_resolver's declare/reference/
+    // label handlers must skip such events rather than indexing ast.nodes out of
+    // bounds (previously: a silent OOB read in ReleaseFast, a bounds panic in
+    // ReleaseSafe — "index 7, len 7"). Reaching the end without a panic is the
+    // assertion; the linter runs semantic analysis even when tree.errors.len > 0.
+    const allocator = testing.allocator;
+    const source = "(functi<{ () {\n    f'nction a() {\n        var b = 1;\n        return `;\n    }\n<())";
+    var _lr = try Lexer.tokenizeWithLanguage(allocator, source, .tsx);
+    defer _lr.deinit(allocator);
+    var tree = try Parser.parseWithLanguage(allocator, source, _lr.tokens.slice(), .tsx, false);
+    defer tree.deinit(allocator);
+    var sem = try semantic.SemanticAnalyzer.analyzeWithOptions(allocator, &tree, .{
+        .need_cfg = true,
+        .build_ref_ranges = true,
+        .build_parents = true,
+        .diagnose_redeclare = true,
+    });
+    defer sem.deinit(allocator);
+}

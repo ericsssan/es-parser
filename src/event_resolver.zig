@@ -759,6 +759,12 @@ fn resolveFullImpl(
             // CFG-side concern: dead-path declare marks node unreachable.
             if (do_cfg and !cfg_alive and e.node < node_reachable.len) node_reachable[e.node] = 0;
             if (!do_scope) continue;
+            // Defensive: an error-recovered parse can emit a declare whose node
+            // index was never created (out of range) — skip symbol creation
+            // rather than indexing past the node array in nodeName below. The
+            // linter's parallel path runs sem even when tree.errors.len > 0, so
+            // sem must be robust to broken ASTs (mirrors the .loop_open guard).
+            if (e.node >= ast.nodes.len) continue;
             const kind: BindingKind = @enumFromInt(e.aux);
             // var hoists to the nearest enclosing var-scope (function /
             // global / module / static_block / class_field_init).  let /
@@ -864,6 +870,9 @@ fn resolveFullImpl(
             if (phase == .scope_only) try ref_event_to_id.append(allocator, ref_id);
 
             if (skip_resolve) continue;
+            // Defensive: error-recovered ref node may be out of range — leave the
+            // reference unresolved rather than indexing past the node array.
+            if (e.node >= ast.nodes.len) continue;
             const name_hash = std.hash.Wyhash.hash(0, ast.nodeName(@enumFromInt(e.node)));
 
             // O(1) resolve via the scope_map (name_hash → sym_id for all visible names).
@@ -1066,7 +1075,8 @@ fn resolveFullImpl(
         // ── Labeled statements (break/continue targets) ─────────
         .label_open => {
             if (e.aux == 1) { // loop label — extract text for upcoming loop_open
-                pending_label = ast.nodeName(@enumFromInt(e.node));
+                // Defensive: out-of-range node on error-recovered input → no label.
+                pending_label = if (e.node >= ast.nodes.len) "" else ast.nodeName(@enumFromInt(e.node));
             }
         },
         .label_close => {
