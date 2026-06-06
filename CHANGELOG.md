@@ -4,6 +4,28 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3]
+
+A TypeScript error-recovery and correctness release. No public API changes.
+
+### Fixed
+
+- **TS error-recovery: compound assignment to object/array literal** (`({} *= {})`).
+  Previously produced an `error_node`; now emits a diagnostic and recovers in
+  TypeScript mode. Hard error preserved in JavaScript mode.
+- **TS error-recovery: shorthand property initializer in non-destructuring context**
+  (`const x = { y = 1 }`). Previously produced an `error_node`; now emits a
+  diagnostic and recovers in TypeScript mode. Hard error preserved in JavaScript mode.
+- **TS index signature without value type** (`{ [key: string]; }`). Now emits a
+  diagnostic instead of a hard parse error, preserving the `TSIndexSignature` node.
+- **TS empty index signature** (`{ []; }`). Now routed to error-recovery path,
+  producing a `TSIndexSignature` node with a diagnostic instead of an `error_node`.
+- **Ambient module declaration without body or semicolon** (`declare module '*.svg'`).
+  The no-semicolon, no-braces form common in `.d.ts` wildcard modules is now accepted.
+- **Regex v-flag `\q{...}` with nested `\u{...}` escapes**
+  (e.g. `/[\q{\u{1f476}\u{1f3fb}}]/v`). The inner `}` from `\u{...}` no longer
+  prematurely terminates the `\q{...}` skip, fixing a spurious class-syntax error.
+
 ## [0.2.1]
 
 A robustness, tooling, and newer-Zig-compatibility release. No public API
