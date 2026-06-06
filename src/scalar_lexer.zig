@@ -536,7 +536,7 @@ pub fn tokenizeScalarWithOptions(
     opts: Lex.TokenizeOptions,
 ) !TokenList {
     var toks: TokenList = .empty;
-    try toks.ensureTotalCapacity(alloc, @max(src.len / 4 + 16, 64));
+    try toks.ensureTotalCapacity(alloc, @max(src.len / 2 + 16, 64));
     const n: u32 = @intCast(src.len);
     const is_ts = language.isTs();
     const is_jsx = language.isJsx();
@@ -561,6 +561,20 @@ pub fn tokenizeScalarWithOptions(
         try toks.append(alloc, .{ .tag = .hashbang, .start = 0, .len = i, .has_newline_before = false });
         at_line_start = false;
     }
+
+    // Hoist the SoA column base pointers + len/capacity into locals. MultiArrayList's
+    // appendAssumeCapacity reconstructs the column pointers (one multiply-add per field)
+    // on every call because the per-token capacity check may mutate the list, so LLVM
+    // cannot prove them loop-invariant. Caching them here — refreshed only on the rare
+    // growth — removes that per-token pointer math (mirrors the parser's tags_ptr cache).
+    var t_cap: u32 = @intCast(toks.capacity);
+    var t_len: u32 = @intCast(toks.len);
+    var sl = toks.slice();
+    var p_tag = sl.items(.tag).ptr;
+    var p_start = sl.items(.start).ptr;
+    var p_len = sl.items(.len).ptr;
+    var p_nl = sl.items(.has_newline_before).ptr;
+    var p_esc = sl.items(.has_unicode_escape).ptr;
 
     while (i < n) {
         const c = src[i];
@@ -709,8 +723,18 @@ pub fn tokenizeScalarWithOptions(
                     if (res.end >= n and !(n >= 2 and src[n - 2] == '*' and src[n - 1] == '/')) {
                         // JSX: an unterminated `/*` in JSX text is a literal `/`.
                         if (is_jsx) {
-                            if (toks.len >= toks.capacity) try toks.ensureTotalCapacity(alloc, toks.capacity * 2 + 16);
-                            toks.appendAssumeCapacity(.{ .tag = .slash, .start = i, .len = 1, .has_newline_before = saw_nl });
+                            // Cold path: emit via the list (syncs t_len), then refresh
+                            // the cached column pointers since append may have grown.
+                            toks.len = t_len;
+                            try toks.append(alloc, .{ .tag = .slash, .start = i, .len = 1, .has_newline_before = saw_nl });
+                            t_len = @intCast(toks.len);
+                            t_cap = @intCast(toks.capacity);
+                            sl = toks.slice();
+                            p_tag = sl.items(.tag).ptr;
+                            p_start = sl.items(.start).ptr;
+                            p_len = sl.items(.len).ptr;
+                            p_nl = sl.items(.has_newline_before).ptr;
+                            p_esc = sl.items(.has_unicode_escape).ptr;
                             prev_kind = .slash;
                             saw_nl = false;
                             at_line_start = false;
@@ -732,8 +756,18 @@ pub fn tokenizeScalarWithOptions(
                             }
                         }
                         // Unterminated block comment -> single invalid token, then stop.
-                        if (toks.len >= toks.capacity) try toks.ensureTotalCapacity(alloc, toks.capacity * 2 + 16);
-                        toks.appendAssumeCapacity(.{ .tag = .invalid, .start = i, .len = res.end - i, .has_newline_before = saw_nl });
+                        // Cold path: emit via the list (syncs t_len), then refresh the
+                        // cached column pointers since append may have grown.
+                        toks.len = t_len;
+                        try toks.append(alloc, .{ .tag = .invalid, .start = i, .len = res.end - i, .has_newline_before = saw_nl });
+                        t_len = @intCast(toks.len);
+                        t_cap = @intCast(toks.capacity);
+                        sl = toks.slice();
+                        p_tag = sl.items(.tag).ptr;
+                        p_start = sl.items(.start).ptr;
+                        p_len = sl.items(.len).ptr;
+                        p_nl = sl.items(.has_newline_before).ptr;
+                        p_esc = sl.items(.has_unicode_escape).ptr;
                         i = res.end;
                         continue;
                     }
@@ -850,8 +884,23 @@ pub fn tokenizeScalarWithOptions(
                 }
             },
         }
-        if (toks.len >= toks.capacity) try toks.ensureTotalCapacity(alloc, toks.capacity * 2 + 16);
-        toks.appendAssumeCapacity(.{ .tag = tag, .start = start, .len = i - start, .has_newline_before = saw_nl, .has_unicode_escape = has_esc });
+        if (t_len >= t_cap) {
+            toks.len = t_len;
+            try toks.ensureTotalCapacity(alloc, t_cap * 2 + 16);
+            t_cap = @intCast(toks.capacity);
+            sl = toks.slice();
+            p_tag = sl.items(.tag).ptr;
+            p_start = sl.items(.start).ptr;
+            p_len = sl.items(.len).ptr;
+            p_nl = sl.items(.has_newline_before).ptr;
+            p_esc = sl.items(.has_unicode_escape).ptr;
+        }
+        p_tag[t_len] = tag;
+        p_start[t_len] = start;
+        p_len[t_len] = i - start;
+        p_nl[t_len] = saw_nl;
+        p_esc[t_len] = has_esc;
+        t_len += 1;
 
         // Maintain JSX opening-tag depth. `<` opens a JSX element when in
         // expression/child position (regexAllowed) and followed by a tag-name
@@ -885,6 +934,7 @@ pub fn tokenizeScalarWithOptions(
         at_line_start = false;
     }
 
+    toks.len = t_len;
     try toks.append(alloc, .{ .tag = .eof, .start = n, .len = 0, .has_newline_before = saw_nl });
     return toks;
 }
