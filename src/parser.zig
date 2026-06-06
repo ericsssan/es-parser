@@ -114,18 +114,12 @@ pub fn resolveUnicodeEscapesParser(text: []const u8, buf: *[256]u8) ?[]const u8 
 
 pub const Error = error{ParseError} || std.mem.Allocator.Error;
 
-// ── Lex/Var redeclaration conflict helpers ──────────────────────────────────
+// ── Syntactic statement-validation helpers ──────────────────────────────────
 //
-// These module-level functions walk the already-built AST to detect conflicts
-// between LexicallyDeclaredNames and VarDeclaredNames inside a block or switch
-// body.  They run AFTER parsing is complete (nodes/extra_data are stable).
-//
-// "Lex" = let / const / class_decl / fn_decl / async_fn_decl / generator_fn_decl
-//         / async_generator_fn_decl (i.e. anything that creates a block-scoped binding)
-// "Var" = var_decl (including those nested inside non-function blocks, loops, etc.)
-//
-// We use fixed-size stack buffers and silently truncate — the goal is to catch
-// the common cases mandated by the test262 suite without allocating.
+// Module-level helpers that walk the already-built AST (nodes/extra_data are
+// stable) to support scope-free syntactic early errors. Binding redeclaration
+// checks live in the semantic analyzer (event_resolver.checkRedeclarations),
+// not here.
 
 /// Collect the simple identifier name from a binding pattern node.
 /// Appends to buf/count; stops when buf is full.
@@ -192,21 +186,6 @@ fn collectBindingName(
         },
         else => {},
     }
-}
-
-/// Returns true if `node` is an iteration statement or a labeled statement that
-/// transitively wraps an iteration statement (for `continue label` validation).
-fn isIterationOrLabeledIteration(p: *const Parser, node: NodeIndex) bool {
-    if (node == .none) return false;
-    const idx = node.toInt();
-    if (idx >= p.nodes.len) return false;
-    const tag = p.node_tags_ptr[idx];
-    return switch (tag) {
-        .while_stmt, .do_while_stmt, .for_stmt,
-        .for_in_stmt, .for_of_stmt, .for_await_of_stmt => true,
-        .labeled_stmt => isIterationOrLabeledIteration(p, p.node_data_ptr[idx].lhs),
-        else => false,
-    };
 }
 
 /// Returns true if `node` is a LabelledStatement whose innermost LabelledItem
