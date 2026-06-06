@@ -11,17 +11,13 @@ const Token = @import("token.zig");
 const TokenTag = Token.Tag;
 const Span = @import("span.zig").Span;
 const Diagnostic = @import("diagnostic.zig").Diagnostic;
-const Severity = @import("diagnostic.zig").Severity;
 
 const TokenList = Ast.TokenList;
 const scalar_lexer = @import("scalar_lexer.zig");
 
-/// Fused-lexing token source: the parser pulls tokens from `cursor` into the
-/// growable `buf` on demand instead of consuming a pre-materialized array.
 const scope_events_mod = @import("scope_events.zig");
 const ScopeEventStream = scope_events_mod.EventStream;
 const ScopeEvent = scope_events_mod.Event;
-const ScopeEventKind = scope_events_mod.EventKind;
 // Scope/binding kinds used for the event stream — mirror the semantic tables.
 const ScopeKindU8 = @import("scope.zig").ScopeKind;
 const BindingKindU8 = @import("symbol.zig").BindingKind;
@@ -289,12 +285,6 @@ pub const Parser = struct {
     /// Local names referenced by named exports without `from` — must resolve
     /// to a declared module-level binding by end of parsing.
     pending_export_local_toks: std.ArrayListUnmanaged(TokenIndex) = .{ .items = &.{}, .capacity = 0 },
-    /// Module-level declared names (var/let/const/function/class/import).
-    /// Used to validate exported locals refer to declared bindings.
-    module_decl_names: std.ArrayListUnmanaged([]const u8) = .{ .items = &.{}, .capacity = 0 },
-    /// True while parsing at module top level (decrements when entering
-    /// function/class/block bodies). Used to scope module_decl_names tracking.
-    at_module_top: bool = true,
     diagnostics: std.ArrayList(Diagnostic),
     /// Semantic events emitted during parse.  Enabled when `emit_scope_events`
     /// is true — zero-cost otherwise (all `emitScope*` helpers become dead code
@@ -634,7 +624,6 @@ pub const Parser = struct {
         defer p.tok_mut_log.deinit(allocator);
         defer p.exported_names.deinit(allocator);
         defer p.pending_export_local_toks.deinit(allocator);
-        defer p.module_decl_names.deinit(allocator);
         defer p.proto_check_nodes.deinit(allocator);
         defer p.param_names_scratch.deinit(allocator);
         defer if (p.ts_label_stack) |s| allocator.destroy(s);
@@ -8576,20 +8565,6 @@ pub const Parser = struct {
     // Strict mode helpers for function declarations
     // ────────────────────────────────────────────────────────────
 
-    /// Check if a single formal parameter node is optional (has the TS `?` marker).
-    /// An optional parameter has its binding identifier's lhs set to `.root`.
-    fn tsParamIsOptional(self: *Parser, param: NodeIndex) bool {
-        if (param == .none) return false;
-        const tag = self.node_tags_ptr[param.toInt()];
-        // assignment_pattern means it has a default value — treated as optional-like but not `?`
-        if (tag == .assignment_pattern) return false;
-        if (tag == .identifier) {
-            // Optional `?` is encoded as lhs = .root
-            return self.node_data_ptr[param.toInt()].lhs == .root;
-        }
-        return false;
-    }
-
     /// Check if a parameter list contains non-simple parameters
     /// (destructuring, default values, rest elements).
     pub fn hasNonSimpleParams(self: *const Parser, params: SubRange) bool {
@@ -8898,13 +8873,6 @@ pub const Parser = struct {
         if (tag.isKeyword()) return true;
         return false;
     }
-
-    // ────────────────────────────────────────────────────────────
-    // Character classification helpers
-    // ────────────────────────────────────────────────────────────
-
-    const isIdentChar = Token.isIdentChar;
-    const isNumericChar = Token.isNumericChar;
 };
 
 /// Check whether the source file has a top-level ES module export (e.g., `export {}`)

@@ -15,6 +15,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   helpers are scope-free syntactic statement validators, and deleted the dead
   `isIterationOrLabeledIteration` function — its `continue label` validation is
   now done at parse time via the label stack. No behavior change.
+- **Removed further dead code from the parser.** An exhaustive audit of
+  `parser.zig` found seven unused internal items, now deleted: the
+  `tsParamIsOptional` function; two vestigial struct fields (`module_decl_names`,
+  `at_module_top`) from an unimplemented export-validation feature (the field was
+  never populated or read); and four unreferenced private aliases (`Severity`,
+  `ScopeEventKind`, `isIdentChar`, `isNumericChar`). Also corrected a stale
+  `Fused-lexing token source` doc comment left orphaned after fusion was removed.
+  No behavior change.
 
 ## [0.2.5]
 
