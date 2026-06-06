@@ -31,6 +31,16 @@ fn analyzeModuleSource(source: []const u8) !semantic.SemanticResult {
     return semantic.SemanticAnalyzer.analyzeModule(allocator, &tree, true);
 }
 
+fn analyzeTsSource(source: []const u8) !semantic.SemanticResult {
+    const allocator = testing.allocator;
+    var _lr = try Lexer.tokenizeWithLanguage(allocator, source, .ts);
+    defer _lr.deinit(allocator);
+    var tokens = _lr.tokens;
+    var tree = try Parser.parseWithOptions(allocator, source, tokens.slice(), .{ .language = .ts, .emit_events = true });
+    defer tree.deinit(allocator);
+    return semantic.SemanticAnalyzer.analyze(allocator, &tree);
+}
+
 test "analyze without scope-event emission errors instead of returning empty" {
     const allocator = testing.allocator;
     const source = "let x = 1; x;";
@@ -149,6 +159,39 @@ test "class declaration binding kind" {
     var r = try analyzeSource("class C {}");
     defer r.deinit(testing.allocator);
     try expectSymbol(&r, "C", .class_decl, .global);
+}
+
+test "type parameters are emitted as scope symbols (TS)" {
+    // Class type parameter → bound in the class scope.
+    {
+        var r = try analyzeTsSource("class Foo<T> { m(x: T): T { return x; } }");
+        defer r.deinit(testing.allocator);
+        try expectSymbol(&r, "T", .type_param, .class);
+    }
+    // Generic function type → T shares the function type's scope with the params.
+    {
+        var r = try analyzeTsSource("type F = <T>(x: T) => T;");
+        defer r.deinit(testing.allocator);
+        try expectSymbol(&r, "T", .type_param, .function);
+    }
+    // Interface call signature → bound in the enclosing (here global) scope.
+    {
+        var r = try analyzeTsSource("interface I { <T>(x: T): T; }");
+        defer r.deinit(testing.allocator);
+        try expectSymbol(&r, "T", .type_param, .global);
+    }
+    // Interface method signature → bound in the enclosing (here global) scope.
+    {
+        var r = try analyzeTsSource("interface I { m<T>(x: T): T; }");
+        defer r.deinit(testing.allocator);
+        try expectSymbol(&r, "T", .type_param, .global);
+    }
+    // Baseline: function declaration type parameter → function scope.
+    {
+        var r = try analyzeTsSource("function f<T>(x: T): T { return x; }");
+        defer r.deinit(testing.allocator);
+        try expectSymbol(&r, "T", .type_param, .function);
+    }
 }
 
 test "function parameters are parameter bindings in the function scope" {
