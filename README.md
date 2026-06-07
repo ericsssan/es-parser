@@ -95,7 +95,7 @@ defer lr.deinit(allocator);
 var tree = try es.Parser.parseWithOptions(allocator, source, lr.tokens.slice(), .{
     .language = .ts,          // .js, .jsx, .ts, .tsx, or .dts
     .is_module = true,        // enable import/export + strict-mode semantics
-    .emit_events = true,      // required for semantic analysis
+    .emit_events = true,      // required to call semantic analyzer later
 });
 defer tree.deinit(allocator);
 ```
@@ -125,12 +125,13 @@ zig build test    # unit + lexer + parser + semantic tests + tc39/test262-parser
 ### Conformance suites
 
 Each step runs a built-in default fixture path, so no arguments are needed.
-`conformance-parser-tests` uses a bundled submodule; the others are large
-external repos registered as submodules and not checked out by default —
-initialize the submodule first, then run the step:
+`conformance-parser-tests` is included in the default `zig build test` step
+(its submodule is part of the package distribution). The remaining steps are
+standalone — all four suites are external git submodules, so initialize the
+corresponding one first, then run the step:
 
 ```sh
-# Bundled — no submodule needed
+# Included in the default test step
 zig build conformance-parser-tests
 
 # Full tc39/test262
