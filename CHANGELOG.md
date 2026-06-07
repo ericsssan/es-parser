@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **README: corrected two inaccuracies.** The conformance section described
+  `conformance-parser-tests` as a "bundled submodule" with "no submodule
+  needed" — all four suites are external git submodules; the real distinction
+  is that `test262-parser-tests` is wired into the default `zig build test`
+  step and its submodule is part of the package distribution. Also fixed the
+  `emit_events` code comment: "required for semantic analysis" implied the
+  parser needs events to produce a valid AST; the corrected comment reads
+  "required to call semantic analyzer later".
+
 ## [0.2.6]
 
 A maintenance release: internal dead-code cleanup in the parser. No behavior
