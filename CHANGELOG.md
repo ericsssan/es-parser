@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.7]
+
+A bug-fix release: correct AST representation of sequence expressions with
+missing operands, and two README inaccuracies.
+
+### Fixed
+
+- **Sequence expressions with missing operands now carry `.none` placeholders
+  in the AST.** Previously `(A, )`, `(, B)`, and `(, )` produced incorrect
+  nodes — a trailing comma returned a `grouping_expr` containing only the
+  left operand, and a leading comma would fail to parse the first element at
+  all. Both cases now produce a `sequence_expr` whose element list contains
+  `NodeIndex.none` for each missing operand, matching the structure needed by
+  type inference (`(A, )` → `any`; `(, B)` → type of `B`; `(, )` → `any`).
+  The arrow-parameter validation loop is also guarded against `.none` entries
+  that can appear during error recovery.
+
 ### Changed
 
 - **README: corrected two inaccuracies.** The conformance section described
