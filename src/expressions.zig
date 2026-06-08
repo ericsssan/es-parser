@@ -3466,8 +3466,15 @@ fn parseParenthesized(p: *Parser) Error!NodeIndex {
 
     // Parse first expression (may include spread for arrow params).
     const scratch_top = p.scratchLen();
-    const first = try parseAssignmentOrSpread(p);
-    try p.scratchPush(first);
+    // Missing left operand e.g. `(, B)` or `(, )` — push .none placeholder and
+    // let the comma loop consume the separator normally.
+    if (p.peek() == .comma) {
+        try p.emitError("Expression expected.");
+        try p.scratchPush(NodeIndex.none);
+    } else {
+        const first = try parseAssignmentOrSpread(p);
+        try p.scratchPush(first);
+    }
 
     // Sequence: `(a, b, c)`
     var has_trailing_comma = false;
@@ -3592,6 +3599,10 @@ fn parseParenthesized(p: *Parser) Error!NodeIndex {
         // Validate arrow parameters
         for (params, 0..) |node_raw, idx| {
             const param_node = NodeIndex.fromInt(node_raw);
+            if (param_node == .none) {
+                try p.emitError("Invalid arrow function parameter");
+                return p.makeErrorNode();
+            }
             const param_tag = p.node_tags_ptr[param_node.toInt()];
             switch (param_tag) {
                 .identifier => {
@@ -3777,6 +3788,9 @@ fn parseParenthesized(p: *Parser) Error!NodeIndex {
     // If we had trailing comma but no arrow, it's invalid
     if (has_trailing_comma) {
         try p.emitError("Unexpected trailing comma in parenthesized expression");
+        // Represent missing right operand as .none so type inference returns `any`
+        // for e.g. `(NUMBER, )` rather than the type of NUMBER.
+        try p.scratchPush(NodeIndex.none);
     }
 
     const elems = p.scratchSlice(scratch_top);
@@ -3788,7 +3802,8 @@ fn parseParenthesized(p: *Parser) Error!NodeIndex {
     }
 
     if (elems.len == 1) {
-        const first_tag = p.node_tags_ptr[first.toInt()];
+        const sole = NodeIndex.fromInt(elems[0]);
+        const first_tag = p.node_tags_ptr[sole.toInt()];
 
         // Parenthesized super is invalid — super must be followed directly by `.`, `[`, or `(`
         if (first_tag == .super_expr) {
@@ -3797,7 +3812,7 @@ fn parseParenthesized(p: *Parser) Error!NodeIndex {
 
         // Check for CoverInitializedName: ({a = 0}) without => is invalid
         if (first_tag == .object_literal) {
-            const d = p.node_data_ptr[first.toInt()];
+            const d = p.node_data_ptr[sole.toInt()];
             const s = d.lhs.toInt();
             const e = d.rhs.toInt();
             var i = s;
@@ -3816,7 +3831,7 @@ fn parseParenthesized(p: *Parser) Error!NodeIndex {
         return p.addNode(.{
             .tag = .grouping_expr,
             .main_token = open_paren,
-            .data = .{ .lhs = first, .rhs = .none },
+            .data = .{ .lhs = sole, .rhs = .none },
         });
     }
 
