@@ -2247,7 +2247,7 @@ fn rangeContains(ranges: []const Range, cp: u32) bool {
     var lo: usize = 0;
     var hi: usize = ranges.len;
     while (lo < hi) {
-        const mid = (lo + hi) / 2;
+        const mid = lo + (hi - lo) / 2;
         const r = ranges[mid];
         if (cp < r.start) {
             hi = mid;

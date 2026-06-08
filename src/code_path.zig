@@ -171,6 +171,7 @@ const ForkContext = struct {
             return;
         }
         // Must be in inline buffer (sl_count > 0 guaranteed by caller).
+        std.debug.assert(self.sl_count > 0);
         self.sl_inline[self.sl_count - 1] = entry;
     }
 
