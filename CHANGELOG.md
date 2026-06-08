@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.9]
+
+A tooling release: zbc static analysis integrated into the default build step.
+
+### Changed
+
+- **zbc static analysis wired into `zig build`.** Running `zig build` now
+  builds and runs the [zbc](https://github.com/ericsssan/zbc) analyzer over
+  `src/` as part of the default step. The dependency is declared as a URL
+  package (zbc v0.1.3) so it is fetched and compiled automatically with no
+  manual setup required. `zig build test` is unaffected.
+
 ## [0.2.8]
 
 A hardening release: two sites flagged by static analysis.
