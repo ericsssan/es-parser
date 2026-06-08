@@ -101,27 +101,23 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&ptr_cmd.step);
 
     // ── Static analysis: zbc ─────────────────────────────
-    // Only wired when the sibling ../zbc repo is checked out — skipped silently
-    // otherwise so CI (which only has this repo) is unaffected.
-    zbc: {
-        std.Io.Dir.cwd().access(b.graph.io, "../zbc/src/main.zig", .{}) catch break :zbc;
-        const zbc_engine_mod = b.createModule(.{
-            .root_source_file = .{ .cwd_relative = "../zbc/src/type_engine/engine.zig" },
-            .target = target,
-            .optimize = optimize,
-        });
-        const zbc_exe_mod = b.createModule(.{
-            .root_source_file = .{ .cwd_relative = "../zbc/src/main.zig" },
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        });
-        zbc_exe_mod.addImport("type_engine", zbc_engine_mod);
-        const zbc_exe = b.addExecutable(.{ .name = "zbc", .root_module = zbc_exe_mod });
-        const zbc_run = b.addRunArtifact(zbc_exe);
-        zbc_run.addDirectoryArg(b.path("src"));
-        b.default_step.dependOn(&zbc_run.step);
-    }
+    const zbc_dep = b.dependency("zbc", .{ .target = target, .optimize = optimize });
+    const zbc_engine_mod = b.createModule(.{
+        .root_source_file = zbc_dep.path("src/type_engine/engine.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const zbc_exe_mod = b.createModule(.{
+        .root_source_file = zbc_dep.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    zbc_exe_mod.addImport("type_engine", zbc_engine_mod);
+    const zbc_exe = b.addExecutable(.{ .name = "zbc", .root_module = zbc_exe_mod });
+    const zbc_run = b.addRunArtifact(zbc_exe);
+    zbc_run.addDirectoryArg(b.path("src"));
+    b.default_step.dependOn(&zbc_run.step);
 
     // ── Conformance runners ───────────────────────────────
     // Executables that run against fixture directories. Each step runs its
