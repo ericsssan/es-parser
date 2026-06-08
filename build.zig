@@ -100,6 +100,12 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_fuzz_tests.step);
     test_step.dependOn(&ptr_cmd.step);
 
+    // ── Static analysis: zbc ─────────────────────────────
+    const zbc_dep = b.dependency("zbc", .{ .target = target, .optimize = optimize });
+    const zbc_run = b.addRunArtifact(zbc_dep.artifact("zbc"));
+    zbc_run.addDirectoryArg(b.path("src"));
+    b.default_step.dependOn(&zbc_run.step);
+
     // ── Conformance runners ───────────────────────────────
     // Executables that run against fixture directories. Each step runs its
     // default fixture path so `zig build conformance-X` works with no arguments.

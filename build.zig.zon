@@ -1,7 +1,9 @@
 .{
     .name = .es_parser,
     .version = "0.2.7",
-    .dependencies = .{},
+    .dependencies = .{
+        .zbc = .{ .path = "../zbc" },
+    },
     .minimum_zig_version = "0.17.0-dev.607+456b2ec07",
     .fingerprint = 0x99cfbdb82b4b5e0b,
     .paths = .{
