@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.8]
+
+A hardening release: two sites flagged by static analysis.
+
+### Fixed
+
+- **`code_path.zig`: assert inline-buffer invariant.** `setLastEntry` documented
+  `sl_count > 0` as a caller guarantee but had no machine-checkable guard; added
+  `std.debug.assert(self.sl_count > 0)` so violations surface in Debug builds.
+- **`unicode_id.zig`: overflow-safe binary-search midpoint.** `rangeContains` used
+  `(lo + hi) / 2`; changed to `lo + (hi - lo) / 2` to avoid theoretical unsigned
+  wraparound on large inputs.
+
 ## [0.2.7]
 
 A bug-fix release: correct AST representation of sequence expressions with
