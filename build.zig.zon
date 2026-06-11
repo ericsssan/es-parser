@@ -1,6 +1,6 @@
 .{
     .name = .es_parser,
-    .version = "0.2.10",
+    .version = "0.2.11",
     .dependencies = .{
         .zbc = .{
             .url = "https://github.com/ericsssan/zbc/archive/refs/tags/v0.1.3.tar.gz",

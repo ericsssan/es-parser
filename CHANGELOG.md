@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.11]
+
+A bug-fix release: generic arrow functions no longer lose their type
+parameters.
+
+### Fixed
+
+- **`ArrowData` stores type parameters.** Generic arrow functions such as
+  `<T, U>(x) => ...` parsed their type-parameter list but never recorded it on
+  the node, leaving the `ts_type_parameter` nodes orphaned (no parent) and
+  recoverable only via a fragile backward-scan heuristic that broke on nested
+  generics like `(arg: T) => U`. `ArrowData` now carries
+  `type_params`/`type_params_end` (mirroring `FnData`), populated for both the
+  `<T>(...) =>` and `async <T>(...) =>` paths, and `parent_builder` links the
+  type-param subtree so the nodes are correctly parented.
+  ([#13](https://github.com/ericsssan/es-parser/issues/13))
+
 ## [0.2.10]
 
 A bug-fix release: generic constructor types no longer lose their type
