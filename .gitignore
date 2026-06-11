@@ -1,3 +1,10 @@
 .zig-cache/
 zig-out/
 .claude/
+
+# Local build/scratch artifacts (zig build-exe outputs, profiling targets, deps)
+root
+profile_target
+repro
+test_build
+zig-pkg/
