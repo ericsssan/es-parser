@@ -202,6 +202,7 @@ fn estreeNameForTag(tag: NodeTag) [*:0]const u8 {
         .ts_instantiation_expr => "TSInstantiationExpression",
         .ts_type_parameter => "TSTypeParameter",
         .ts_import_type => "TSImportType",
+        .ts_named_tuple_member => "TSNamedTupleMember",
     };
 }
 

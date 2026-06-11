@@ -387,6 +387,10 @@ pub fn setChildParents(parents: []u32, extra: []const u32, tag: ast_mod.Node.Tag
             sp(parents, lhs, idx);
             sp(parents, rhs, idx);
         },
+        .ts_named_tuple_member => {
+            // lhs = element type; rhs is an optional flag (.root/.none), not a node.
+            sp(parents, lhs, idx);
+        },
         .ts_index_signature => {
             sp(parents, lhs, idx);
             sp(parents, rhs, idx);

@@ -79,6 +79,7 @@ fn dumpNode(tree: *const Ast, index: NodeIndex, indent: u32, writer: anytype) an
         .break_label,
         .continue_label,
         .labeled_stmt,
+        .ts_named_tuple_member,
         => {
             const text = tree.tokenText(main_tok);
             try writer.print(" \"{s}\"", .{text});
@@ -619,6 +620,10 @@ fn dumpNode(tree: *const Ast, index: NodeIndex, indent: u32, writer: anytype) an
         .ts_function_type, .ts_constructor_type, .ts_mapped_type,
         .ts_conditional_type, .ts_type_query, .ts_parameter_property,
         => {},
+        .ts_named_tuple_member => {
+            // lhs = element type; rhs is an optional flag, not a node.
+            try dumpNode(tree, data.lhs, child_indent, writer);
+        },
 
         // ── JSX ─────────────────────────────────────────────
         .jsx_element => {

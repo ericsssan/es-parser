@@ -537,6 +537,13 @@ pub const Node = struct {
         /// TS import-type expression in type position: `import('mod')` or
         /// `import('mod').X`. main_token = `import` keyword. lhs/rhs unused.
         ts_import_type,
+        /// Named (labeled) tuple member: `label: Type` / `label?: Type` inside a
+        /// tuple type. main_token = label name token. lhs = element type node,
+        /// rhs = optional flag (`.root` if `?`, else `.none`). Element names are
+        /// display-only in TS (they don't affect assignability) — this node simply
+        /// retains the label the grammar already parses so consumers can render
+        /// `[a: number]` rather than `[number]`.
+        ts_named_tuple_member,
     };
 };
 

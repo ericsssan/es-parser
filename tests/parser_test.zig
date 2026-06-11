@@ -692,3 +692,89 @@ test "#14 valid regexes still parse cleanly with no diagnostic" {
         try testing.expectEqual(@as(usize, 0), tree.errors.len);
     }
 }
+
+// ── Issue #15: labeled tuple members retain their name ──────────────────────
+
+const NamedMember = struct { label: []const u8, optional: bool };
+
+/// Parse TS while keeping the token list alive — `Ast` does not own its tokens,
+/// so reading token *text* (tokenText) requires the lexer result to outlive it.
+const TsParse = struct {
+    lexed: Lexer.TokenizeResult,
+    tree: ast.Ast,
+
+    fn init(source: []const u8) !TsParse {
+        var lexed = try Lexer.tokenizeWithLanguage(testing.allocator, source, .ts);
+        errdefer lexed.deinit(testing.allocator);
+        const tree = try Parser.parseWithLanguage(testing.allocator, source, lexed.tokens.slice(), .ts, false);
+        return .{ .lexed = lexed, .tree = tree };
+    }
+
+    fn deinit(self: *TsParse) void {
+        self.tree.deinit(testing.allocator);
+        self.lexed.deinit(testing.allocator);
+    }
+
+    /// Collect every ts_named_tuple_member's label + optional flag, in node order.
+    fn collectNamedMembers(self: *const TsParse, out: *std.ArrayListUnmanaged(NamedMember)) !void {
+        const tags = self.tree.nodes.items(.tag);
+        const mains = self.tree.nodes.items(.main_token);
+        const datas = self.tree.nodes.items(.data);
+        for (tags, 0..) |t, i| {
+            if (t != .ts_named_tuple_member) continue;
+            try out.append(testing.allocator, .{
+                .label = self.tree.tokenText(mains[i]),
+                // rhs encodes the optional flag: .root (ordinal 0) = optional.
+                .optional = @intFromEnum(datas[i].rhs) == 0,
+            });
+        }
+    }
+};
+
+test "#15 labeled tuple members retain name and optional flag" {
+    var p = try TsParse.init("type T = [a: number, b?: string];");
+    defer p.deinit();
+    try expectNoErrors(&p.tree);
+
+    var members: std.ArrayListUnmanaged(NamedMember) = .empty;
+    defer members.deinit(testing.allocator);
+    try p.collectNamedMembers(&members);
+
+    try testing.expectEqual(@as(usize, 2), members.items.len);
+    try testing.expectEqualStrings("a", members.items[0].label);
+    try testing.expect(!members.items[0].optional);
+    try testing.expectEqualStrings("b", members.items[1].label);
+    try testing.expect(members.items[1].optional);
+}
+
+test "#15 named and unnamed tuples produce different ASTs" {
+    var named = try TsParse.init("type T = [a: number, b: string];");
+    defer named.deinit();
+    var plain = try TsParse.init("type U = [number, string];");
+    defer plain.deinit();
+
+    var named_members: std.ArrayListUnmanaged(NamedMember) = .empty;
+    defer named_members.deinit(testing.allocator);
+    try named.collectNamedMembers(&named_members);
+
+    var plain_members: std.ArrayListUnmanaged(NamedMember) = .empty;
+    defer plain_members.deinit(testing.allocator);
+    try plain.collectNamedMembers(&plain_members);
+
+    try testing.expectEqual(@as(usize, 2), named_members.items.len);
+    try testing.expectEqual(@as(usize, 0), plain_members.items.len);
+}
+
+test "#15 labeled rest element retains its name" {
+    var p = try TsParse.init("type R = [first: string, ...rest: number[]];");
+    defer p.deinit();
+    try expectNoErrors(&p.tree);
+
+    var members: std.ArrayListUnmanaged(NamedMember) = .empty;
+    defer members.deinit(testing.allocator);
+    try p.collectNamedMembers(&members);
+
+    try testing.expectEqual(@as(usize, 2), members.items.len);
+    try testing.expectEqualStrings("first", members.items[0].label);
+    try testing.expectEqualStrings("rest", members.items[1].label);
+}

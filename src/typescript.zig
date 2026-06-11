@@ -1138,13 +1138,20 @@ fn parseTupleType(p: *Parser) Error!NodeIndex {
         // Spread element in tuple: `...Type` or `...label: Type`
         if (p.peek() == .ellipsis) {
             const spread_tok = p.advance();
-            // Check for labeled spread: `...label: Type` or `...label?: Type`
+            // Check for labeled spread: `...label: Type` or `...label?: Type`.
+            // Retain the label (as a ts_named_tuple_member wrapping the type) so
+            // `[...rest: T[]]` round-trips rather than collapsing to `[...T[]]`.
+            var label_tok: u32 = 0;
+            var has_label = false;
+            var label_optional = false;
             if ((p.peek() == .identifier or p.peek().isKeyword()) and
                 (p.peekAt(1) == .colon or (p.peekAt(1) == .question and p.peekAt(2) == .colon)))
             {
-                _ = p.advance(); // skip label
-                _ = p.eat(.question); // skip optional `?`
-                _ = p.advance(); // skip ':'
+                label_tok = p.tokIdx();
+                has_label = true;
+                _ = p.advance(); // consume label
+                label_optional = p.eat(.question) != null; // optional `?`
+                _ = p.advance(); // consume ':'
             }
             const elem_type = try parseType(p);
             // Determine if this is a concrete rest element (ts_array_type) or variadic (type ref).
@@ -1159,10 +1166,18 @@ fn parseTupleType(p: *Parser) Error!NodeIndex {
             }
             // Optional `?` after spread type
             _ = p.eat(.question);
+            const spread_child = if (has_label)
+                try p.addNode(.{
+                    .tag = .ts_named_tuple_member,
+                    .main_token = label_tok,
+                    .data = .{ .lhs = elem_type, .rhs = if (label_optional) .root else .none },
+                })
+            else
+                elem_type;
             const spread_node = try p.addNode(.{
                 .tag = .spread_element,
                 .main_token = spread_tok,
-                .data = .{ .lhs = elem_type, .rhs = .none },
+                .data = .{ .lhs = spread_child, .rhs = .none },
             });
             try p.scratchPush(spread_node);
         } else {
@@ -1186,8 +1201,10 @@ fn parseTupleType(p: *Parser) Error!NodeIndex {
             p.restore(saved);
 
             if (is_labeled) {
-                // Labeled tuple element: `name: Type` or `name?: Type`
-                _ = p.advance(); // skip label name
+                // Labeled tuple element: `name: Type` or `name?: Type`. Retain the
+                // label in a ts_named_tuple_member node rather than discarding it.
+                const label_tok = p.tokIdx();
+                _ = p.advance(); // consume label name
                 const is_optional_label = p.eat(.question) != null;
                 _ = try p.expect(.colon);
                 // Handle `...` before type for syntactically invalid `rest: ...Type`
@@ -1203,7 +1220,12 @@ fn parseTupleType(p: *Parser) Error!NodeIndex {
                     // TS1257: A required element cannot follow an optional element.
                     if (seen_optional) try p.emitError("A required element cannot follow an optional element");
                 }
-                try p.scratchPush(elem_type);
+                const member = try p.addNode(.{
+                    .tag = .ts_named_tuple_member,
+                    .main_token = label_tok,
+                    .data = .{ .lhs = elem_type, .rhs = if (is_opt) .root else .none },
+                });
+                try p.scratchPush(member);
             } else {
                 const elem_type = try parseType(p);
                 // Optional tuple element: `Type?`
