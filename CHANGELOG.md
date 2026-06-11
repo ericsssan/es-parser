@@ -6,6 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.10]
+
+A bug-fix release: generic constructor types no longer lose their type
+parameters.
+
+### Fixed
+
+- **`parseConstructorType` preserves type parameters.** Generic constructor
+  types such as `new <T>(x: T) => T[]` parsed their type-parameter list but
+  discarded the result, leaving `FnData.type_params`/`type_params_end` at their
+  `0,0` default so consumers saw a non-generic constructor type. The
+  `parseTypeParameterList` result is now captured and stored on the
+  `ts_constructor_type` node, matching the function-type path.
+  ([#12](https://github.com/ericsssan/es-parser/issues/12))
+
 ## [0.2.9]
 
 A tooling release: zbc static analysis integrated into the default build step.
