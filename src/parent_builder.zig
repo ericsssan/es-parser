@@ -114,10 +114,14 @@ pub fn setChildParents(parents: []u32, extra: []const u32, tag: ast_mod.Node.Tag
         },
         .arrow_fn, .async_arrow_fn => {
             const ed = extraData(ast_mod.ArrowData, extra, @intFromEnum(lhs));
+            if (ed.type_params_end > ed.type_params) {
+                spSub(parents, extra, ed.type_params, ed.type_params_end, idx);
+            }
             spSub(parents, extra, ed.params_start, ed.params_end, idx);
             sp(parents, ed.return_type, idx);
             sp(parents, ed.body, idx);
         },
+
         .class_decl, .class_expr => {
             const ed = extraData(ast_mod.ClassData, extra, @intFromEnum(lhs));
             sp(parents, ed.name,        idx);

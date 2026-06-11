@@ -621,6 +621,8 @@ pub const ArrowData = struct {
     params_end: ExtraIndex,
     body: NodeIndex,
     return_type: NodeIndex = .none, // .none if no return type annotation
+    type_params: ExtraIndex = 0, // SubRange start into extra_data for type parameters
+    type_params_end: ExtraIndex = 0, // SubRange end (equal means no type params)
 };
 
 /// cond ? consequent : alternate

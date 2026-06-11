@@ -2978,12 +2978,13 @@ fn parseAsyncExpressionOrIdentifier(p: *Parser) Error!NodeIndex {
         const saved_diag = p.diagnostics.items.len;
         const saved_nodes = p.nodes.len;
         const saved_extra = p.extra_data.items.len;
+        var async_arrow_type_params = ast.SubRange{ .start = 0, .end = 0 };
         const type_params_ok = blk: {
-            _ = ts_mod.parseTypeParameterList(p) catch break :blk false;
+            async_arrow_type_params = ts_mod.parseTypeParameterList(p) catch break :blk false;
             break :blk true;
         };
         if (type_params_ok and p.peek() == .l_paren) {
-            return parseAsyncParenArrowOrCall(p, async_tok);
+            return parseAsyncParenArrowOrCall(p, async_tok, async_arrow_type_params);
         }
         // Backtrack — not a generic arrow
         p.tok_i = saved_tok;
@@ -2994,7 +2995,7 @@ fn parseAsyncExpressionOrIdentifier(p: *Parser) Error!NodeIndex {
 
     // async (params) => body
     if (next_tag == .l_paren) {
-        return parseAsyncParenArrowOrCall(p, async_tok);
+        return parseAsyncParenArrowOrCall(p, async_tok, .{ .start = 0, .end = 0 });
     }
 
     // async ident => body (includes contextual keywords like `of`, `let`, etc.)
@@ -3130,7 +3131,7 @@ fn parseAsyncFunctionExpression(p: *Parser, async_tok: TokenIndex) Error!NodeInd
 
 // ── async (...) → could be arrow params or just call ─────────────
 
-fn parseAsyncParenArrowOrCall(p: *Parser, async_tok: TokenIndex) Error!NodeIndex {
+fn parseAsyncParenArrowOrCall(p: *Parser, async_tok: TokenIndex, type_params: ast.SubRange) Error!NodeIndex {
     // Save position so we can reinterpret if needed.
     const open_paren = p.advance(); // consume `(`
 
@@ -3169,6 +3170,8 @@ fn parseAsyncParenArrowOrCall(p: *Parser, async_tok: TokenIndex) Error!NodeIndex
                 .params_end = params_range.end,
                 .body = body,
                 .return_type = async_typed_arrow_return_type,
+                .type_params = type_params.start,
+                .type_params_end = type_params.end,
             });
             const arrow_node = try p.addNode(.{
                 .tag = .async_arrow_fn,
@@ -3330,6 +3333,8 @@ fn parseAsyncParenArrowOrCall(p: *Parser, async_tok: TokenIndex) Error!NodeIndex
             .params_start = params_range.start,
             .params_end = params_range.end,
             .body = body,
+            .type_params = type_params.start,
+            .type_params_end = type_params.end,
         });
         const arrow_node = try p.addNode(.{
             .tag = .async_arrow_fn,
@@ -7321,6 +7326,8 @@ fn parseTsTypeAssertion(p: *Parser) Error!NodeIndex {
                     .params_end = params_range.end,
                     .body = body,
                     .return_type = generic_arrow_return_type,
+                    .type_params = generic_arrow_type_params.start,
+                    .type_params_end = generic_arrow_type_params.end,
                 });
                 const generic_arrow_node = try p.addNode(.{
                     .tag = .arrow_fn,
