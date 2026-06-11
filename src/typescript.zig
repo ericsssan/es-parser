@@ -1382,8 +1382,9 @@ fn parseConstructorType(p: *Parser) Error!NodeIndex {
 
     // Parse optional type parameters
     // (Generic constructor types: `new <T>(...) => T`)
+    var type_params_range = SubRange{ .start = 0, .end = 0 };
     if (p.peek() == .less_than) {
-        _ = try parseTypeParameterList(p);
+        type_params_range = try parseTypeParameterList(p);
     }
 
     _ = try p.expect(.l_paren);
@@ -1419,6 +1420,8 @@ fn parseConstructorType(p: *Parser) Error!NodeIndex {
         .params = params_range.start,
         .params_end = params_range.end,
         .body = return_type,
+        .type_params = type_params_range.start,
+        .type_params_end = type_params_range.end,
     });
 
     return p.addNode(.{
