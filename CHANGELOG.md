@@ -6,6 +6,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.12]
+
+A correctness release for TypeScript regex and tuple types: invalid regex
+literals no longer vanish from the AST, and labeled tuple members keep their
+names.
+
+### Added
+
+- **Named tuple members are preserved.** A labeled tuple element
+  (`[a: number, b?: string]`) was detected but its label token was skipped and
+  never stored, so `[a: number, b: string]` and `[number, string]` produced
+  identical ASTs. A new `ts_named_tuple_member` node (main_token = label,
+  lhs = element type, rhs = optional flag) now retains the label for both the
+  plain and the spread (`[...rest: T[]]`) forms, surfaced as `TSNamedTupleMember`
+  in the ESTree layout and parented correctly. Element names are display-only in
+  TS, so this purely preserves information the grammar already parsed.
+  ([#15](https://github.com/ericsssan/es-parser/issues/15))
+
+### Fixed
+
+- **Invalid regex bodies recover to a `regex_literal` node.** A RegExp with an
+  invalid inner pattern (bad unicode property name, quantifier without an atom,
+  invalid class escape, …) made the parser's body validators throw, triggering
+  recovery that collapsed the literal into an `error_node` — leaving downstream
+  type consumers with no typed node at that position. These patterns are genuine
+  syntax errors (V8 and tsc reject them too), but — like tsc — the diagnostic is
+  now emitted while the `regex_literal` node survives (typing as `RegExp`)
+  instead of being discarded. The lexer was never at fault; the fix is purely in
+  parser error recovery. ([#14](https://github.com/ericsssan/es-parser/issues/14))
+
 ## [0.2.11]
 
 A bug-fix release: generic arrow functions no longer lose their type
