@@ -2041,6 +2041,58 @@ fn validateRegexBodyUnicode(p: *Parser, body: []const u8, v_mode: bool) Error!vo
     }
 }
 
+/// Run every regex *body-grammar* validator over `body`. These check the inner
+/// RegExp pattern (property escapes, quantifier atoms, class escapes, group
+/// balance, etc.) — purely semantic concerns that are independent of whether the
+/// surrounding literal token is well-formed.
+///
+/// A failure here returns `error.ParseError` carrying an already-emitted
+/// diagnostic. The caller is expected to RECOVER from that error and still
+/// produce a `regex_literal` node: an invalid pattern body is a reported error,
+/// but it does not erase the node (it still types as `RegExp`). This mirrors the
+/// TypeScript compiler, which emits the same diagnostics (TS1507/TS1529/TS1531/
+/// TS1535/…) yet keeps the RegularExpressionLiteral typed as `RegExp`. Discarding
+/// the node into an `error_node` instead would leave downstream consumers with no
+/// typed node at that position. See issue #14.
+fn validateRegexBody(p: *Parser, body: []const u8, has_u: bool, has_v: bool) Error!void {
+    // Validate balanced groups (e.g. /fo(o/).
+    try validateRegexBalancedGroups(p, body);
+    // Validate quantifier-without-atom (e.g. /?/, /{2}/).
+    try validateRegexNoLeadingQuantifier(p, body);
+    // Validate regex modifier-group syntax: `(?<flags>:...)` etc.
+    try validateRegexModifierGroups(p, body);
+    // Validate named groups: collect names, validate format, check refs.
+    try validateRegexNamedGroups(p, body, has_u or has_v);
+    // Lookbehind cannot be quantified in any mode.
+    try validateRegexLookbehindQuant(p, body);
+    // TS1538: `\u{…}` requires the u or v flag — but only in TypeScript
+    // (and in non-AnnexB strict ES). Under ECMAScript Annex B (web reality,
+    // the default for JS), a flag-less `/\u{41}/` is valid: it parses as the
+    // identity escape `\u` followed by the `{41}` quantifier, and named-group
+    // names admit `\u{…}` regardless. So only flag this in TS mode or when
+    // Annex B is disabled.
+    if (!has_u and !has_v and (p.is_ts or !p.annex_b)) {
+        var bi: usize = 0;
+        while (bi + 3 < body.len) : (bi += 1) {
+            if (body[bi] == '\\' and body[bi + 1] == 'u' and body[bi + 2] == '{') {
+                try p.emitError("Unicode escape sequences are only available when the Unicode (u) flag or the Unicode Sets (v) flag is set");
+                break;
+            }
+        }
+    }
+    // With u or v flag, validate body for u-mode requirements.
+    if (has_u or has_v) {
+        try validateRegexBodyUnicode(p, body, has_v);
+        try validateRegexLookaroundUnicode(p, body);
+        if (has_u and !has_v) {
+            try validateRegexClassRangesUnicode(p, body);
+        }
+        if (has_v) {
+            try validateRegexVFlagClassExtras(p, body);
+        }
+    }
+}
+
 fn isHexDigit(c: u8) bool {
     return (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
 }
@@ -2572,43 +2624,15 @@ pub fn parsePrimaryExpression(p: *Parser) Error!NodeIndex {
                     try p.emitError("Regex flags 'u' and 'v' are mutually exclusive");
                     return error.ParseError;
                 }
-                // Validate balanced groups (e.g. /fo(o/).
-                try validateRegexBalancedGroups(p, p.source[ts + 1 .. close - 1]);
-                // Validate quantifier-without-atom (e.g. /?/, /{2}/).
-                try validateRegexNoLeadingQuantifier(p, p.source[ts + 1 .. close - 1]);
-                // Validate regex modifier-group syntax: `(?<flags>:...)` etc.
-                try validateRegexModifierGroups(p, p.source[ts + 1 .. close - 1]);
-                // Validate named groups: collect names, validate format, check refs.
-                try validateRegexNamedGroups(p, p.source[ts + 1 .. close - 1], has_u or has_v);
-                // Lookbehind cannot be quantified in any mode.
-                try validateRegexLookbehindQuant(p, p.source[ts + 1 .. close - 1]);
-                // TS1538: `\u{…}` requires the u or v flag — but only in TypeScript
-                // (and in non-AnnexB strict ES). Under ECMAScript Annex B (web
-                // reality, the default for JS), a flag-less `/\u{41}/` is valid: it
-                // parses as the identity escape `\u` followed by the `{41}`
-                // quantifier, and named-group names admit `\u{…}` regardless. So
-                // only flag this in TS mode or when Annex B is disabled.
-                if (!has_u and !has_v and (p.is_ts or !p.annex_b)) {
-                    const body = p.source[ts + 1 .. close - 1];
-                    var bi: usize = 0;
-                    while (bi + 3 < body.len) : (bi += 1) {
-                        if (body[bi] == '\\' and body[bi + 1] == 'u' and body[bi + 2] == '{') {
-                            try p.emitError("Unicode escape sequences are only available when the Unicode (u) flag or the Unicode Sets (v) flag is set");
-                            break;
-                        }
-                    }
-                }
-                // With u or v flag, validate body for u-mode requirements.
-                if (has_u or has_v) {
-                    try validateRegexBodyUnicode(p, p.source[ts + 1 .. close - 1], has_v);
-                    try validateRegexLookaroundUnicode(p, p.source[ts + 1 .. close - 1]);
-                    if (has_u and !has_v) {
-                        try validateRegexClassRangesUnicode(p, p.source[ts + 1 .. close - 1]);
-                    }
-                    if (has_v) {
-                        try validateRegexVFlagClassExtras(p, p.source[ts + 1 .. close - 1]);
-                    }
-                }
+                // Validate the inner pattern body. A grammar error here is
+                // RECOVERABLE: the validators emit the diagnostic, but we keep the
+                // `regex_literal` node (it still types as `RegExp`) rather than
+                // discarding it into an `error_node`. Only `error.ParseError` is
+                // swallowed — a real allocator failure still propagates. See #14.
+                validateRegexBody(p, p.source[ts + 1 .. close - 1], has_u, has_v) catch |e| switch (e) {
+                    error.ParseError => {},
+                    else => return e,
+                };
             }
             break :blk try parseLiteral(p, .regex_literal);
         },

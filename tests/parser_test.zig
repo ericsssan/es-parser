@@ -649,3 +649,46 @@ test "#8b shorthand property with initializer in object literal" {
     defer tree.deinit(testing.allocator);
     try testing.expect(!hasErrorNode(&tree));
 }
+
+// ── Issue #14: invalid regex pattern body recovers to a regex_literal node ────
+
+fn hasRegexLiteral(tree: *const ast.Ast) bool {
+    for (tree.nodes.items(.tag)) |t| { if (t == .regex_literal) return true; }
+    return false;
+}
+
+test "#14 invalid regex body keeps regex_literal node and emits a diagnostic" {
+    // Each of these is a genuine RegExp syntax error (V8 and tsc reject them
+    // too), but — like tsc — the inner-grammar error must NOT erase the node:
+    // it still scans as a regex_literal (typing as RegExp), with the diagnostic
+    // reported separately. Previously each produced an error_node instead.
+    const cases = [_][]const u8{
+        "var b = /\\p{ascii}/u;", // invalid unicode property name
+        "var b = /\\P[\\P\\w-_]/u;", // \P not followed by '{'
+        "var b = /{1}??/;", // nothing to repeat
+        "var b = /{1,}??/;",
+        "var b = /{2,1}??/;",
+        "var b = /[\\q\\u\\i\\c\\k]/u;", // invalid class escapes
+    };
+    for (cases) |src| {
+        var tree = try parseTs(src);
+        defer tree.deinit(testing.allocator);
+        try testing.expect(hasRegexLiteral(&tree));
+        try testing.expect(!hasErrorNode(&tree));
+        try testing.expect(tree.errors.len >= 1);
+    }
+}
+
+test "#14 valid regexes still parse cleanly with no diagnostic" {
+    const cases = [_][]const u8{
+        "var b = /abc/g;",
+        "var b = /\\p{Script_Extensions=Inherited}/u;",
+    };
+    for (cases) |src| {
+        var tree = try parseTs(src);
+        defer tree.deinit(testing.allocator);
+        try testing.expect(hasRegexLiteral(&tree));
+        try testing.expect(!hasErrorNode(&tree));
+        try testing.expectEqual(@as(usize, 0), tree.errors.len);
+    }
+}
