@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.13]
+
+A correctness release for TypeScript catch clauses: a typed catch binding now
+keeps its annotation instead of silently dropping it.
+
+### Fixed
+
+- **Typed catch bindings retain their type annotation.** The catch-clause type
+  annotation (`catch (e: any)` / `catch (e: unknown)`) was parsed and then
+  discarded, so a typed catch variable was structurally indistinguishable from
+  an untyped one and downstream consumers (e.g. a type checker) could not
+  recover the annotation. The parsed type is now wrapped in a
+  `ts_type_annotation` node and attached to the catch-binding identifier's `rhs`
+  slot — the same mechanism used for variable and parameter bindings — and the
+  identifier's span is extended through the annotation. The existing TS1196
+  any/unknown validity diagnostic is unchanged. ([#16](https://github.com/ericsssan/es-parser/issues/16))
+
 ## [0.2.12]
 
 A correctness release for TypeScript regex and tuple types: invalid regex
