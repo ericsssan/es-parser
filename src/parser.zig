@@ -4170,10 +4170,26 @@ pub const Parser = struct {
                 // TypeScript: catch clause can have a type annotation: `catch (e: unknown)`
                 // TS1196: only `any` and `unknown` are allowed.
                 if (self.is_ts and self.peek() == .colon) {
-                    _ = self.advance(); // eat ':'
+                    const colon_tok = self.advance(); // eat ':'
                     const type_tok = self.tokIdx();
-                    const type_ann = try @import("typescript.zig").parseType(self);
-                    _ = type_ann;
+                    const type_node = try @import("typescript.zig").parseType(self);
+                    // Wrap in a ts_type_annotation node and attach it to the catch
+                    // binding's identifier (same treatment as variable/parameter
+                    // bindings), so consumers can recover the `: any` / `: unknown`
+                    // annotation instead of it being silently discarded.
+                    const type_ann = try self.addNode(.{
+                        .tag = .ts_type_annotation,
+                        .main_token = colon_tok,
+                        .data = .{ .lhs = type_node, .rhs = .none },
+                    });
+                    if (catch_param != .none and
+                        self.node_tags_ptr[catch_param.toInt()] == .identifier)
+                    {
+                        self.node_data_ptr[catch_param.toInt()].rhs = type_ann;
+                        // Extend the identifier range through the annotation so rules
+                        // reporting `node: identifier` get the full typed span.
+                        self.node_end_toks[catch_param.toInt()] = if (self.tok_i > 0) @intCast(self.tok_i - 1) else 0;
+                    }
                     // Check if the type is `any` or `unknown` — only those are valid.
                     const tok_tag = self.tokenTagAt(type_tok);
                     const tok_text = if (tok_tag == .identifier) self.tokenText(type_tok) else "";

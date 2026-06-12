@@ -778,3 +778,55 @@ test "#15 labeled rest element retains its name" {
     try testing.expectEqualStrings("first", members.items[0].label);
     try testing.expectEqualStrings("rest", members.items[1].label);
 }
+
+// ── Issue #16: catch-clause type annotation is retained on the binding ──────
+
+/// Find the single `catch_clause` node and return its catch-parameter binding
+/// (the node in `data.lhs`), or null if there is no catch clause.
+fn catchParam(p: *const TsParse) ?NodeIndex {
+    const tags = p.tree.nodes.items(.tag);
+    const datas = p.tree.nodes.items(.data);
+    for (tags, 0..) |t, i| {
+        if (t == .catch_clause) return datas[i].lhs;
+    }
+    return null;
+}
+
+test "#16 typed catch binding retains its type annotation" {
+    inline for (.{ "unknown", "any" }) |ty| {
+        var p = try TsParse.init("try {} catch (e: " ++ ty ++ ") { e; }");
+        defer p.deinit();
+        try expectNoErrors(&p.tree);
+
+        const tags = p.tree.nodes.items(.tag);
+        const mains = p.tree.nodes.items(.main_token);
+        const datas = p.tree.nodes.items(.data);
+
+        const param = catchParam(&p) orelse return error.NoCatchClause;
+        try testing.expectEqual(Node.Tag.identifier, tags[param.toInt()]);
+
+        // The binding identifier's rhs slot now carries the annotation.
+        const ann = datas[param.toInt()].rhs;
+        try testing.expect(ann != .none);
+        try testing.expectEqual(Node.Tag.ts_type_annotation, tags[ann.toInt()]);
+
+        // The annotation wraps a type node whose main token is the type name.
+        const type_node = datas[ann.toInt()].lhs;
+        try testing.expect(type_node != .none);
+        try testing.expectEqualStrings(ty, p.tree.tokenText(mains[type_node.toInt()]));
+    }
+}
+
+test "#16 untyped catch binding has no type annotation" {
+    var p = try TsParse.init("try {} catch (e) { e; }");
+    defer p.deinit();
+    try expectNoErrors(&p.tree);
+
+    const tags = p.tree.nodes.items(.tag);
+    const datas = p.tree.nodes.items(.data);
+
+    const param = catchParam(&p) orelse return error.NoCatchClause;
+    try testing.expectEqual(Node.Tag.identifier, tags[param.toInt()]);
+    // No annotation: rhs stays empty, so a typed binding is distinguishable.
+    try testing.expectEqual(NodeIndex.none, datas[param.toInt()].rhs);
+}
