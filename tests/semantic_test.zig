@@ -57,6 +57,56 @@ test "analyze without scope-event emission errors instead of returning empty" {
     );
 }
 
+test "deeply nested shadowing scopes do not produce spurious redeclare diagnostics (#18)" {
+    const allocator = testing.allocator;
+    // Build `depth` nested blocks, each with its own `let x` (legal shadowing).
+    // depth > the resolver's old fixed 256 scope-stack cap, but < the parser's
+    // max_recursion_depth (400). The pre-fix resolver dropped scope_opens past
+    // 256 while still honoring their scope_close, collapsing distinct block
+    // scopes into one and reporting the shadowed `let x`s as duplicate bindings.
+    const depth = 300;
+    var buf: std.ArrayListUnmanaged(u8) = .{ .items = &.{}, .capacity = 0 };
+    defer buf.deinit(allocator);
+    var i: usize = 0;
+    while (i < depth) : (i += 1) try buf.appendSlice(allocator, "{ let x = 1; x;");
+    i = 0;
+    while (i < depth) : (i += 1) try buf.append(allocator, '}');
+    const source = buf.items;
+
+    var _lr = try Lexer.tokenize(allocator, source);
+    defer _lr.deinit(allocator);
+    var tokens = _lr.tokens;
+    var tree = try Parser.parse(allocator, source, tokens.slice());
+    defer tree.deinit(allocator);
+
+    // Premise: the parser accepts this depth (it is below max_recursion_depth).
+    var parse_errors: usize = 0;
+    for (tree.errors) |d| {
+        if (d.severity == .@"error") parse_errors += 1;
+    }
+    try testing.expectEqual(@as(usize, 0), parse_errors);
+
+    // diagnose_redeclare runs the CFG build, which assumes zeroed buffers — use
+    // the documented zeroing-allocator wrapper.
+    var za = semantic.ZeroingAllocator.init(allocator);
+    const za_alloc = za.allocator();
+    var result = try semantic.SemanticAnalyzer.analyzeWithOptions(za_alloc, &tree, .{
+        .is_module = false,
+        .diagnose_redeclare = true,
+    });
+    defer result.deinit(za_alloc);
+
+    // Every `let x` lives in its own block scope, so there are no duplicate
+    // bindings: zero error-severity diagnostics.
+    var redeclare_errors: usize = 0;
+    for (result.diagnostics) |d| {
+        if (d.severity == .@"error") redeclare_errors += 1;
+    }
+    try testing.expectEqual(@as(usize, 0), redeclare_errors);
+    // Sanity: every `let x` produced its own symbol.
+    try testing.expect(result.symbols.count() >= depth);
+}
+
 // ── Structural test helpers ─────────────────────────────────
 //
 // Unlike count-based smoke checks (`symbols.count() > 0`), these assert the
