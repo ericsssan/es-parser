@@ -497,3 +497,49 @@ fn fuzzSemanticNoAnnexB(_: void, smith: *std.testing.Smith) !void {
     }) catch return;
     _ = &sem;
 }
+
+// Structure-aware depth target for the scope-stack-depth class (#18). The
+// byte-mutation semantic fuzzers above can't reach this bug: nesting depth is
+// not a coverage dimension (level 257 hits the same edges as level 5), so the
+// coverage engine gets no gradient toward 256+ balanced scopes, and no seed is
+// deeply nested. They also have no correctness oracle — they discard the result
+// and only check for crashes. Here the input length drives the nesting depth and
+// we assert the invariant directly: legal lexical shadowing must never be
+// reported as a duplicate binding, at any depth. Plain blocks only — they are the
+// one construct that reaches >256 scopes within the parser's 400-deep recursion
+// budget (if/for/functions each cost ~2 recursion levels). need_cfg = false keeps
+// this on the scope-resolution path and clear of the try/finally CFG bug (#17).
+test "fuzz: deeply nested scope shadowing (#18)" {
+    try std.testing.fuzz({}, fuzzScopeDepth, .{ .corpus = sem_corpus });
+}
+
+fn fuzzScopeDepth(_: void, smith: *std.testing.Smith) !void {
+    var buf: [512]u8 = undefined;
+    const seed = fuzzBytes(smith, &buf);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // One nested block per input byte, capped above the resolver's 256 growth
+    // point and below the parser's max_recursion_depth (400).
+    const depth = @min(seed.len, 350);
+    var src: std.ArrayListUnmanaged(u8) = .{ .items = &.{}, .capacity = 0 };
+    var i: usize = 0;
+    while (i < depth) : (i += 1) src.appendSlice(alloc, "{ let x = 1; x;") catch return;
+    i = 0;
+    while (i < depth) : (i += 1) src.append(alloc, '}') catch return;
+
+    var toks = es.Lexer.tokenizeWithLanguage(alloc, src.items, .js) catch return;
+    var tree = es.Parser.parseWithOptions(alloc, src.items, toks.tokens.slice(), .{ .emit_events = true }) catch return;
+    _ = &toks;
+    if (tree.errors.len > 0) return; // hit the nesting limit etc. — not our concern
+    const sem = es.semantic.SemanticAnalyzer.analyzeWithOptions(alloc, &tree, .{
+        .diagnose_redeclare = true,
+        .need_cfg = false,
+    }) catch return;
+    // Every `let x` lives in its own block scope: zero duplicate-binding errors.
+    for (sem.diagnostics) |d| {
+        if (d.severity == .@"error") return error.SpuriousRedeclareDiagnostic;
+    }
+}

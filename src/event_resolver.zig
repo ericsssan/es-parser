@@ -412,8 +412,8 @@ fn resolveFullImpl(
     // Per-depth undo stacks: on declare we record (name_hash, sym_id, prev) at
     // target_depth so scope_close can restore the previous binding in scope_map.
     const UndoEntry = struct { name_hash: u64, sym_id: SymbolId, prev: ?SymbolId };
-    var undo_stacks: [256]std.ArrayListUnmanaged(UndoEntry) = undefined;
-    for (&undo_stacks) |*u| u.* = .{ .items = &.{}, .capacity = 0 };
+    var undo_stacks: []std.ArrayListUnmanaged(UndoEntry) = try sa.alloc(std.ArrayListUnmanaged(UndoEntry), 256);
+    for (undo_stacks) |*u| u.* = .{ .items = &.{}, .capacity = 0 };
     // (freed by scope_arena.deinit)
 
     // Unresolved ref ids collected during the main pass so the retry pass can
@@ -473,14 +473,18 @@ fn resolveFullImpl(
     }
 
     // Scope stack — holds ScopeIds as we enter/leave scopes during the event
-    // pass.  Depth ≤ 256 is plenty for realistic source (acorn.js peaks ~8).
-    var stack: [256]ScopeId = undefined;
+    // pass. Initial 256 covers typical source; it grows on demand and NEVER
+    // drops a scope_open. (The parser caps nesting at max_recursion_depth = 400,
+    // so a fixed 256 sat below the reachable depth: dropping an open while still
+    // honoring its scope_close misaligned the stack and collapsed distinct scopes
+    // into one — producing spurious redeclaration diagnostics past depth 256.)
+    var stack: []ScopeId = try sa.alloc(ScopeId, 256);
     // Parallel kind/node side-stacks — populated on every scope_open and used
     // by scope_close instead of indexing scopes.kinds/node_ids. Lets the
     // .cfg_only path skip ScopeTree population entirely; small win on .both
     // too (avoids two indirect ArrayList loads per scope_close).
-    var kind_stack: [256]ScopeKind = undefined;
-    var node_stack: [256]NodeIndex = undefined;
+    var kind_stack: []ScopeKind = try sa.alloc(ScopeKind, 256);
+    var node_stack: []NodeIndex = try sa.alloc(NodeIndex, 256);
     var sp: u32 = 0;
 
     // In streaming mode, the parser is concurrently growing nodes/tokens.
@@ -613,12 +617,22 @@ fn resolveFullImpl(
                     scopes.setFlags(sid, sf);
                 }
             }
-            if (sp < stack.len) {
-                stack[sp] = sid;
-                kind_stack[sp] = kind;
-                node_stack[sp] = node;
-                sp += 1;
+            if (sp == stack.len) {
+                // Grow all depth-indexed scope stacks in lockstep; never drop a
+                // scope_open. undo_stacks is indexed by target_depth (always < sp),
+                // so it must stay the same length as stack.
+                const new_cap = stack.len * 2;
+                stack = try sa.realloc(stack, new_cap);
+                kind_stack = try sa.realloc(kind_stack, new_cap);
+                node_stack = try sa.realloc(node_stack, new_cap);
+                const old_cap = undo_stacks.len;
+                undo_stacks = try sa.realloc(undo_stacks, new_cap);
+                for (undo_stacks[old_cap..]) |*u| u.* = .{ .items = &.{}, .capacity = 0 };
             }
+            stack[sp] = sid;
+            kind_stack[sp] = kind;
+            node_stack[sp] = node;
+            sp += 1;
             // A function body starts with a live control-flow path; save the
             // outer alive state so exit from the function restores it.
             if (kind == .function or kind == .arrow_function or kind == .global or
