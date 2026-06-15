@@ -107,6 +107,47 @@ test "deeply nested shadowing scopes do not produce spurious redeclare diagnosti
     try testing.expect(result.symbols.count() >= depth);
 }
 
+// Deeply nested control flow (try/catch/finally + loops + switch) whose CFG has
+// enough predecessor edges to outgrow the code-path builder's `all_prev_targets`
+// pre-size, forcing it to reallocate mid-build. The pre-fix builder handed
+// `createSegment` a predecessor slice that *aliased* `all_prev_targets` (via
+// flattenUnused's single-unused fast path); the reallocation dangled that alias,
+// so the append loop read freed memory — a layout-dependent OOB / heap corruption
+// (#17). It surfaced only when the freed buffer changed under the reader: a tight
+// or poisoning allocator. This regression therefore needs a safety build (freed
+// memory is poisoned) — which the test build is — to bite; under ReleaseFast over
+// an arena the stale buffer survives and masks it.
+//
+// The fixture is a generator-found seed (error-recovered AST is in scope per #17);
+// the trigger is edge-density-sensitive, so it is kept byte-exact. The structure-
+// aware fuzz target in fuzz_test.zig is the durable, non-fragile guard for the class.
+test "deeply nested CFG does not read a dangling predecessor slice (#17)" {
+    const source = @embedFile("fixtures/cfg_deep_nesting_17.js");
+    const allocator = testing.allocator;
+
+    var _lr = try Lexer.tokenizeWithOptions(allocator, source, .js, false);
+    defer _lr.deinit(allocator);
+    var tokens = _lr.tokens;
+    var tree = try Parser.parseWithOptions(allocator, source, tokens.slice(), .{ .emit_events = true });
+    defer tree.deinit(allocator);
+
+    // need_cfg drives the code-path builder where the dangling read lived. Use the
+    // documented zeroing-allocator wrapper so any *uninitialized-read* class is
+    // satisfied and only the (now-fixed) dangling-alias write could trip.
+    var za = semantic.ZeroingAllocator.init(allocator);
+    const za_alloc = za.allocator();
+    var result = try semantic.SemanticAnalyzer.analyzeWithOptions(za_alloc, &tree, .{
+        .need_cfg = true,
+        .diagnose_redeclare = true,
+        .build_parents = true,
+    });
+    defer result.deinit(za_alloc);
+
+    // Reaching here without a safety trip is the assertion. Sanity-check that the
+    // pipeline actually ran the CFG-bearing analysis rather than bailing early.
+    try testing.expect(result.symbols.count() > 0);
+}
+
 // ── Structural test helpers ─────────────────────────────────
 //
 // Unlike count-based smoke checks (`symbols.count() > 0`), these assert the
