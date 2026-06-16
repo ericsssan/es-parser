@@ -545,7 +545,17 @@ pub fn tokenizeScalarWithOptions(
     var at_line_start = true;
     var prev_kind: Tag = .eof;
     var tmpl_depth: u32 = 0;
-    var brace_d: [16]u32 = @splat(0);
+    // Per-template-level brace-nesting counters. Inline [16] fast path with a
+    // lazy heap spill for deeply nested templates (>=16): without it, tmpl_depth
+    // stopped incrementing at the cap and the brace tracking desynced, mis-lexing
+    // valid ECMAScript with 17+ nested template literals (#19). The spill only
+    // ever triggers on that pathological depth; the common case is the inline
+    // array, and neither is touched on the hot ident/whitespace path.
+    var brace_inline: [16]u32 = @splat(0);
+    var brace_ptr: [*]u32 = &brace_inline;
+    var brace_cap: u32 = brace_inline.len;
+    var brace_heap: ?[]u32 = null;
+    defer if (brace_heap) |h| alloc.free(h);
     // JSX opening-tag header depth and `{...}` nesting within it; used to
     // classify a string as a JSX attribute value vs. an ordinary string.
     var jsx_tag_depth: u32 = 0;
@@ -659,21 +669,30 @@ pub fn tokenizeScalarWithOptions(
                     tag = .invalid;
                 } else if (res.has_expr) {
                     tag = .template_head;
-                    if (tmpl_depth < brace_d.len) {
-                        brace_d[tmpl_depth] = 0;
-                        tmpl_depth += 1;
+                    if (tmpl_depth == brace_cap) {
+                        // Cold: deeply nested template — grow the brace buffer.
+                        @branchHint(.cold);
+                        const new_cap = brace_cap * 2;
+                        const grown = try alloc.alloc(u32, new_cap);
+                        @memcpy(grown[0..brace_cap], brace_ptr[0..brace_cap]);
+                        if (brace_heap) |h| alloc.free(h);
+                        brace_heap = grown;
+                        brace_ptr = grown.ptr;
+                        brace_cap = new_cap;
                     }
+                    brace_ptr[tmpl_depth] = 0;
+                    tmpl_depth += 1;
                 } else tag = .template_no_sub;
             },
 
             '{' => {
-                if (tmpl_depth > 0) brace_d[tmpl_depth - 1] += 1;
+                if (tmpl_depth > 0) brace_ptr[tmpl_depth - 1] += 1;
                 tag = .l_brace;
                 i += 1;
             },
 
             '}' => {
-                if (tmpl_depth > 0 and brace_d[tmpl_depth - 1] == 0) {
+                if (tmpl_depth > 0 and brace_ptr[tmpl_depth - 1] == 0) {
                     const res = Lex.templateChunkEnd(src, start);
                     i = res.end;
                     if (!res.terminated) {
@@ -685,7 +704,7 @@ pub fn tokenizeScalarWithOptions(
                         tmpl_depth -= 1;
                     }
                 } else {
-                    if (tmpl_depth > 0) brace_d[tmpl_depth - 1] -= 1;
+                    if (tmpl_depth > 0) brace_ptr[tmpl_depth - 1] -= 1;
                     tag = .r_brace;
                     i += 1;
                 }
