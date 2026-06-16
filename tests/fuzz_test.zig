@@ -543,3 +543,148 @@ fn fuzzScopeDepth(_: void, smith: *std.testing.Smith) !void {
         if (d.severity == .@"error") return error.SpuriousRedeclareDiagnostic;
     }
 }
+
+// ── Control-flow / CFG-builder target (#17, the #17 half of #23) ────────────
+//
+// The byte-mutation semantic fuzzers above can't reach the CFG-builder heap
+// corruption fixed in #17: it needs a control-flow graph whose predecessor-edge
+// count outgrows the code-path builder's `all_prev_targets` pre-size — i.e.
+// deeply nested try/catch/finally + loops + switch — and the bug surfaces only
+// when the builder reallocates that pool mid-build while a predecessor slice
+// still aliases it. The flat corpus has no such density, and the other targets
+// early-return on parse errors (`tree.errors.len > 0`), so they never analyze an
+// error-recovered AST — the second condition #17 calls out (#23, gap B).
+//
+// This target derives a structured control-flow program from the input bytes
+// (so nesting depth/shape is a coverage dimension the engine can drive toward)
+// and analyzes it with the full CFG pipeline — deliberately WITHOUT early-
+// returning on parse errors. It uses the compliant ZeroingAllocator: the #17
+// bug was a use-after-realloc that bit even under zeroing, so this stays clear
+// of the documented uninitialized-read class (which a non-zeroing allocator
+// would trip as a false positive) while still catching the real defect. In the
+// safety test build, freed memory is poisoned, so the dangling read trips a
+// bounds check; the oracle is simply "completes without a safety trip".
+test "fuzz: control-flow / try-finally CFG (#17)" {
+    try std.testing.fuzz({}, fuzzCfgControlFlow, .{ .corpus = cfg_corpus });
+}
+
+const cfg_corpus: []const []const u8 = &.{
+    @embedFile("fixtures/cfg_deep_nesting_17.js"),
+    @embedFile("fixtures/control_flow.js"),
+    "try { f(); } catch (e) { g(e); } finally { h(); }",
+    "function f(){ while(c){ try { if(a) return; else throw e; } finally { c(); } } }",
+    "switch (x) { case 1: try { return; } finally { f(); } default: g(); }",
+};
+
+// Byte-driven control-flow generator: consumes the input as a decision stream,
+// emitting nested try/catch/finally, loops, switch, and control terminators.
+// `budget` bounds total statements; `depth` is capped under the parser's
+// max_recursion_depth (400). Exhausted input reads as 0 (still terminates).
+const CfgGen = struct {
+    bytes: []const u8,
+    pos: usize = 0,
+    out: *std.ArrayListUnmanaged(u8),
+    a: std.mem.Allocator,
+    budget: i32 = 300,
+
+    fn take(self: *CfgGen) u8 {
+        if (self.pos >= self.bytes.len) return 0;
+        const b = self.bytes[self.pos];
+        self.pos += 1;
+        return b;
+    }
+    fn emit(self: *CfgGen, s: []const u8) std.mem.Allocator.Error!void {
+        try self.out.appendSlice(self.a, s);
+    }
+    fn block(self: *CfgGen, depth: u32) std.mem.Allocator.Error!void {
+        try self.emit("{");
+        var n: u8 = self.take() % 4;
+        while (n > 0) : (n -= 1) try self.stmt(depth);
+        try self.emit("}");
+    }
+    fn tryStmt(self: *CfgGen, depth: u32) std.mem.Allocator.Error!void {
+        try self.emit("try ");
+        try self.block(depth + 1);
+        const shape = self.take() % 3;
+        if (shape != 1) {
+            try self.emit("catch(e)");
+            try self.block(depth + 1);
+        }
+        if (shape != 0) {
+            try self.emit("finally");
+            try self.block(depth + 1);
+        }
+    }
+    fn stmt(self: *CfgGen, depth: u32) std.mem.Allocator.Error!void {
+        self.budget -= 1;
+        if (self.budget <= 0 or depth > 50) {
+            try self.emit("x;");
+            return;
+        }
+        switch (self.take() % 13) {
+            0, 1, 2 => try self.tryStmt(depth),
+            3 => try self.emit("return;"),
+            4 => try self.emit("return x;"),
+            5 => try self.emit("throw e;"),
+            6 => try self.emit("break;"),
+            7 => try self.emit("continue;"),
+            8 => {
+                try self.emit("if(c)");
+                try self.block(depth + 1);
+                if (self.take() & 1 == 0) {
+                    try self.emit("else");
+                    try self.block(depth + 1);
+                }
+            },
+            9 => {
+                try self.emit("while(c)");
+                try self.block(depth + 1);
+            },
+            10 => {
+                try self.emit("for(;;)");
+                try self.block(depth + 1);
+            },
+            11 => {
+                try self.emit("L:while(c){");
+                try self.stmt(depth + 1);
+                try self.emit(if (self.take() & 1 == 0) "break L;" else "continue L;");
+                try self.emit("}");
+            },
+            else => {
+                try self.emit("switch(x){case 1:");
+                try self.stmt(depth + 1);
+                try self.emit("break;default:");
+                try self.stmt(depth + 1);
+                try self.emit("}");
+            },
+        }
+    }
+};
+
+fn fuzzCfgControlFlow(_: void, smith: *std.testing.Smith) !void {
+    var buf: [4096]u8 = undefined;
+    const seed = fuzzBytes(smith, &buf);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var za = es.semantic.ZeroingAllocator.init(arena.allocator());
+    const alloc = za.allocator();
+
+    var prog: std.ArrayListUnmanaged(u8) = .{ .items = &.{}, .capacity = 0 };
+    if (seed.len > 0 and seed[0] & 1 == 0) prog.appendSlice(alloc, "function f()") catch return;
+    var gen = CfgGen{ .bytes = seed, .out = &prog, .a = alloc };
+    gen.block(0) catch return;
+
+    var toks = es.Lexer.tokenizeWithLanguage(alloc, prog.items, .js) catch return;
+    var tree = es.Parser.parseWithOptions(alloc, prog.items, toks.tokens.slice(), .{ .emit_events = true }) catch return;
+    _ = &toks;
+    // Deliberately analyze even error-recovered ASTs (do NOT early-return on
+    // tree.errors) — that is one of the two #17 conditions. The full CFG pipeline
+    // is enabled; reaching the end without a safety trip is the assertion.
+    var sem = es.semantic.SemanticAnalyzer.analyzeWithOptions(alloc, &tree, .{
+        .need_cfg = true,
+        .diagnose_redeclare = true,
+        .build_parents = true,
+    }) catch return;
+    _ = &sem;
+}

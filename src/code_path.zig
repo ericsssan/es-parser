@@ -611,14 +611,37 @@ pub const CodePathBuilder = struct {
         // (and FBA can't grow non-last allocs anyway), so route to bump.
         const pool_alloc = if (self.bump_alloc) |ba| ba else alloc;
 
-        // Single fused pass over all_prev — one capacity check per target list,
+        // `all_prev` may ALIAS `all_prev_targets`: flattenUnused()'s
+        // single-unused-segment fast path (the ~60% case) returns a slice
+        // straight into all_prev_targets.items. Growing all_prev_targets just
+        // below can reallocate its backing buffer, which dangles that alias and
+        // makes the append loop read freed memory — a layout- and allocator-
+        // dependent heap corruption (issue #17). Detect an aliasing slice by its
+        // offset into the buffer and rebase it onto the new backing after the
+        // grow: ensureUnusedCapacity copies the live range, so the same offset
+        // holds the same data. Non-aliasing callers cost only two pointer
+        // comparisons.
+        const apt_base = @intFromPtr(self.all_prev_targets.items.ptr);
+        const apt_span = self.all_prev_targets.capacity * @sizeOf(SegmentId);
+        const alias_off: ?usize = if (all_prev.len != 0 and
+            @intFromPtr(all_prev.ptr) >= apt_base and
+            @intFromPtr(all_prev.ptr) < apt_base + apt_span)
+            (@intFromPtr(all_prev.ptr) - apt_base) / @sizeOf(SegmentId)
+        else
+            null;
+
+        // Single fused pass over prev — one capacity check per target list,
         // no re-read of the input slice.
         try self.all_prev_targets.ensureUnusedCapacity(pool_alloc, all_prev.len);
-        try self.prev_targets.ensureUnusedCapacity(pool_alloc, all_prev.len);
+        const prev: []const SegmentId = if (alias_off) |off|
+            self.all_prev_targets.items.ptr[off .. off + all_prev.len]
+        else
+            all_prev;
+        try self.prev_targets.ensureUnusedCapacity(pool_alloc, prev.len);
         const ap_start: u32 = @intCast(self.all_prev_targets.items.len);
         const p_start: u32 = @intCast(self.prev_targets.items.len);
         const reach_s = self.seg_reachable.items;
-        for (all_prev) |p| {
+        for (prev) |p| {
             self.all_prev_targets.appendAssumeCapacity(p);
             if (p != NONE_SEG and reach_s[p] != 0) {
                 self.prev_targets.appendAssumeCapacity(p);
@@ -631,8 +654,8 @@ pub const CodePathBuilder = struct {
         // collect their reachable ancestors. Used by JS to give rules a
         // direct reachable-ancestor list (skips runtime walks).
         const cp_start: u32 = @intCast(self.collapsed_prev_targets.items.len);
-        if (!is_reachable and all_prev.len > 0) {
-            try self.buildCollapsedPrev(pool_alloc, all_prev);
+        if (!is_reachable and prev.len > 0) {
+            try self.buildCollapsedPrev(pool_alloc, prev);
         }
         const cp_end: u32 = @intCast(self.collapsed_prev_targets.items.len);
 
