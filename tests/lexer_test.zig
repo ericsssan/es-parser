@@ -150,6 +150,40 @@ test "template with expression" {
     try expectTokens("`hello ${x}`", &.{ .template_head, .identifier, .template_tail });
 }
 
+test "deeply nested template literals lex correctly past the inline brace cap (#19)" {
+    // 17 levels of `${ … }` — one past the lexer's inline [16] brace-depth fast
+    // path. Pre-fix, tmpl_depth stopped incrementing at 16, so the brace tracking
+    // desynced and the closing `}`s of deeper templates mis-lexed as r_brace,
+    // producing spurious parse errors on valid ECMAScript. The fix spills the
+    // brace buffer to the heap past the inline cap; the token stream must stay
+    // exactly N template_head / identifier / N template_tail at any depth.
+    const depth = 17;
+    const alloc = testing.allocator;
+    var src: std.ArrayListUnmanaged(u8) = .{ .items = &.{}, .capacity = 0 };
+    defer src.deinit(alloc);
+    var expected: std.ArrayListUnmanaged(Tag) = .{ .items = &.{}, .capacity = 0 };
+    defer expected.deinit(alloc);
+
+    var i: usize = 0;
+    while (i < depth) : (i += 1) {
+        try src.appendSlice(alloc, "`${");
+        try expected.append(alloc, .template_head);
+    }
+    try src.append(alloc, 'x');
+    try expected.append(alloc, .identifier);
+    i = 0;
+    while (i < depth) : (i += 1) {
+        try src.appendSlice(alloc, "}`");
+        try expected.append(alloc, .template_tail);
+    }
+
+    var result = try Lexer.tokenizeWithLanguage(alloc, src.items, .js);
+    defer result.deinit(alloc);
+    const tags = result.tokens.items(.tag);
+    for (expected.items, 0..) |exp, k| try testing.expectEqual(exp, tags[k]);
+    try testing.expectEqual(Tag.eof, tags[expected.items.len]);
+}
+
 // ── Operators ───────────────────────────────────────────
 
 test "arithmetic operators" {
