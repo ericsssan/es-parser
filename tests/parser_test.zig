@@ -830,3 +830,42 @@ test "#16 untyped catch binding has no type annotation" {
     // No annotation: rhs stays empty, so a typed binding is distinguishable.
     try testing.expectEqual(NodeIndex.none, datas[param.toInt()].rhs);
 }
+
+// ── #19: nesting caps must keep enforcing past their old fixed size ──────────
+//
+// These tracking buffers were fixed-size and silently stopped enforcing their
+// check once full. Each test drives the structure past the old cap and asserts
+// the check still fires. Red->green: pre-fix the duplicate beyond the cap was
+// not detected (0 errors); post-fix it is.
+
+test "#19 duplicate label is detected beyond the old 32-entry label stack" {
+    // 33 distinct labels (l0..l32) — l32 is the 33rd, which the old [32] stack
+    // dropped — then a duplicate `l32:`. Pre-fix the dup-check never saw l32, so
+    // it was missed; post-fix the grown stack catches it (SyntaxError in JS).
+    const alloc = testing.allocator;
+    var buf: std.ArrayListUnmanaged(u8) = .{ .items = &.{}, .capacity = 0 };
+    defer buf.deinit(alloc);
+    var i: usize = 0;
+    while (i <= 32) : (i += 1) try buf.print(alloc, "l{d}: ", .{i});
+    try buf.appendSlice(alloc, "l32: x;"); // duplicate of the 33rd label
+
+    var tree = try parseSource(buf.items);
+    defer tree.deinit(testing.allocator);
+    try testing.expect(tree.errors.len >= 1);
+}
+
+test "#19 duplicate import attribute is detected beyond the old 32-key cap" {
+    // 33 distinct keys (k0..k32) then a duplicate `k32` — the 33rd key was
+    // dropped by the old [32] offsets array, so the dup against it was missed.
+    const alloc = testing.allocator;
+    var buf: std.ArrayListUnmanaged(u8) = .{ .items = &.{}, .capacity = 0 };
+    defer buf.deinit(alloc);
+    try buf.appendSlice(alloc, "import x from \"m\" with { ");
+    var i: usize = 0;
+    while (i <= 32) : (i += 1) try buf.print(alloc, "k{d}: \"v\", ", .{i});
+    try buf.appendSlice(alloc, "k32: \"v\" };"); // duplicate of the 33rd key
+
+    var tree = try parseModule(buf.items);
+    defer tree.deinit(testing.allocator);
+    try testing.expect(tree.errors.len >= 1);
+}

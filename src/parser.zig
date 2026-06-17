@@ -439,12 +439,16 @@ pub const Parser = struct {
     /// so no-shadow can detect when a function generic shadows an outer type variable.
     emit_fn_type_params: bool = false,
     /// Heap-allocated (lazy) stack for TS duplicate-label and cross-function-
-    /// boundary checks.  Kept as a pointer so the 768-byte inline array does
+    /// boundary checks.  Kept out-of-line (a 16-byte slice header) so it does
     /// not bloat the Parser struct and push hot fields (ev_len, gpa, is_ts)
-    /// to distant cache lines.  Allocated on first label push; null means no
-    /// labels have been seen yet (ts_label_count == 0).
-    ts_label_stack: ?*[32]LabelEntry = null,
-    ts_label_count: u8 = 0,
+    /// to distant cache lines.  Empty until the first label push; grows on
+    /// demand (doubling from 32) so deeply nested labels never silently stop
+    /// being tracked — break/continue-target and duplicate-label validation
+    /// must hold at any nesting depth (#19). `ts_label_count` is the live
+    /// label-scope depth (saved/restored per statement and reset per function);
+    /// the backing slice only ever grows.
+    ts_label_stack: []LabelEntry = &.{},
+    ts_label_count: u32 = 0,
     /// Incremented each time we enter a non-arrow function body; used to detect TS1107.
     ts_label_fn_depth: u16 = 0,
 
@@ -626,7 +630,7 @@ pub const Parser = struct {
         defer p.pending_export_local_toks.deinit(allocator);
         defer p.proto_check_nodes.deinit(allocator);
         defer p.param_names_scratch.deinit(allocator);
-        defer if (p.ts_label_stack) |s| allocator.destroy(s);
+        defer if (p.ts_label_stack.len > 0) allocator.free(p.ts_label_stack);
         // Note: diagnostics ownership transfers to the returned Ast,
         // but we need a defer in case of early error.
         var diag_transferred = false;
@@ -2079,28 +2083,28 @@ pub const Parser = struct {
             defer decl_names.deinit(self.gpa);
             {
                 const evs_ee = self.ev_ptr[0..self.ev_len][program_scope_ev + 1 ..];
-                var fn_stack: [128]bool = undefined;
-                var stack_n: usize = 0;
+                // Grow on demand so deep scope nesting can't skew the
+                // function-depth count past a fixed cap (#19; same family as #25).
+                var fn_stack: std.ArrayListUnmanaged(bool) = .{ .items = &.{}, .capacity = 0 };
+                defer fn_stack.deinit(self.gpa);
                 var fn_d: i32 = 0;
                 for (evs_ee) |ev| {
                     switch (ev.kind) {
                         .scope_open => if (ev.aux != @intFromEnum(ScopeKindU8.elided)) {
                             const sk: ScopeKindU8 = @enumFromInt(ev.aux);
                             const is_fn = (sk == .function or sk == .class_field_initializer or sk == .static_block);
-                            if (stack_n < fn_stack.len) fn_stack[stack_n] = is_fn;
-                            stack_n += 1;
+                            try fn_stack.append(self.gpa, is_fn);
                             if (is_fn) fn_d += 1;
                         },
                         .scope_close => {
-                            if (stack_n > 0) {
-                                stack_n -= 1;
-                                if (stack_n < fn_stack.len and fn_stack[stack_n]) fn_d -= 1;
+                            if (fn_stack.pop()) |was_fn| {
+                                if (was_fn) fn_d -= 1;
                             }
                         },
                         .declare => {
                             const bk: BindingKindU8 = @enumFromInt(ev.aux);
                             const is_var_at_module = (bk == .@"var" and fn_d == 0);
-                            if (stack_n == 0 or is_var_at_module) {
+                            if (fn_stack.items.len == 0 or is_var_at_module) {
                                 const dn_tok = self.node_main_token_ptr[@intCast(ev.node)];
                                 try decl_names.put(self.gpa, self.tokenText(dn_tok), {});
                             }
@@ -3836,8 +3840,9 @@ pub const Parser = struct {
             // Validate break label target.
             {
                 var found = false;
-                if (self.ts_label_stack) |stack| {
-                    var i: u8 = 0;
+                {
+                    const stack = self.ts_label_stack;
+                    var i: u32 = 0;
                     while (i < self.ts_label_count) : (i += 1) {
                         if (labelNamesEqual(stack[i].name, label_name)) {
                             if (self.ts_label_fn_depth > stack[i].fn_depth) {
@@ -3906,8 +3911,9 @@ pub const Parser = struct {
             {
                 var found = false;
                 var is_loop_target = false;
-                if (self.ts_label_stack) |stack| {
-                    var i: u8 = 0;
+                {
+                    const stack = self.ts_label_stack;
+                    var i: u32 = 0;
                     while (i < self.ts_label_count) : (i += 1) {
                         if (labelNamesEqual(stack[i].name, label_name)) {
                             if (self.ts_label_fn_depth > stack[i].fn_depth) {
@@ -4003,8 +4009,9 @@ pub const Parser = struct {
 
         // Duplicate label check — always a SyntaxError per spec (not strict-only).
         {
-            if (self.ts_label_stack) |stack| {
-                var i: u8 = 0;
+            {
+                const stack = self.ts_label_stack;
+                var i: u32 = 0;
                 while (i < self.ts_label_count) : (i += 1) {
                     if (std.mem.eql(u8, stack[i].name, label_name)) {
                         try self.emitDiagnostic(self.currentSpan(), "Duplicate label", .{});
@@ -4020,16 +4027,19 @@ pub const Parser = struct {
         // Determine if the label transitively wraps an iteration statement by looking ahead
         // through any chained labels (e.g. `a: b: c: while(...)` → a is a loop label).
         const is_loop_label_for_push = self.peeksAtIterationStmt();
-        if (self.ts_label_count < 32) {
-            if (self.ts_label_stack == null)
-                self.ts_label_stack = try self.gpa.create([32]LabelEntry);
-            self.ts_label_stack.?[self.ts_label_count] = .{
-                .name = label_name,
-                .fn_depth = self.ts_label_fn_depth,
-                .is_loop = is_loop_label_for_push,
-            };
-            self.ts_label_count += 1;
+        // Grow the label stack on demand (doubling from 32) — never silently
+        // drop a label past a fixed cap (#19). The slice only grows; the live
+        // depth is ts_label_count, which is saved/restored by callers.
+        if (self.ts_label_count == self.ts_label_stack.len) {
+            const new_cap: usize = if (self.ts_label_stack.len == 0) 32 else self.ts_label_stack.len * 2;
+            self.ts_label_stack = try self.gpa.realloc(self.ts_label_stack, new_cap);
         }
+        self.ts_label_stack[self.ts_label_count] = .{
+            .name = label_name,
+            .fn_depth = self.ts_label_fn_depth,
+            .is_loop = is_loop_label_for_push,
+        };
+        self.ts_label_count += 1;
         defer self.ts_label_count = prev_label_count;
 
         // Labeled declarations are mostly forbidden
@@ -7860,8 +7870,10 @@ pub const Parser = struct {
             // Track decoded keys to detect duplicates. Spec: WithClause may not have
             // duplicate keys. String keys decode escapes (e.g. 'type' == 'type').
             var key_storage: KeyBuf = .{};
-            var key_offsets: [32]struct { start: u32, len: u32 } = undefined;
-            var keys_len: usize = 0;
+            // Grow on demand so the duplicate-key check holds for any number of
+            // attributes — a fixed cap silently stopped deduping past it (#19).
+            var key_offsets: std.ArrayListUnmanaged(struct { start: u32, len: u32 }) = .{ .items = &.{}, .capacity = 0 };
+            defer key_offsets.deinit(self.gpa);
             while (self.peek() != .r_brace and !self.isAtEnd()) {
                 const key_tok: u32 = self.tokIdx();
                 const key_tag = self.peek();
@@ -7880,18 +7892,14 @@ pub const Parser = struct {
                 }
                 const kl = key_storage.len - ks;
                 const decoded = key_storage.data[ks..][0..kl];
-                var i: usize = 0;
-                while (i < keys_len) : (i += 1) {
-                    const prev = key_storage.data[key_offsets[i].start..][0..key_offsets[i].len];
+                for (key_offsets.items) |off| {
+                    const prev = key_storage.data[off.start..][0..off.len];
                     if (std.mem.eql(u8, prev, decoded)) {
                         try self.emitDiagnostic(.{ .start = key_span_start, .end = key_span_start }, "Duplicate import attribute key", .{});
                         return error.ParseError;
                     }
                 }
-                if (keys_len < key_offsets.len) {
-                    key_offsets[keys_len] = .{ .start = @intCast(ks), .len = @intCast(kl) };
-                    keys_len += 1;
-                }
+                try key_offsets.append(self.gpa, .{ .start = @intCast(ks), .len = @intCast(kl) });
                 if (self.eat(.colon) == null) break;
                 // Per ES spec, attribute values must be string literals — but TS
                 // (and the conformance corpus) accepts arbitrary expressions for
