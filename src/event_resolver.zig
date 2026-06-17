@@ -41,106 +41,31 @@ const EventKind = scope_events.EventKind;
 const code_path_mod = @import("code_path.zig");
 const CodePathBuilder = code_path_mod.CodePathBuilder;
 const Origin = code_path_mod.Origin;
-const SegmentId = code_path_mod.SegmentId;
 
 /// Phase of the event-stream walk. Used to gate work in the unified resolver
 /// implementation so the same code can run as the full pass (default), or as
-/// either half of a parallel scope/CFG split.
+/// the scope/symbol/reference-only pass (lazy-CFG fast path).
 ///   .both        — run all event handlers (scope + CFG); produce SemanticResult.
-///   .scope_only  — run scope/symbols/references work; record per-ref-event
-///                  ref_id so the CFG half can stamp seg_id/alive bits later.
-///                  Skip all cpb.* calls and CFG bookkeeping.
-///   .cfg_only    — run CFG (cpb.* + cfg_alive bookkeeping) only; record per-
-///                  ref-event {seg_id, alive} side array. Skip scope_map,
-///                  symbol creation, reference resolution.
-pub const ResolverPhase = enum { both, scope_only, cfg_only };
+///   .scope_only  — run scope/symbols/references work only; skip all cpb.*
+///                  calls and CFG bookkeeping.
+pub const ResolverPhase = enum { both, scope_only };
 
 /// Output of a `.scope_only` walk. Contains everything except CFG-derived
 /// fields (seg_ids on references, node_reachable, loop_exit_reachable,
-/// code_path_result). `ref_event_to_id` is indexed by the running count of
-/// `.reference` events seen during the walk; the parallel CFG half uses it
-/// to stamp `references.seg_ids[ref_event_to_id[k]]` after both halves join.
+/// code_path_result).
 pub const ScopePart = struct {
     scopes: ScopeTree,
     symbols: SymbolTable,
     references: ReferenceTable,
     ref_by_sym: []ReferenceId,
-    /// One entry per `.reference` event, in event order.
-    ref_event_to_id: []ReferenceId,
 
     pub fn deinit(self: *ScopePart, allocator: std.mem.Allocator) void {
         self.scopes.deinit();
         self.symbols.deinit();
         self.references.deinit();
         if (self.ref_by_sym.len != 0) allocator.free(self.ref_by_sym);
-        if (self.ref_event_to_id.len != 0) allocator.free(self.ref_event_to_id);
     }
 };
-
-/// Output of a `.cfg_only` walk. `node_reachable`/`loop_exit_reachable` are
-/// fully owned (allocated by this side). `ref_event_seg_ids` and
-/// `ref_event_alive` are parallel arrays sized to the number of `.reference`
-/// events seen — combined with `ScopePart.ref_event_to_id` in `combineParts`.
-pub const CfgPart = struct {
-    code_path_result: code_path_mod.CodePathBuilder.Result,
-    node_reachable: []u8,
-    loop_exit_reachable: []u8,
-    ref_event_seg_ids: []SegmentId,
-    ref_event_alive: []u8,
-
-    pub fn deinit(self: *CfgPart, allocator: std.mem.Allocator) void {
-        self.code_path_result.deinit(allocator);
-        allocator.free(self.node_reachable);
-        allocator.free(self.loop_exit_reachable);
-        if (self.ref_event_seg_ids.len != 0) allocator.free(self.ref_event_seg_ids);
-        if (self.ref_event_alive.len != 0) allocator.free(self.ref_event_alive);
-    }
-};
-
-/// Stitch the two halves into a SemanticResult. After this call ScopePart and
-/// CfgPart fields are MOVED; do NOT call .deinit on the parts. The returned
-/// SemanticResult owns everything.
-pub fn combineParts(
-    allocator: std.mem.Allocator,
-    scope: ScopePart,
-    cfg: CfgPart,
-) !semantic_mod.SemanticResult {
-    var s = scope;
-    var c = cfg;
-
-    // Stamp per-reference seg_id + dead-node bits. Both arrays were filled in
-    // the same `.reference` event order, so index k aligns by construction.
-    const n = @min(s.ref_event_to_id.len, c.ref_event_seg_ids.len);
-    const seg_col = s.references.list.items(.seg_id);
-    var k: usize = 0;
-    while (k < n) : (k += 1) {
-        const rid = s.ref_event_to_id[k];
-        if (rid == .none) continue;
-        seg_col[rid.toInt()] = c.ref_event_seg_ids[k];
-        // Dead-reference: mark the ref's node unreachable. Node index lives in
-        // the reference table itself — pull it back from there.
-        if (c.ref_event_alive[k] == 0) {
-            const ni = @intFromEnum(s.references.getNode(rid));
-            if (ni < c.node_reachable.len) c.node_reachable[ni] = 0;
-        }
-    }
-
-    // ref_event arrays no longer needed after the stitch.
-    if (s.ref_event_to_id.len != 0) allocator.free(s.ref_event_to_id);
-    if (c.ref_event_seg_ids.len != 0) allocator.free(c.ref_event_seg_ids);
-    if (c.ref_event_alive.len != 0) allocator.free(c.ref_event_alive);
-
-    return .{
-        .scopes = s.scopes,
-        .symbols = s.symbols,
-        .references = s.references,
-        .ref_by_sym = s.ref_by_sym,
-        .diagnostics = &.{},
-        .node_reachable = c.node_reachable,
-        .loop_exit_reachable = c.loop_exit_reachable,
-        .code_path_result = c.code_path_result,
-    };
-}
 
 // ── Options / minimal summary ───────────────────────────────────────
 
@@ -167,39 +92,6 @@ pub const Options = struct {
     /// allocator instead of the analyzer's transient arena. The pools end up
     /// in the JS buffer so writeCfgGraph can publish their offsets directly.
     cfg_pool_alloc: ?std.mem.Allocator = null,
-    /// Streaming mode: when set, the producer (parser thread) is publishing
-    /// events incrementally. The resolver walks the events slice via
-    /// indexed access bounded by `events_published.load(.acquire)` and blocks
-    /// on the slow path when it catches up to the producer.
-    streaming: ?StreamingHooks = null,
-};
-
-pub const StreamingHooks = struct {
-    events_published: *std.atomic.Value(usize),
-    parse_done: *std.atomic.Value(bool),
-    /// Upper bound on node count — used to pre-size node_reachable etc. since
-    /// `ast.nodes.len` reflects the parser's still-growing count. Caller passes
-    /// the same upper-bound hint used to size the parser's pre-allocated nodes.
-    node_count_hint: usize,
-    /// Optional diagnostic counters — populated by resolveFull when set. Lets
-    /// callers see where sem time is going (loop vs spin vs post-passes) and
-    /// how often it parks the kernel via yield.
-    stats: ?*Stats = null,
-};
-
-pub const Stats = struct {
-    events_loop_ns: u64 = 0,
-    spin_ns: u64 = 0,
-    post_passes_ns: u64 = 0,
-    resolve_unresolved_ns: u64 = 0,
-    build_ref_ranges_ns: u64 = 0,
-    build_scope_bindings_ns: u64 = 0,
-    spin_count: u64 = 0,
-    yield_count: u64 = 0,
-    events_processed: u64 = 0,
-    unresolved_count: u64 = 0,
-    scope_count: u64 = 0,
-    symbol_count: u64 = 0,
 };
 
 /// Returns the "looping target" node for a loop — the child node that ESLint's
@@ -237,7 +129,6 @@ fn ResultFor(comptime phase: ResolverPhase) type {
     return switch (phase) {
         .both => semantic_mod.SemanticResult,
         .scope_only => ScopePart,
-        .cfg_only => CfgPart,
     };
 }
 
@@ -251,9 +142,8 @@ pub fn resolveFull(
     return resolveFullImpl(.both, allocator, ast, events, opts);
 }
 
-/// Public entry: scope/symbols/references only — for the parallel CFG split.
-/// Caller must run `resolveFullCfg` on the same events and pass both into
-/// `combineParts` to get a full `SemanticResult`.
+/// Public entry: scope/symbols/references only — the lazy-CFG fast path used
+/// when no active rule needs control-flow analysis.
 pub fn resolveFullScope(
     allocator: std.mem.Allocator,
     ast: *const Ast,
@@ -262,71 +152,6 @@ pub fn resolveFullScope(
 ) !ScopePart {
     return resolveFullImpl(.scope_only, allocator, ast, events, opts);
 }
-
-/// Public entry: CFG only — see `resolveFullScope` for usage.
-pub fn resolveFullCfg(
-    allocator: std.mem.Allocator,
-    ast: *const Ast,
-    events: []const Event,
-    opts: Options,
-) !CfgPart {
-    return resolveFullImpl(.cfg_only, allocator, ast, events, opts);
-}
-
-/// Spawn a worker thread to run `resolveFullCfg` in parallel with the caller's
-/// scope walk. Caller calls `resolveFullScope` on the same events, then joins
-/// and stitches via `combineParts`. Typical pattern:
-///
-///     var w = try ScopeCfgParallel.start(gpa, ast, events, opts);
-///     const scope = try resolveFullScope(gpa, ast, events, opts);
-///     const cfg   = try w.join();
-///     const sem   = try combineParts(gpa, scope, cfg);
-pub const ScopeCfgParallel = struct {
-    thread: std.Thread,
-    allocator: std.mem.Allocator,
-    ast: *const Ast,
-    events: []const Event,
-    opts: Options,
-    result: CfgPart,
-    err: ?anyerror,
-
-    fn entry(self: *ScopeCfgParallel) void {
-        if (resolveFullCfg(self.allocator, self.ast, self.events, self.opts)) |r| {
-            self.result = r;
-        } else |e| {
-            self.err = e;
-        }
-    }
-
-    /// @returns owned
-    pub fn start(
-        allocator: std.mem.Allocator,
-        ast: *const Ast,
-        events: []const Event,
-        opts: Options,
-    ) !*ScopeCfgParallel {
-        const self = try allocator.create(ScopeCfgParallel);
-        errdefer allocator.destroy(self);
-        self.* = .{
-            .thread = undefined,
-            .allocator = allocator,
-            .ast = ast,
-            .events = events,
-            .opts = opts,
-            .result = undefined,
-            .err = null,
-        };
-        self.thread = try std.Thread.spawn(.{}, entry, .{self});
-        return self;
-    }
-
-    pub fn join(self: *ScopeCfgParallel, allocator: std.mem.Allocator) !CfgPart {
-        self.thread.join();
-        defer allocator.destroy(self);
-        if (self.err) |e| return e;
-        return self.result;
-    }
-};
 
 /// Production entry: consume `events` and build a full `SemanticResult`
 /// (ScopeTree, SymbolTable, ReferenceTable, node_reachable) suitable for
@@ -338,14 +163,12 @@ fn resolveFullImpl(
     events: []const Event,
     opts: Options,
 ) !ResultFor(phase) {
-    const do_scope = comptime phase != .cfg_only;
     const do_cfg = comptime phase != .scope_only;
     const skip_resolve = opts.skip_resolve;
     const skip_ref_ranges = opts.skip_ref_ranges;
 
-    // Pre-sized tables (same heuristics as semantic.zig). Streaming: use the
-    // upper-bound hint since ast.nodes.len is still growing on the parser thread.
-    const node_n: u32 = if (opts.streaming) |s| @intCast(s.node_count_hint) else @intCast(ast.nodes.len);
+    // Pre-sized tables (same heuristics as semantic.zig).
+    const node_n: u32 = @intCast(ast.nodes.len);
     const est_scopes = @max(16, node_n / 20);
     const est_syms   = @max(64, node_n / 6);
 
@@ -418,36 +241,12 @@ fn resolveFullImpl(
 
     // Unresolved ref ids collected during the main pass so the retry pass can
     // iterate only the small set (~5-20K) instead of scanning all refs (245K).
-    // Pre-size in streaming mode to avoid arena fragmentation that hurts
-    // resolveUnresolved cache locality.
     const UnresolvedRef = struct { ref_id: ReferenceId, name_hash: u64 };
     var unresolved_refs = std.ArrayListUnmanaged(UnresolvedRef){ .items = &.{}, .capacity = 0 };
-    if (opts.streaming) |s| {
-        // ~15% of events are unresolved on average; round up.
-        try unresolved_refs.ensureTotalCapacity(sa, @max(1024, s.node_count_hint / 4));
-    }
     // (freed by scope_arena.deinit)
 
-    // Per-`.reference`-event side arrays for the parallel split. Outer-allocator
-    // backed because we transfer ownership to the returned ScopePart/CfgPart.
-    var ref_event_to_id = std.ArrayListUnmanaged(ReferenceId){ .items = &.{}, .capacity = 0 };
-    var ref_event_seg_ids = std.ArrayListUnmanaged(SegmentId){ .items = &.{}, .capacity = 0 };
-    var ref_event_alive = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
-    errdefer if (phase == .scope_only) ref_event_to_id.deinit(allocator);
-    errdefer if (phase == .cfg_only) ref_event_seg_ids.deinit(allocator);
-    errdefer if (phase == .cfg_only) ref_event_alive.deinit(allocator);
-    if (phase == .scope_only) {
-        try ref_event_to_id.ensureTotalCapacity(allocator, est_syms);
-    }
-    if (phase == .cfg_only) {
-        try ref_event_seg_ids.ensureTotalCapacity(allocator, est_syms);
-        try ref_event_alive.ensureTotalCapacity(allocator, est_syms);
-    }
-
     // node_reachable — default all-alive (no CFG in event path yet).
-    // In streaming mode, ast.nodes.len reflects the parser's growing count;
-    // size to the caller-provided upper bound instead.
-    const reach_size: usize = if (opts.streaming) |s| s.node_count_hint else ast.nodes.len;
+    const reach_size: usize = ast.nodes.len;
     const node_reachable = try allocator.alloc(u8, reach_size);
     errdefer allocator.free(node_reachable);
     @memset(node_reachable, 1);
@@ -480,21 +279,14 @@ fn resolveFullImpl(
     // into one — producing spurious redeclaration diagnostics past depth 256.)
     var stack: []ScopeId = try sa.alloc(ScopeId, 256);
     // Parallel kind/node side-stacks — populated on every scope_open and used
-    // by scope_close instead of indexing scopes.kinds/node_ids. Lets the
-    // .cfg_only path skip ScopeTree population entirely; small win on .both
-    // too (avoids two indirect ArrayList loads per scope_close).
+    // by scope_close instead of indexing scopes.kinds/node_ids (avoids two
+    // indirect ArrayList loads per scope_close).
     var kind_stack: []ScopeKind = try sa.alloc(ScopeKind, 256);
     var node_stack: []NodeIndex = try sa.alloc(NodeIndex, 256);
     var sp: u32 = 0;
 
-    // In streaming mode, the parser is concurrently growing nodes/tokens.
-    // The slice's .len is racy, but the .ptr is stable (parser pre-sized
-    // both to safe upper bounds — guaranteed no realloc during parse).
-    // Reconstruct slices using the upper-bound hint for .len so bounds
-    // checks pass; per-event read of node[idx] is happens-after the
-    // event's release-store, so the data is committed.
-    const node_tags = if (opts.streaming) |s| ast.nodes.items(.tag).ptr[0..s.node_count_hint] else ast.nodes.items(.tag);
-    const node_datas = if (opts.streaming) |s| ast.nodes.items(.data).ptr[0..s.node_count_hint] else ast.nodes.items(.data);
+    const node_tags = ast.nodes.items(.tag);
+    const node_datas = ast.nodes.items(.data);
     // Pending label text set by label_open (aux=1) before the loop_open it wraps.
     var pending_label: []const u8 = "";
 
@@ -519,98 +311,26 @@ fn resolveFullImpl(
     // explicit creation here.
 
     var ev_i: usize = 0;
-    // Streaming: events.len was 0 when the early ast view was captured.
-    // Reconstruct a slice over the pre-allocated buffer using the upper-bound
-    // hint as len so events[ev_i] doesn't panic on bounds. The actual valid
-    // range is enforced by the events_published atomic.
-    const events_view: []const Event = if (opts.streaming) |s|
-        events.ptr[0..(s.node_count_hint * 2)]
-    else
-        events;
-    var ev_visible: usize = if (opts.streaming) |s| s.events_published.load(.acquire) else events_view.len;
+    const events_view: []const Event = events;
+    const ev_visible: usize = events_view.len;
 
-    // Per-stage timing for diagnostic stats.
-    var loop_start_ts: std.c.timespec = undefined;
-    if (opts.streaming != null) _ = std.c.clock_gettime(.MONOTONIC, &loop_start_ts);
-    main_event_loop: while (true) {
-        if (ev_i >= ev_visible) {
-            @branchHint(.cold);
-            if (opts.streaming) |s| {
-                var spin_start_ts: std.c.timespec = undefined;
-                if (s.stats != null) _ = std.c.clock_gettime(.MONOTONIC, &spin_start_ts);
-                var spins: u32 = 0;
-                var yields: u32 = 0;
-                var spin_iters: u64 = 0;
-                while (true) {
-                    const v = s.events_published.load(.acquire);
-                    if (v > ev_i) { ev_visible = v; break; }
-                    if (s.parse_done.load(.acquire)) {
-                        ev_visible = s.events_published.load(.acquire);
-                        break;
-                    }
-                    spins += 1;
-                    spin_iters += 1;
-                    if (spins < 100) std.atomic.spinLoopHint() else {
-                        std.Thread.yield() catch {};
-                        spins = 0;
-                        yields += 1;
-                    }
-                }
-                if (s.stats) |st| {
-                    var spin_end_ts: std.c.timespec = undefined;
-                    _ = std.c.clock_gettime(.MONOTONIC, &spin_end_ts);
-                    const dt: u64 = @intCast((spin_end_ts.sec - spin_start_ts.sec) * std.time.ns_per_s + (spin_end_ts.nsec - spin_start_ts.nsec));
-                    st.spin_ns += dt;
-                    st.spin_count += spin_iters;
-                    st.yield_count += yields;
-                }
-                if (ev_i >= ev_visible) break :main_event_loop;
-            } else break :main_event_loop;
-        }
+    while (ev_i < ev_visible) {
         const e = events_view[ev_i];
         ev_i += 1;
         switch (e.kind) {
         .scope_open => {
             const kind: ScopeKind = @enumFromInt(e.aux);
             // Elided scopes (parser-emitted block scopes that turned out empty
-            // — no let/const/class) have no matching scope_close. Sequential
-            // mode strips them via parser compaction; streaming skips
-            // compaction (race) so resolver must skip inline.
+            // — no let/const/class) have no matching scope_close, so skip them.
             if (kind == .elided) continue;
             const parent: ScopeId = if (sp == 0) ScopeId.fromInt(std.math.maxInt(u32)) else stack[sp - 1];
-            // Streaming-mode race: function/static_block/class_field_initializer
-            // scope_opens are emitted BEFORE the parser constructs the owning
-            // function node (parser does body first, then node, then patches
-            // the event). If the resolver gets here before that patch, e.node
-            // is NONE — which would propagate to the CodePath's codepath_start
-            // event and ultimately get dropped by writeCfgGraph's bounds check
-            // (node >= node_count), so rules never see onCodePathStart for
-            // that function. Spin-wait for the patch, same pattern as the
-            // loop_open handler below.
-            var raw_node = e.node;
-            if (opts.streaming != null and raw_node == std.math.maxInt(u32) and
-                (kind == .function or kind == .static_block or kind == .class_field_initializer))
-            {
-                const ev_u64: *const u64 = @ptrCast(&events_view[ev_i - 1]);
-                while (true) {
-                    std.atomic.spinLoopHint();
-                    raw_node = @truncate(@atomicLoad(u64, ev_u64, .acquire) >> 32);
-                    if (raw_node != std.math.maxInt(u32)) break;
-                    // Parse error: node was never patched — accept as-is (will be
-                    // treated as .none and skipped by the out-of-range guard below).
-                    if (opts.streaming.?.parse_done.load(.acquire)) break;
-                }
-            }
-            const node: NodeIndex = @enumFromInt(raw_node);
-            const sid: ScopeId = if (do_scope)
-                try scopes.addScope(kind, parent, node)
-            else
-                ScopeId.fromInt(0);
+            const node: NodeIndex = @enumFromInt(e.node);
+            const sid: ScopeId = try scopes.addScope(kind, parent, node);
             // Directive-based strictness: scope_open carries the parser's
             // in_strict (bit 0 of the event pad). Records `"use strict"` that
             // addScope's kind/parent inheritance can't see (e.g. a block in a
             // sloppy script after a "use strict" prologue).
-            if (do_scope and (e._pad & 1) != 0) {
+            if ((e._pad & 1) != 0) {
                 var sf = scopes.getFlags(sid);
                 if (!sf.strict_mode) {
                     sf.strict_mode = true;
@@ -661,7 +381,7 @@ fn resolveFullImpl(
             if (sp > 0) {
                 _ = stack[sp - 1];
                 sp -= 1;
-                if (do_scope) {
+                {
                     const closed_undos = undo_stacks[sp].items;
                     if (closed_undos.len > 0) {
                         // Restore scope_map and ref_cache to pre-scope state (LIFO).
@@ -772,7 +492,6 @@ fn resolveFullImpl(
             if (sp == 0) continue;
             // CFG-side concern: dead-path declare marks node unreachable.
             if (do_cfg and !cfg_alive and e.node < node_reachable.len) node_reachable[e.node] = 0;
-            if (!do_scope) continue;
             // Defensive: an error-recovered parse can emit a declare whose node
             // index was never created (out of range) — skip symbol creation
             // rather than indexing past the node array in nodeName below. The
@@ -863,13 +582,6 @@ fn resolveFullImpl(
             scopes.list.items(.bindings_count)[scope_id.toInt()] += 1;
         },
         .reference => {
-            // CFG-only fast path: just record side arrays and the dead-node bit.
-            if (!do_scope) {
-                try ref_event_seg_ids.append(allocator, cpb.currentSegId());
-                try ref_event_alive.append(allocator, if (cfg_alive) 1 else 0);
-                if (!cfg_alive and e.node < node_reachable.len) node_reachable[e.node] = 0;
-                continue;
-            }
             const scope_id: ScopeId = if (sp == 0)
                 ScopeId.fromInt(0) // orphan reference — assign to root
             else
@@ -881,7 +593,6 @@ fn resolveFullImpl(
                 references.list.items(.seg_id)[ref_id.toInt()] = cpb.currentSegId();
                 if (!cfg_alive and e.node < node_reachable.len) node_reachable[e.node] = 0;
             }
-            if (phase == .scope_only) try ref_event_to_id.append(allocator, ref_id);
 
             if (skip_resolve) continue;
             // Defensive: error-recovered ref node may be out of range — leave the
@@ -951,20 +662,7 @@ fn resolveFullImpl(
 
         // ── Loop CodePath events ─────────────────────────────────
         .loop_open => {
-            // In streaming mode the parser emits loop_open with node=.none and
-            // patches the real index after parsing the loop body.  The batch
-            // publish may fire between the push and the patch, so spin until
-            // patchEventNode's release-store is visible.
-            var node_raw = e.node;
-            if (opts.streaming != null and node_raw == std.math.maxInt(u32)) {
-                const ev_u64: *const u64 = @ptrCast(&events_view[ev_i - 1]);
-                while (true) {
-                    std.atomic.spinLoopHint();
-                    node_raw = @truncate(@atomicLoad(u64, ev_u64, .acquire) >> 32);
-                    if (node_raw != std.math.maxInt(u32)) break;
-                    if (opts.streaming.?.parse_done.load(.acquire)) break;
-                }
-            }
+            const node_raw = e.node;
             // Defensive: skip CFG/loop processing if node is unpatched (still .none)
             // or out-of-range — happens when the parser hits a recoverable error
             // mid-loop (e.g. `for (using x of arr) {}` — `using` not yet handled)
@@ -1100,23 +798,12 @@ fn resolveFullImpl(
         }
     }
 
-    // Capture loop end time and start post-passes timer.
-    var post_start_ts: std.c.timespec = undefined;
-    if (opts.streaming) |s| {
-        _ = std.c.clock_gettime(.MONOTONIC, &post_start_ts);
-        if (s.stats) |st| {
-            const dt: u64 = @intCast((post_start_ts.sec - loop_start_ts.sec) * std.time.ns_per_s + (post_start_ts.nsec - loop_start_ts.nsec));
-            st.events_loop_ns = dt;
-            st.events_processed = ev_i;
-        }
-    }
-
     // Retry unresolved references — `var`/`function` declarations hoist to the
     // nearest var-scope, so a reference seen *before* the declaration in source
     // order was left unresolved during the main pass.  Walk the var-scope chain
     // using hoist_map (O(1) per level) instead of all_entries binary search
     // (O(log N) per level across every lexical scope).
-    if (do_scope and !skip_resolve) {
+    if (!skip_resolve) {
         const scope_count: u32 = @intCast(scopes.len());
         for (unresolved_refs.items) |ur| {
             const ref_id = ur.ref_id;
@@ -1180,7 +867,7 @@ fn resolveFullImpl(
     // file and removes the need for the eager `void globalScope.through` in the runner.
     // Refs that match a global name get resolved here so ref.resolved is non-null;
     // the Zig through CSR excludes implicit_global refs, keeping scope.through clean.
-    if (do_scope and !skip_resolve and opts.globals.len > 0 and scopes.len() > 0) {
+    if (!skip_resolve and opts.globals.len > 0 and scopes.len() > 0) {
         const global_scope_id = ScopeId.fromInt(0);
         const implicit_flags = symbol_mod.flagsFromBindingKind(.implicit_global);
 
@@ -1229,39 +916,18 @@ fn resolveFullImpl(
 
     // Post-passes: sort by symbol / scope for downstream lookups, matching
     // `semantic.zig`'s `buildRefRanges` and `buildScopeBindings`.
-    const ref_by_sym: []ReferenceId = if (do_scope and !skip_ref_ranges)
+    const ref_by_sym: []ReferenceId = if (!skip_ref_ranges)
         try buildRefRanges(&symbols, &references, sa, allocator)
     else
         &.{};
-    var t_after_resolve: std.c.timespec = undefined;
-    if (opts.streaming) |s| {
-        if (s.stats) |st| {
-            _ = std.c.clock_gettime(.MONOTONIC, &t_after_resolve);
-            st.resolve_unresolved_ns = @intCast((t_after_resolve.sec - post_start_ts.sec) * std.time.ns_per_s + (t_after_resolve.nsec - post_start_ts.nsec));
-            st.unresolved_count = unresolved_refs.items.len;
-            st.scope_count = scopes.len();
-            st.symbol_count = symbols.count();
-        }
-    }
 
-    if (do_scope) try buildScopeBindings(&scopes, &symbols, allocator);
+    try buildScopeBindings(&scopes, &symbols, allocator);
 
-    // Duplicate-binding early-errors (opt-in). Only meaningful when the scope
-    // tree + symbol table were built (phase != .cfg_only).
-    const redeclare_diags: []Diagnostic = if (do_scope and opts.diagnose_redeclare)
+    // Duplicate-binding early-errors (opt-in).
+    const redeclare_diags: []Diagnostic = if (opts.diagnose_redeclare)
         try checkRedeclarations(allocator, sa, ast, &symbols, &scopes, opts)
     else
         &.{};
-
-    // Capture post-passes time.
-    if (opts.streaming) |s| {
-        if (s.stats) |st| {
-            var post_end_ts: std.c.timespec = undefined;
-            _ = std.c.clock_gettime(.MONOTONIC, &post_end_ts);
-            st.build_scope_bindings_ns = @intCast((post_end_ts.sec - t_after_resolve.sec) * std.time.ns_per_s + (post_end_ts.nsec - t_after_resolve.nsec));
-            st.post_passes_ns = @intCast((post_end_ts.sec - post_start_ts.sec) * std.time.ns_per_s + (post_end_ts.nsec - post_start_ts.nsec));
-        }
-    }
 
     // finish() transfers the arena into the Result; do NOT call cpb.deinit() after.
     const cpb_result = cpb.finish();
@@ -1282,19 +948,6 @@ fn resolveFullImpl(
             .symbols = symbols,
             .references = references,
             .ref_by_sym = ref_by_sym,
-            .ref_event_to_id = try ref_event_to_id.toOwnedSlice(allocator),
-        },
-        .cfg_only => blk: {
-            const seg_ids = try ref_event_seg_ids.toOwnedSlice(allocator);
-            errdefer allocator.free(seg_ids);
-            const alive = try ref_event_alive.toOwnedSlice(allocator);
-            break :blk CfgPart{
-                .code_path_result = cpb_result,
-                .node_reachable = node_reachable,
-                .loop_exit_reachable = loop_exit_reachable,
-                .ref_event_seg_ids = seg_ids,
-                .ref_event_alive = alive,
-            };
         },
     };
 }

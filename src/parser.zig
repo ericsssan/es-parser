@@ -233,24 +233,9 @@ pub const Parser = struct {
     /// Cached pointer to token byte lengths.
     tok_lens_ptr: [*]const u32,
     tok_i: usize,
-    /// Visible token count for the parser. In sequential (lexer-finalized)
-    /// mode this equals `tokens.len`. In streaming (lex-parse pipeline) mode
-    /// it is a snapshot of the producer's published count, refreshed via
-    /// `refreshParsedLen()` on the slow path when `tok_i` reaches it.
+    /// Visible token count for the parser. Equals `tokens.len` (the lexer has
+    /// finalized the token array before parsing begins).
     parsed_len: usize,
-    /// Streaming-mode coordination. When non-null, the lex thread is producing
-    /// tokens concurrently and `parsed_len` is a stale local cache; refresh by
-    /// loading `published_len` (acquire). `lex_done` distinguishes "more tokens
-    /// will come" from "EOF reached".
-    published_len: ?*std.atomic.Value(usize) = null,
-    lex_done: ?*std.atomic.Value(bool) = null,
-    /// Event-stream publisher for the 3-stage pipeline: when non-null, the
-    /// parser stores `scope_events.len()` to this slot at statement boundaries
-    /// so a concurrent semantic analyzer can consume events as they are
-    /// produced. Null in 1- and 2-stage modes.
-    events_publish_to: ?*std.atomic.Value(usize) = null,
-    lex_stall_count: u64 = 0,
-    lex_stall_ns: u64 = 0,
     nodes: Ast.NodeList,
     /// Cached pointers into the nodes SoA — refreshed whenever nodes grows.
     /// `MultiArrayList.items(.tag)` reconstructs the slice (loops over field
@@ -490,58 +475,23 @@ pub const Parser = struct {
         /// `scope_events` field.  Enables the fast-path semantic analyzer
         /// automatically when the caller passes the Ast to analyze().
         emit_events: bool = false,
-        /// Streaming mode (lex-parse pipeline). When set, the parser blocks
-        /// in advance/peekAt slow paths until the producer publishes more
-        /// tokens, instead of treating "past tokens.len" as EOF. The producer
-        /// (lexer running on another thread) must atomically store the
-        /// up-to-date token count to `published_len` (release) and set
-        /// `lex_done` true after the final publish.
-        streaming: ?StreamingHooks = null,
-    };
-
-    pub const StreamingHooks = struct {
-        published_len: *std.atomic.Value(usize),
-        lex_done: *std.atomic.Value(bool),
-        /// Hint used to pre-size parser internal arrays. In streaming mode
-        /// `tokens.len` reflects the buffer capacity (not produced tokens),
-        /// but estimating from source bytes is generally cleaner.
-        capacity_hint: usize,
-        /// Optional event-stream publisher for the 3-stage pipeline. When
-        /// set, the parser publishes the current event count to this atomic
-        /// after every top-level statement so a concurrent sem thread can
-        /// consume events incrementally.
-        events_publish_to: ?*std.atomic.Value(usize) = null,
-        /// Optional output slot for an early Ast view + a "ready" flag. Filled
-        /// by the parser after buffer pre-sizing, before parsing begins —
-        /// allows a concurrent sem thread to start with stable pointers into
-        /// the still-growing nodes/events arrays. The Ast.nodes/.scope_events
-        /// .len fields will lag behind the parser's actual count; sem must
-        /// use events_publish_to for the bound and node_count_hint for sizing.
-        ast_view_out: ?*Ast = null,
-        ast_ready: ?*std.atomic.Value(bool) = null,
-        /// Populated by the parser with the number of times it blocked waiting
-        /// for the lexer and the total nanoseconds spent spinning.
-        lex_stall_count_out: ?*u64 = null,
-        lex_stall_ns_out: ?*u64 = null,
-        /// Publish batch mask for parse→sem (batch_size - 1). Defaults to PUBLISH_BATCH-1.
-        sem_batch_mask: usize = scope_events_mod.EventStream.PUBLISH_BATCH - 1,
     };
 
     pub fn parseWithOptions(allocator: std.mem.Allocator, source: []const u8, tokens: TokenList.Slice, opts: ParseOptions) !Ast {
         const is_strict = opts.is_strict orelse opts.is_module;
-        return parseInternal(allocator, source, tokens, opts.language, opts.is_module, opts.global_return, is_strict, opts.events_out, opts.emit_events, opts.streaming, opts.annex_b, opts.experimental_decorators);
+        return parseInternal(allocator, source, tokens, opts.language, opts.is_module, opts.global_return, is_strict, opts.events_out, opts.emit_events, opts.annex_b, opts.experimental_decorators);
     }
 
     /// Parse with a specific language mode (js/ts/jsx/tsx).
     /// Always emits scope events — the event-driven semantic analyzer is the
     /// sole path (tree walker was removed). AnnexB extensions are ON by default.
     pub fn parseWithLanguage(allocator: std.mem.Allocator, source: []const u8, tokens: TokenList.Slice, language: Language, is_module_file: bool) !Ast {
-        return parseInternal(allocator, source, tokens, language, is_module_file, false, is_module_file, null, true, null, true, false);
+        return parseInternal(allocator, source, tokens, language, is_module_file, false, is_module_file, null, true, true, false);
     }
 
     /// Same as parseWithLanguage but with an explicit AnnexB flag.
     pub fn parseWithLanguageOpts(allocator: std.mem.Allocator, source: []const u8, tokens: TokenList.Slice, language: Language, is_module_file: bool, annex_b: bool) !Ast {
-        return parseInternal(allocator, source, tokens, language, is_module_file, false, is_module_file, null, true, null, annex_b, false);
+        return parseInternal(allocator, source, tokens, language, is_module_file, false, is_module_file, null, true, annex_b, false);
     }
 
     fn parseInternal(
@@ -554,7 +504,6 @@ pub const Parser = struct {
         is_strict_mode: bool,
         events_out: ?*ScopeEventStream,
         emit_events: bool,
-        streaming: ?StreamingHooks,
         annex_b: bool,
         experimental_decorators: bool,
     ) !Ast {
@@ -567,10 +516,7 @@ pub const Parser = struct {
             .tok_starts_ptr = tokens.items(.start).ptr,
             .tok_lens_ptr = tokens.items(.len).ptr,
             .tok_i = 0,
-            .parsed_len = if (streaming != null) 0 else tokens.len,
-            .published_len = if (streaming) |s| s.published_len else null,
-            .lex_done = if (streaming) |s| s.lex_done else null,
-            .events_publish_to = if (streaming) |s| s.events_publish_to else null,
+            .parsed_len = tokens.len,
             .nodes = .empty,
             .node_tags_ptr = undefined,
             .node_data_ptr = undefined,
@@ -579,12 +525,7 @@ pub const Parser = struct {
             .scratch = .empty,
             .diagnostics = .empty,
             .gpa = allocator,
-            // In streaming mode tokens.len is the pre-allocated buffer
-            // capacity, not the actual produced count — caller passes the
-            // tighter `capacity_hint`. Otherwise size by the materialized
-            // token count.
-            .max_nodes = if (streaming) |s| s.capacity_hint * 16
-                else tokens.len * 16,
+            .max_nodes = tokens.len * 16,
             .in_function = false,
             // Top-level await: allowed in modules (ES2022) and in TypeScript
             // (TSe / tsc accept it in script files too).
@@ -645,19 +586,8 @@ pub const Parser = struct {
         // Empirically ~0.75 AST nodes per token; extra_data grows larger than
         // the 3/8 estimate for typical JS — use 3/4 to avoid regrowths during
         // long statement / arg lists (each grow is an allocator round-trip
-        // plus memcpy). In streaming mode tokens.len is the buffer capacity,
-        // not the actual produced count — caller passes a tighter hint.
-        const sizing_count = if (streaming) |s| s.capacity_hint
-            else tokens.len;
-        // Streaming mode: shared buffers must NEVER resize during parse,
-        // because a sem thread holds raw pointers (node_tags_ptr, events.items)
-        // and a realloc would invalidate them. Pre-size to safe upper bounds
-        // so addNode / scope_events.push hit the appendAssumeCapacity fast path
-        // every time.
-        // Streaming mode: same pre-size as sequential (3/4 sizing_count). The
-        // 2x factor was speculative safety; in practice typescript.js etc. fit
-        // and the larger allocation pushes the node buffer out of L2 → causes
-        // the sem thread's post-passes to fall back to RAM bandwidth.
+        // plus memcpy).
+        const sizing_count = tokens.len;
         const estimated_node_count: usize = @max(sizing_count * 3 / 4, 1);
         const estimated_extra_count: usize = @max(sizing_count * 3 / 4, 1);
         try p.nodes.ensureTotalCapacity(allocator, estimated_node_count);
@@ -672,19 +602,9 @@ pub const Parser = struct {
         try p.scratch.ensureTotalCapacity(allocator, @max(1024, sizing_count / 16));
 
         // Pre-size the event buffer. TS/complex JS generates ~0.4× events per
-        // token; use 1× tokens as a safe margin for sequential mode (covers TS
-        // with headroom). Streaming uses 2× for the concurrent sem thread path.
+        // token; use 1× tokens as a safe margin (covers TS with headroom).
         if (p.emit_scope_events) {
-            const event_cap = if (streaming != null) sizing_count * 2 else sizing_count;
-            try p.scope_events.ensureCapacity(allocator, event_cap);
-            // Streaming: wire EventStream's per-push publish to the same atomic.
-            // This publishes every PUBLISH_BATCH events instead of only at
-            // top-level statement boundaries — necessary for files with one
-            // huge top-level IIFE (typescript.js etc.).
-            if (streaming) |s| {
-                p.scope_events.publish_to     = s.events_publish_to;
-                p.scope_events.sem_batch_mask = s.sem_batch_mask;
-            }
+            try p.scope_events.ensureCapacity(allocator, sizing_count);
             // Wire hoisted cursor — avoids struct traversal on every event emit.
             p.ev_ptr = p.scope_events.events.items.ptr;
             p.ev_len = 0;
@@ -705,43 +625,6 @@ pub const Parser = struct {
             // garbage, and reading an unwritten entry as an event index then
             // wild-accesses the event stream (a ReleaseFast-only crash).
             @memset(p.ref_event_idx, 0);
-        }
-
-        // Streaming mode: block until the producer publishes the first batch
-        // (or signals lex_done). Without this the parser's first peek() —
-        // which is a raw tags_ptr load with no bounds check on the hot path —
-        // could read an unwritten slot.
-        if (streaming != null) p.refreshParsedLen();
-
-        // Streaming mode: publish an early Ast view so a concurrent sem thread
-        // can start. Pointers into nodes/scope_events/extra_data are stable
-        // (pre-sized to safe upper bounds, never realloc). The .len fields
-        // grow during parse — sem must read those via events_publish_to.
-        if (streaming) |s| {
-            if (s.ast_view_out) |out| {
-                // Construct an early Ast view with stable .ptr fields and
-                // .len fields set to the pre-allocated capacity (not 0).
-                // Indexing within `events_published` bounds is safe because
-                // the parser writes node[i] / event[i] before publishing,
-                // and sem reads via the atomic acquire.
-                var nodes_slice = p.nodes.slice();
-                nodes_slice.len = estimated_node_count;
-                const event_buf_cap = if (p.emit_scope_events) sizing_count * 2 else 0;
-                const events_full = if (p.emit_scope_events)
-                    p.ev_ptr[0..event_buf_cap]
-                else
-                    &[_]@import("scope_events.zig").Event{};
-                const extra_full = p.extra_data.items.ptr[0..estimated_extra_count];
-                out.* = .{
-                    .source = source,
-                    .tokens = p.tokens,
-                    .nodes = nodes_slice,
-                    .extra_data = extra_full,
-                    .errors = &.{},
-                    .scope_events = events_full,
-                };
-                if (s.ast_ready) |r| r.store(true, .release);
-            }
         }
 
         p.syncYieldLex();
@@ -769,7 +652,7 @@ pub const Parser = struct {
         // Sync the hoisted ev_len cursor back into the ArrayList so that
         // toOwnedSlice / resizeTo see the correct length.  Elided scope_open
         // events are kept in-stream; resolveFull already skips them with a
-        // `continue` (same handling as streaming mode, which never compacted).
+        // `continue`.
         if (p.emit_scope_events) {
             p.scope_events.events.items.len = p.ev_len;
         }
@@ -808,11 +691,6 @@ pub const Parser = struct {
         const ast_parent_fixups: []const u32 = try p.parent_fixups.toOwnedSlice(allocator);
         const ast_parent_fixups_cap: u32 = @intCast(ast_parent_fixups.len);
         errdefer if (ast_parent_fixups_cap > 0) allocator.free(ast_parent_fixups.ptr[0..ast_parent_fixups_cap]);
-
-        if (streaming) |s| {
-            if (s.lex_stall_count_out) |out| out.* = p.lex_stall_count;
-            if (s.lex_stall_ns_out)    |out| out.* = p.lex_stall_ns;
-        }
 
         return Ast{
             .source = source,
@@ -857,12 +735,8 @@ pub const Parser = struct {
         return self.advanceSlow(result);
     }
 
-    fn advanceSlow(self: *Parser, result: TokenIndex) TokenIndex {
+    fn advanceSlow(_: *Parser, result: TokenIndex) TokenIndex {
         @branchHint(.cold);
-        if (self.published_len != null) {
-            self.refreshParsedLen();
-            if (self.tok_i < self.parsed_len - 1) self.tok_i += 1;
-        }
         return result;
     }
 
@@ -870,47 +744,6 @@ pub const Parser = struct {
     /// the materialized token array.
     pub fn tokenExists(self: *Parser, idx: usize) bool {
         return idx < self.tokens.len;
-    }
-
-    /// Streaming slow-path: refresh the visible token count from the lex
-    /// thread's published_len. Spins (with thread yield) until either more
-    /// tokens are available or the lexer signals EOF. In non-streaming mode
-    /// this is a no-op.
-    fn refreshParsedLen(self: *Parser) void {
-        const pub_atomic = self.published_len orelse return;
-        // Fast path: a quick atomic load may already have new tokens.
-        const cur = pub_atomic.load(.acquire);
-        if (cur > self.parsed_len) {
-            self.parsed_len = cur;
-            return;
-        }
-        // Slow path: spin/yield until publisher advances or EOF.
-        self.lex_stall_count += 1;
-        var ts0: std.c.timespec = undefined;
-        _ = std.c.clock_gettime(.MONOTONIC, &ts0);
-        var spins: u32 = 0;
-        while (true) {
-            const v = pub_atomic.load(.acquire);
-            if (v > self.parsed_len) {
-                self.parsed_len = v;
-                break;
-            }
-            if (self.lex_done.?.load(.acquire)) {
-                self.parsed_len = pub_atomic.load(.acquire);
-                break;
-            }
-            spins += 1;
-            if (spins < 100) {
-                std.atomic.spinLoopHint();
-            } else {
-                std.Thread.yield() catch {};
-                spins = 0;
-            }
-        }
-        var ts1: std.c.timespec = undefined;
-        _ = std.c.clock_gettime(.MONOTONIC, &ts1);
-        self.lex_stall_ns += @as(u64, @intCast(ts1.sec - ts0.sec)) * 1_000_000_000 +
-            @as(u64, @intCast(ts1.nsec)) -% @as(u64, @intCast(ts0.nsec));
     }
 
     /// Skip balanced parentheses, consuming from `(` to matching `)`.
@@ -963,12 +796,8 @@ pub const Parser = struct {
         return self.peekSlow();
     }
 
-    fn peekSlow(self: *Parser) TokenTag {
+    fn peekSlow(_: *Parser) TokenTag {
         @branchHint(.cold);
-        if (self.published_len != null) {
-            self.refreshParsedLen();
-            if (self.tok_i < self.parsed_len) return self.tags_ptr[self.tok_i];
-        }
         return .eof;
     }
 
@@ -982,12 +811,8 @@ pub const Parser = struct {
         return self.peekAtSlow(@intCast(idx));
     }
 
-    fn peekAtSlow(self: *Parser, idx: u32) TokenTag {
+    fn peekAtSlow(_: *Parser, _: u32) TokenTag {
         @branchHint(.cold);
-        if (self.published_len != null) {
-            self.refreshParsedLen();
-            if (idx < self.parsed_len) return self.tags_ptr[idx];
-        }
         return .eof;
     }
 
@@ -1101,8 +926,7 @@ pub const Parser = struct {
     // ── Event cursor helpers ───────────────────────────────────────
 
     /// Write one event via hoisted cursor. Grows the EventStream on overflow
-    /// (rare — capacity is pre-sized to 1× token count). Sequential mode only;
-    /// streaming mode updates ev_ptr/ev_len the same way but also publishes.
+    /// (rare — capacity is pre-sized to 1× token count).
     inline fn evPush(self: *Parser, ev: ScopeEvent) !void {
         const n = self.ev_len;
         if (n >= self.scope_events.events.capacity) {
@@ -1122,12 +946,6 @@ pub const Parser = struct {
         }
         self.ev_ptr[n] = ev;
         self.ev_len = n + 1;
-        if (self.scope_events.publish_to) |pp| {
-            const new_n = n + 1;
-            if ((new_n & self.scope_events.sem_batch_mask) == 0) {
-                pp.store(new_n, .release);
-            }
-        }
     }
 
     // ── Semantic event emission (opt-in) ───────────────────────────
@@ -2026,9 +1844,6 @@ pub const Parser = struct {
         else
             0;
         const program_scope_ev = try self.emitScopeOpen(inner_kind, .root);
-        // Streaming: publish the initial scope_open immediately so a concurrent
-        // sem thread sees the global code path before any other events.
-        if (self.events_publish_to) |p| p.store(self.ev_len, .release);
 
         const scratch_top = self.scratch.items.len;
         defer self.scratch.shrinkRetainingCapacity(scratch_top);
@@ -2055,10 +1870,6 @@ pub const Parser = struct {
             };
             consecutive_errors = 0; // reset on successful parse
             try self.scratchPush(stmt);
-            // 3-stage pipeline: publish current event count so the sem thread
-            // can consume up to here. Coarse-grained (per top-level statement)
-            // — the consumer's hot path doesn't pay any per-event sync cost.
-            if (self.events_publish_to) |p| p.store(self.ev_len, .release);
         }
 
         const stmts = self.scratch.items[scratch_top..];

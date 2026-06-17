@@ -107,15 +107,6 @@ pub const Event = packed struct(u64) {
 /// Growable, unmanaged event buffer.  Caller provides the allocator.
 pub const EventStream = struct {
     events: std.ArrayList(Event) = .empty,
-    /// Streaming publish: when non-null, push() atomically stores the current
-    /// event count to this slot every PUBLISH_BATCH events, allowing a
-    /// concurrent sem thread to consume events as they are produced. Null
-    /// in sequential mode — branch is predicted not-taken with zero overhead.
-    publish_to: ?*std.atomic.Value(usize) = null,
-    /// Bitmask for publish granularity (batch_size - 1). Must be power-of-2 - 1.
-    sem_batch_mask: usize = PUBLISH_BATCH - 1,
-
-    pub const PUBLISH_BATCH: usize = 4096;
 
     pub fn deinit(self: *EventStream, alloc: std.mem.Allocator) void {
         self.events.deinit(alloc);
@@ -127,12 +118,6 @@ pub const EventStream = struct {
             self.events.appendAssumeCapacity(ev);
         } else {
             try self.events.append(alloc, ev);
-        }
-        if (self.publish_to) |p| {
-            const n = self.events.items.len;
-            if ((n & self.sem_batch_mask) == 0) {
-                p.store(n, .release);
-            }
         }
     }
 

@@ -416,9 +416,9 @@ pub fn setChildParents(parents: []u32, extra: []const u32, tag: ast_mod.Node.Tag
     }
 }
 
-/// Quick path: produce JUST the `parents` array (the only thing the streaming
-/// sem worker needs to start writeSemanticData). Lets main fire parents_ready
-/// in ~0.3ms instead of waiting for the full ~10ms buildTraversal.
+/// Quick path: produce JUST the `parents` array (the only thing needed to
+/// start writeSemanticData) in ~0.3ms instead of waiting for the full ~10ms
+/// buildTraversal.
 /// @returns owned
 pub fn buildParentsOnly(tree: *const Ast, alloc: std.mem.Allocator) ![]u32 {
     const n = tree.nodes.len;
