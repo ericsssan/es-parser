@@ -6629,7 +6629,7 @@ pub const Parser = struct {
                 }
                 return self.parseExportDefault(export_tok);
             },
-            .l_brace => return self.parseExportNamed(export_tok),
+            .l_brace => return self.parseExportNamed(export_tok, false),
             .asterisk => return self.parseExportAll(export_tok),
             .kw_var, .kw_let => {
                 const decl = try self.parseVariableDeclaration();
@@ -6819,7 +6819,7 @@ pub const Parser = struct {
             if (self.peekAt(1) == .l_brace or self.peekAt(1) == .asterisk) {
                 _ = self.advance(); // eat 'type'
                 if (self.peek() == .l_brace) {
-                    return self.parseExportNamed(export_tok);
+                    return self.parseExportNamed(export_tok, true);
                 } else {
                     return self.parseExportAll(export_tok);
                 }
@@ -6971,7 +6971,7 @@ pub const Parser = struct {
     }
 
     /// Parse `export { x, y as z } [from '...']`.
-    pub fn parseExportNamed(self: *Parser, export_tok: TokenIndex) Error!NodeIndex {
+    pub fn parseExportNamed(self: *Parser, export_tok: TokenIndex, is_type_export: bool) Error!NodeIndex {
         _ = try self.expect(.l_brace);
 
         const scratch_top = self.scratch.items.len;
@@ -6983,12 +6983,15 @@ pub const Parser = struct {
         defer self.scratch.shrinkRetainingCapacity(local_toks_start);
         var local_token_list: std.ArrayList(TokenIndex) = .empty;
         defer local_token_list.deinit(self.gpa);
+        var specifier_is_type: std.ArrayList(bool) = .empty;
+        defer specifier_is_type.deinit(self.gpa);
 
         while (self.peek() != .r_brace and !self.isAtEnd()) {
             // TS inline type specifier: `export { type foo }` or `export { type foo as bar }`.
             // The TS grammar lets the binding name be any identifier-like token, including
             // contextual keywords `as`/`from`. So `export { type as }` exports the binding
             // `as` type-only, and `export { type as as bar }` exports `as` aliased to `bar`.
+            var this_spec_is_type = is_type_export;
             if (self.is_ts and self.peek() == .kw_type) {
                 const next = self.peekAt(1);
                 if (next == .identifier or next.isTsContextualKeyword() or
@@ -7004,6 +7007,7 @@ pub const Parser = struct {
                     // / `type as }` / `type as as <name>` → modifier; `type as <name>`
                     // (without trailing `as`) → ambiguous, prefer modifier (TS does).
                     _ = self.advance(); // skip 'type' modifier
+                    this_spec_is_type = true;
                 }
             }
 
@@ -7016,6 +7020,7 @@ pub const Parser = struct {
                 _ = try self.expectIdentifierOrKeyword();
             }
             try local_token_list.append(self.gpa, local_tok);
+            try specifier_is_type.append(self.gpa, this_spec_is_type);
 
             // Create the local identifier node BEFORE consuming `as exported`
             // so its end_tok records only the local name. Otherwise rules like
@@ -7134,13 +7139,15 @@ pub const Parser = struct {
             });
         }
 
-        // Direct export `export { foo, bar }`: emit read references for local identifiers
-        // so the scope analysis knows these names are "used" (for no-unused-vars and
-        // no-useless-assignment which checks reference.identifier.parent.type === "ExportSpecifier").
-        for (specs) |spec_raw| {
+        // Direct export `export { foo, bar }` / `export type { foo }`: emit references
+        // for local identifiers so the scope analysis knows these names are "used".
+        // Type-only specifiers (export type { X } or export { type X }) emit type_read
+        // so symbolIsTypeOnly() returns true for import-type consistency checks.
+        for (specs, 0..) |spec_raw, i| {
             const spec_lhs = self.nodeData(spec_raw).lhs;
             if (spec_lhs != .none and self.nodeTag(@intFromEnum(spec_lhs)) == .property_ident) {
-                try self.emitReference(.read, spec_lhs);
+                const kind: ReferenceKindU8 = if (specifier_is_type.items[i]) .type_read else .read;
+                try self.emitReference(kind, spec_lhs);
             }
         }
         // Register exported names for duplicate-export detection. The exported

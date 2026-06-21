@@ -6,10 +6,13 @@ const Parser = es_parser.Parser;
 const semantic = es_parser.semantic;
 const scope_mod = es_parser.scope;
 const symbol_mod = es_parser.symbol;
+const ref_mod = es_parser.reference;
 const ScopeKind = scope_mod.ScopeKind;
 const ScopeId = scope_mod.ScopeId;
 const SymbolId = symbol_mod.SymbolId;
 const BindingKind = symbol_mod.BindingKind;
+const ReferenceKind = ref_mod.ReferenceKind;
+const ReferenceId = ref_mod.ReferenceId;
 
 fn analyzeSource(source: []const u8) !semantic.SemanticResult {
     const allocator = testing.allocator;
@@ -39,6 +42,16 @@ fn analyzeTsSource(source: []const u8) !semantic.SemanticResult {
     var tree = try Parser.parseWithOptions(allocator, source, tokens.slice(), .{ .language = .ts, .emit_events = true });
     defer tree.deinit(allocator);
     return semantic.SemanticAnalyzer.analyze(allocator, &tree);
+}
+
+fn analyzeTsModuleSource(source: []const u8) !semantic.SemanticResult {
+    const allocator = testing.allocator;
+    var _lr = try Lexer.tokenizeWithLanguage(allocator, source, .ts);
+    defer _lr.deinit(allocator);
+    var tokens = _lr.tokens;
+    var tree = try Parser.parseWithOptions(allocator, source, tokens.slice(), .{ .language = .ts, .is_module = true, .emit_events = true });
+    defer tree.deinit(allocator);
+    return semantic.SemanticAnalyzer.analyzeModule(allocator, &tree, true);
 }
 
 test "analyze without scope-event emission errors instead of returning empty" {
@@ -190,6 +203,107 @@ test "branch_save/cons stacks grow past 64 with deeply nested branches (#25)" {
     defer result.deinit(allocator);
 
     try testing.expect(result.symbols.count() > 0);
+}
+
+// ── export type { X } reference emission (#33) ──────────────
+
+test "export type { X } emits type_read reference (#33)" {
+    // Before the fix, parseExportNamed always emitted .read regardless of the
+    // `export type` prefix.  type_read is required so symbolIsTypeOnly() returns
+    // true for consistent-type-imports checking.
+    var r = try analyzeTsModuleSource("const Type = 1; export type { Type };");
+    defer r.deinit(testing.allocator);
+
+    const sym = findSymbol(&r, "Type") orelse return error.SymbolNotFound;
+    const range = r.symbols.getRefRange(sym);
+    try testing.expect(!range.isEmpty());
+    var found_type_read = false;
+    for (r.ref_by_sym[range.start..range.end]) |ref_id| {
+        if (r.references.getKind(ref_id) == .type_read) found_type_read = true;
+    }
+    try testing.expect(found_type_read);
+}
+
+test "export { type X } inline modifier emits type_read reference (#33)" {
+    var r = try analyzeTsModuleSource("const Type = 1; export { type Type };");
+    defer r.deinit(testing.allocator);
+
+    const sym = findSymbol(&r, "Type") orelse return error.SymbolNotFound;
+    const range = r.symbols.getRefRange(sym);
+    try testing.expect(!range.isEmpty());
+    var found_type_read = false;
+    for (r.ref_by_sym[range.start..range.end]) |ref_id| {
+        if (r.references.getKind(ref_id) == .type_read) found_type_read = true;
+    }
+    try testing.expect(found_type_read);
+}
+
+test "export { X } (non-type) still emits read reference (#33)" {
+    var r = try analyzeTsModuleSource("const Type = 1; export { Type };");
+    defer r.deinit(testing.allocator);
+
+    const sym = findSymbol(&r, "Type") orelse return error.SymbolNotFound;
+    const range = r.symbols.getRefRange(sym);
+    try testing.expect(!range.isEmpty());
+    var found_read = false;
+    for (r.ref_by_sym[range.start..range.end]) |ref_id| {
+        if (r.references.getKind(ref_id) == .read) found_read = true;
+    }
+    try testing.expect(found_read);
+}
+
+test "export { type A, B } mixed: A gets type_read, B gets read (#33)" {
+    // Catches sticky this_spec_is_type across iterations or off-by-one in
+    // the parallel specifier_is_type index.
+    var r = try analyzeTsModuleSource("const A = 1; const B = 2; export { type A, B };");
+    defer r.deinit(testing.allocator);
+
+    const sym_a = findSymbol(&r, "A") orelse return error.SymbolNotFound;
+    const range_a = r.symbols.getRefRange(sym_a);
+    try testing.expect(!range_a.isEmpty());
+    var a_has_type_read = false;
+    for (r.ref_by_sym[range_a.start..range_a.end]) |ref_id| {
+        if (r.references.getKind(ref_id) == .type_read) a_has_type_read = true;
+    }
+    try testing.expect(a_has_type_read);
+
+    const sym_b = findSymbol(&r, "B") orelse return error.SymbolNotFound;
+    const range_b = r.symbols.getRefRange(sym_b);
+    try testing.expect(!range_b.isEmpty());
+    var b_has_read = false;
+    for (r.ref_by_sym[range_b.start..range_b.end]) |ref_id| {
+        if (r.references.getKind(ref_id) == .read) b_has_read = true;
+    }
+    try testing.expect(b_has_read);
+}
+
+test "export type { X as Y } alias: reference on local name (#33)" {
+    // Confirms spec_lhs (local X) is the ref target, not the exported alias Y.
+    var r = try analyzeTsModuleSource("const X = 1; export type { X as Y };");
+    defer r.deinit(testing.allocator);
+
+    const sym = findSymbol(&r, "X") orelse return error.SymbolNotFound;
+    const range = r.symbols.getRefRange(sym);
+    try testing.expect(!range.isEmpty());
+    var found_type_read = false;
+    for (r.ref_by_sym[range.start..range.end]) |ref_id| {
+        if (r.references.getKind(ref_id) == .type_read) found_type_read = true;
+    }
+    try testing.expect(found_type_read);
+}
+
+test "export { type X as Y } inline type + alias emits type_read on local (#33)" {
+    var r = try analyzeTsModuleSource("const X = 1; export { type X as Y };");
+    defer r.deinit(testing.allocator);
+
+    const sym = findSymbol(&r, "X") orelse return error.SymbolNotFound;
+    const range = r.symbols.getRefRange(sym);
+    try testing.expect(!range.isEmpty());
+    var found_type_read = false;
+    for (r.ref_by_sym[range.start..range.end]) |ref_id| {
+        if (r.references.getKind(ref_id) == .type_read) found_type_read = true;
+    }
+    try testing.expect(found_type_read);
 }
 
 // ── Structural test helpers ─────────────────────────────────
