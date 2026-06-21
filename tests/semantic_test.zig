@@ -719,6 +719,31 @@ test "class declaration binding kind" {
     try expectSymbol(&r, "C", .class_decl, .global);
 }
 
+test "namespace declaration emits namespace_decl symbol in enclosing scope (TS)" {
+    {
+        var r = try analyzeTsSource("namespace Foo {}");
+        defer r.deinit(testing.allocator);
+        try expectSymbol(&r, "Foo", .namespace_decl, .global);
+    }
+    {
+        var r = try analyzeTsSource("module Foo {}");
+        defer r.deinit(testing.allocator);
+        try expectSymbol(&r, "Foo", .namespace_decl, .global);
+    }
+    // Dotted: only the root segment is declared.
+    {
+        var r = try analyzeTsSource("namespace A.B.C {}");
+        defer r.deinit(testing.allocator);
+        try expectSymbol(&r, "A", .namespace_decl, .global);
+    }
+    // String-literal ambient modules do NOT get a namespace_decl symbol.
+    {
+        var r = try analyzeTsSource("declare module 'foo' {}");
+        defer r.deinit(testing.allocator);
+        try testing.expectEqual(@as(?SymbolId, null), findSymbol(&r, "foo"));
+    }
+}
+
 test "named class expression: name bound inside class scope" {
     var r = try analyzeSource("(class Foo {})");
     defer r.deinit(testing.allocator);
