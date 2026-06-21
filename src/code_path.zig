@@ -45,7 +45,7 @@ pub const Segment = struct {
 
 /// Hot adjacency sidecar — written on every markUsed/markLooped call.
 /// Split out from Segment so markUsed touches 16 bytes (one cache line holds 4)
-/// instead of a 48-byte struct.
+/// instead of a 36-byte struct.
 pub const SegNextInfo = struct {
     all_next_start: u32 = 0,
     all_next_end: u32 = 0,
@@ -600,8 +600,6 @@ pub const CodePathBuilder = struct {
         try self.markUsed(id);
         return id;
     }
-
-    /// Create a disconnected segment (no edge connections, inherits reachability).
 
     fn createSegment(self: *CodePathBuilder, all_prev: []const SegmentId, is_reachable: bool, _: bool) !SegmentId {
         const id: SegmentId = @intCast(self.segments.len);
@@ -1800,7 +1798,7 @@ pub const CodePathBuilder = struct {
         bump_pools_active: bool = false,
         seg_count: u32,
         /// Segment fields as parallel slices (SoA).  Hot reads of individual
-        /// fields avoid a 28-byte struct load.
+        /// fields avoid a 36-byte struct load.
         seg_codepath: []const CodePathId,
         seg_all_prev_start: []const u32,
         seg_all_prev_end: []const u32,

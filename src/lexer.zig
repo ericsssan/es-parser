@@ -42,7 +42,7 @@ pub fn tokenizeWithAllOptions(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Phase 1: build per-byte bitmaps via 4× ILP SIMD on 64-byte windows.
+// Keyword tables
 // ─────────────────────────────────────────────────────────────────────────────
 
 const KW = struct { bytes: u64, tag: Tag };
@@ -488,9 +488,8 @@ pub fn isIdentStartAtPos(src: []const u8, pos: u32) bool {
 }
 
 /// Returns true for Unicode codepoints that ECMAScript treats as WhiteSpace
-/// but are not ASCII (so they slip through Phase 1 as ident-class bytes).
-/// Covers: NBSP (U+00A0), Zs category chars (U+1680, U+2000-U+200A, U+202F,
-/// U+205F, U+3000), and ZWNBSP (U+FEFF — already handled as BOM).
+/// but are not plain ASCII. Covers: NEL (U+0085), NBSP (U+00A0), Zs category
+/// chars (U+1680, U+2000-U+200A, U+202F, U+205F, U+3000), and ZWNBSP (U+FEFF).
 pub inline fn isUnicodeWhitespace(cp: u32) bool {
     return switch (cp) {
         0x0085 => true, // NEL (NEXT LINE) — TypeScript treats as whitespace/line-terminator

@@ -6,9 +6,7 @@
 //!   tree walk  : 36 521 nodes / ~190 µs
 //!   event scan : ~8 700 events / ~60 µs   (~3× faster)
 //!
-//! The consumer runs the same post-passes as `semantic.zig`
-//! (resolveUnresolved, buildRefRanges, buildScopeBindings) so the output
-//! tables are byte-for-byte compatible with downstream rule runners.
+//! Output tables are byte-for-byte compatible with downstream rule runners.
 const std = @import("std");
 
 const ast_mod = @import("ast.zig");
@@ -227,7 +225,7 @@ fn resolveFullImpl(
 
     // Direct-mapped L1 cache in front of scope_map.  Absorbs repeated lookups
     // for the same identifier (common in any function body) without hitting the
-    // HashMap.  512 entries × 12 bytes = 6 KB — stays hot in L1D.
+    // HashMap.  512 entries × 16 bytes = 8 KB — stays hot in L1D.
     // Entry is "empty" when hash == 0 (Wyhash(0, name) == 0 is negligibly rare).
     const RefCacheEntry = struct { hash: u64, sym: SymbolId };
     var ref_cache: [512]RefCacheEntry = @splat(.{ .hash = 0, .sym = .none });

@@ -293,8 +293,8 @@ pub const Parser = struct {
     param_names_scratch: std.ArrayListUnmanaged([]const u8) = .empty,
 
     /// Direct-indexed cache of node-id → event-index for the most recent
-    /// reference event for that node. Indexed by NodeIndex value; sentinel
-    /// 0xFFFFFFFF means "no recent reference event". Eliminates O(N) backward
+    /// reference event for that node. Indexed by NodeIndex value; 0 is the
+    /// sentinel (values stored as event_idx+1). Eliminates O(N) backward
     /// scans in cancelReferenceForNode and upgradeReferenceKindUnbounded.
     /// Sized to estimated_node_count at parse start;
     /// auto-grows alongside nodes. Direct array beats AutoHashMap because

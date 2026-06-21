@@ -16,7 +16,7 @@ const V16 = @Vector(16, u8);
 const B16 = @Vector(16, bool);
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Public interface (identical to Lexer2)
+// Public interface
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub const TokenizeResult = struct {
@@ -229,7 +229,7 @@ pub inline fn numberEnd(src: []const u8, open: u32) u32 {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Regex disambiguation (identical to Lexer2)
+// Regex disambiguation
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub inline fn regexAllowed(prev: Tag) bool {
@@ -262,6 +262,3 @@ pub inline fn regexAllowed(prev: Tag) bool {
     };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Main tokenize
-// ─────────────────────────────────────────────────────────────────────────────
