@@ -436,6 +436,18 @@ pub const Parser = struct {
     ts_label_count: u32 = 0,
     /// Incremented each time we enter a non-arrow function body; used to detect TS1107.
     ts_label_fn_depth: u16 = 0,
+    /// Root identifier of the JSX factory — from a `@jsx` pragma comment in
+    /// source, or the default `"React"`. Only meaningful when `is_jsx` is true.
+    jsx_factory_name: []const u8 = "React",
+    /// Identifier node for the JSX factory import binding.  Set the first time
+    /// an `import <factory> from '...'` or `import * as <factory> from '...'`
+    /// is parsed and the binding name matches `jsx_factory_name`.  `.none`
+    /// until then (or when JSX is not active).
+    jsx_factory_node: NodeIndex = .none,
+    /// Set true when any intrinsic JSX element (`<div>`, `<span>`, …) is
+    /// parsed.  Triggers a synthetic factory `read` reference at end of the
+    /// program scope so the factory import is not misidentified as type-only.
+    jsx_has_intrinsic: bool = false,
 
     // ────────────────────────────────────────────────────────────
     // Public API
@@ -492,6 +504,47 @@ pub const Parser = struct {
     /// Same as parseWithLanguage but with an explicit AnnexB flag.
     pub fn parseWithLanguageOpts(allocator: std.mem.Allocator, source: []const u8, tokens: TokenList.Slice, language: Language, is_module_file: bool, annex_b: bool) !Ast {
         return parseInternal(allocator, source, tokens, language, is_module_file, false, is_module_file, null, true, annex_b, false);
+    }
+
+    /// Scan `source` for a `@jsx <factory>` pragma inside any block comment
+    /// (`/* … */`).  Returns the root identifier (the part before the first
+    /// `.`) so that both `React.createElement` and plain `h` are handled.
+    /// Returns `"React"` when no pragma is found.
+    fn jsxFactoryFromPragma(source: []const u8) []const u8 {
+        var i: usize = 0;
+        while (i + 3 < source.len) {
+            if (source[i] == '/' and source[i + 1] == '*') {
+                i += 2;
+                while (i + 1 < source.len) {
+                    if (source[i] == '*' and source[i + 1] == '/') {
+                        i += 2;
+                        break;
+                    }
+                    if (source[i] == '@' and i + 4 <= source.len and
+                        std.mem.eql(u8, source[i .. i + 4], "@jsx"))
+                    {
+                        const after: u8 = if (i + 4 < source.len) source[i + 4] else ' ';
+                        if (after == ' ' or after == '\t' or after == '\n' or after == '\r') {
+                            i += 4;
+                            while (i < source.len and (source[i] == ' ' or source[i] == '\t')) i += 1;
+                            const start = i;
+                            while (i < source.len) {
+                                switch (source[i]) {
+                                    '.', ' ', '\t', '\n', '\r', '*', '/' => break,
+                                    else => {},
+                                }
+                                i += 1;
+                            }
+                            if (i > start) return source[start..i];
+                        }
+                    }
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+        }
+        return "React";
     }
 
     fn parseInternal(
@@ -556,6 +609,7 @@ pub const Parser = struct {
             .is_jsx = language.isJsx(),
         };
         p.emit_scope_events = events_out != null or emit_events;
+        if (p.is_jsx) p.jsx_factory_name = jsxFactoryFromPragma(source);
         defer p.nodes.deinit(allocator);
         defer p.extra_data.deinit(allocator);
         defer p.scratch.deinit(allocator);
@@ -1973,6 +2027,14 @@ pub const Parser = struct {
                     seen_proto = true;
                 }
             }
+        }
+
+        // Classic JSX transform calls the factory for ALL elements, including
+        // intrinsics (<div>, <span>, …).  Emit one read reference so that
+        // `import React from 'react'` is not misidentified as type-only by
+        // `consistent-type-imports` when the file only uses intrinsic elements.
+        if (self.jsx_has_intrinsic and self.jsx_factory_node != .none) {
+            try self.emitReference(.read, self.jsx_factory_node);
         }
 
         // Close module/global scope for event stream.
@@ -6385,6 +6447,12 @@ pub const Parser = struct {
                 .data = .{ .lhs = .none, .rhs = .none },
             });
 
+            if (self.is_jsx and self.jsx_factory_node == .none and !is_type_import and
+                std.mem.eql(u8, self.tokenText(local_tok), self.jsx_factory_name))
+            {
+                self.jsx_factory_node = local_node;
+            }
+
             const spec = try self.addNode(.{
                 .tag = .import_default_specifier,
                 .main_token = local_tok,
@@ -6401,7 +6469,7 @@ pub const Parser = struct {
                 if (self.peek() == .l_brace) {
                     try self.parseNamedImportSpecifiers(is_type_import);
                 } else if (self.peek() == .asterisk) {
-                    const ns_spec = try self.parseNamespaceImportSpecifier();
+                    const ns_spec = try self.parseNamespaceImportSpecifier(is_type_import);
                     try self.scratchPush(ns_spec);
                 } else {
                     try self.emitDiagnostic(self.currentSpan(), "expected '{{' or '*' after default import name and ','", .{});
@@ -6411,7 +6479,7 @@ pub const Parser = struct {
         } else if (self.peek() == .l_brace) {
             try self.parseNamedImportSpecifiers(is_type_import);
         } else if (self.peek() == .asterisk) {
-            const ns_spec = try self.parseNamespaceImportSpecifier();
+            const ns_spec = try self.parseNamespaceImportSpecifier(is_type_import);
             try self.scratchPush(ns_spec);
         } else {
             try self.emitDiagnostic(self.currentSpan(), "expected import specifiers", .{});
@@ -6571,7 +6639,7 @@ pub const Parser = struct {
     }
 
     /// Parse `* as ns`.
-    pub fn parseNamespaceImportSpecifier(self: *Parser) Error!NodeIndex {
+    pub fn parseNamespaceImportSpecifier(self: *Parser, is_type_import: bool) Error!NodeIndex {
         const star_tok = try self.expect(.asterisk);
         _ = try self.expect(.kw_as);
         // The binding name accepts identifiers, TS contextual keywords (`type`,
@@ -6597,6 +6665,12 @@ pub const Parser = struct {
             .main_token = local_tok,
             .data = .{ .lhs = .none, .rhs = .none },
         });
+
+        if (self.is_jsx and self.jsx_factory_node == .none and !is_type_import and
+            std.mem.eql(u8, self.tokenText(local_tok), self.jsx_factory_name))
+        {
+            self.jsx_factory_node = local_node;
+        }
 
         try self.emitDeclare(.import_binding, local_node);
         return self.addNode(.{
