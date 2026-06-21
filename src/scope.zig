@@ -55,6 +55,10 @@ pub const ScopeKind = enum(u8) {
     /// Arrow function scope — var-scope like `function` but no `arguments`
     /// or `this` binding (arrow functions inherit those from the outer scope).
     arrow_function,
+    /// TypeScript `enum` body — a block-like scope that holds the enum
+    /// member symbols.  Not a var-scope; `var` declarations inside an enum
+    /// initializer hoist past the enum body to the enclosing function/module.
+    ts_enum,
 };
 
 // ── Scope Flags ────────────────────────────────────────────
@@ -184,7 +188,7 @@ pub const ScopeTree = struct {
                 scope_flags.has_this_binding = true;
                 scope_flags.is_var_scope = true; // var declarations hoist to static block, not beyond
             },
-            .block, .catch_clause, .switch_stmt, .with_stmt, .elided => {},
+            .block, .catch_clause, .switch_stmt, .with_stmt, .elided, .ts_enum => {},
             .arrow_function => {
                 // Arrow functions ARE var-scopes — var declarations stop here,
                 // matching ES2015+ spec.  They do not provide `arguments` or
