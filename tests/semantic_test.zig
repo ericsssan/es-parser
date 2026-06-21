@@ -148,6 +148,50 @@ test "deeply nested CFG does not read a dangling predecessor slice (#17)" {
     try testing.expect(result.symbols.count() > 0);
 }
 
+// 70 levels of nested functions — exceeds the old fn_alive_stack[64] cap.
+// Before the fix the 65th scope_open silently dropped its save, misaligning
+// all subsequent fn_alive_stack pops.  The stack now grows via sa.realloc so
+// no push is ever dropped.  A crash or safety trip is the failure signal.
+test "fn_alive_stack grows past 64 with deeply nested functions (#25)" {
+    const source = @embedFile("fixtures/deep_fn_nesting_70.js");
+    const allocator = testing.allocator;
+
+    var _lr = try Lexer.tokenizeWithOptions(allocator, source, .js, false);
+    defer _lr.deinit(allocator);
+    var tokens = _lr.tokens;
+    var tree = try Parser.parseWithOptions(allocator, source, tokens.slice(), .{ .emit_events = true });
+    defer tree.deinit(allocator);
+
+    var result = try semantic.SemanticAnalyzer.analyzeWithOptions(allocator, &tree, .{
+        .need_cfg = true,
+    });
+    defer result.deinit(allocator);
+
+    try testing.expect(result.symbols.count() > 0);
+}
+
+// 70 levels of nested if-branches — exceeds the old branch_save/cons[64] cap.
+// Before the fix the 65th branch_open silently dropped its save; the pop still
+// ran, misaligning all subsequent alive-state restorations.  The stacks now
+// grow via sa.realloc so no push is ever dropped.
+test "branch_save/cons stacks grow past 64 with deeply nested branches (#25)" {
+    const source = @embedFile("fixtures/deep_branch_nesting_70.js");
+    const allocator = testing.allocator;
+
+    var _lr = try Lexer.tokenizeWithOptions(allocator, source, .js, false);
+    defer _lr.deinit(allocator);
+    var tokens = _lr.tokens;
+    var tree = try Parser.parseWithOptions(allocator, source, tokens.slice(), .{ .emit_events = true });
+    defer tree.deinit(allocator);
+
+    var result = try semantic.SemanticAnalyzer.analyzeWithOptions(allocator, &tree, .{
+        .need_cfg = true,
+    });
+    defer result.deinit(allocator);
+
+    try testing.expect(result.symbols.count() > 0);
+}
+
 // ── Structural test helpers ─────────────────────────────────
 //
 // Unlike count-based smoke checks (`symbols.count() > 0`), these assert the
