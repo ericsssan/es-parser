@@ -730,17 +730,22 @@ test "namespace declaration emits namespace_decl symbol in enclosing scope (TS)"
         defer r.deinit(testing.allocator);
         try expectSymbol(&r, "Foo", .namespace_decl, .global);
     }
-    // Dotted: only the root segment is declared.
+    // Dotted: only the root segment is declared; B and C are property names.
     {
         var r = try analyzeTsSource("namespace A.B.C {}");
         defer r.deinit(testing.allocator);
         try expectSymbol(&r, "A", .namespace_decl, .global);
+        try testing.expectEqual(@as(?SymbolId, null), findSymbol(&r, "B"));
+        try testing.expectEqual(@as(?SymbolId, null), findSymbol(&r, "C"));
     }
     // String-literal ambient modules do NOT get a namespace_decl symbol.
+    // tokenText includes the quote chars, so check both the bare name and the
+    // quoted form to be sure nothing slipped through.
     {
         var r = try analyzeTsSource("declare module 'foo' {}");
         defer r.deinit(testing.allocator);
         try testing.expectEqual(@as(?SymbolId, null), findSymbol(&r, "foo"));
+        try testing.expectEqual(@as(?SymbolId, null), findSymbol(&r, "'foo'"));
     }
 }
 

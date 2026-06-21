@@ -90,6 +90,9 @@ pub const BindingKind = enum {
     /// Declared in the enum's inner scope so shadow-checking rules see it.
     enum_member,
     /// TypeScript: namespace T { } / declare module 'foo' { }
+    /// String-literal module names (ambient modules) do NOT get this binding.
+    /// `flagsFromBindingKind` returns `EMPTY` (no JS-visible runtime flags).
+    /// No TDZ (`hasTDZ` returns false). Identify via `getBindingKind() == .namespace_decl`.
     namespace_decl,
     /// Named function-expression name binding (function's own scope, self-reference).
     fn_expr_name,
