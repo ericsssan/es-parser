@@ -45,21 +45,6 @@ pub const SymbolFlags = packed struct(u16) {
     is_expr_name: bool = false,
 
     pub const EMPTY: SymbolFlags = .{};
-
-    /// Returns true if the symbol was declared with block scoping (let, const, class).
-    pub fn isBlockScoped(self: SymbolFlags) bool {
-        return self.is_let or self.is_const or self.is_class;
-    }
-
-    /// Returns true if the symbol is hoisted (var or function declaration in sloppy mode).
-    pub fn isHoisted(self: SymbolFlags) bool {
-        return self.is_hoisted;
-    }
-
-    /// Returns true if the symbol is immutable (const or import binding).
-    pub fn isImmutable(self: SymbolFlags) bool {
-        return self.is_const or self.is_import;
-    }
 };
 
 // ── Binding kind ───────────────────────────────────────────
@@ -110,6 +95,14 @@ pub const BindingKind = enum {
     /// TypeScript type parameter (<T, U> in generic function/type/interface declarations).
     type_param,
 
+    /// Returns true if the binding is immutable after initialization.
+    pub fn isImmutable(self: BindingKind) bool {
+        return switch (self) {
+            .@"const", .import_binding, .type_import_binding => true,
+            else => false,
+        };
+    }
+
     /// Returns true if the binding introduces a TDZ (temporal dead zone).
     pub fn hasTDZ(self: BindingKind) bool {
         return switch (self) {
@@ -118,34 +111,6 @@ pub const BindingKind = enum {
         };
     }
 
-    /// Returns true if the binding is hoisted to function/global scope.
-    pub fn isHoisted(self: BindingKind) bool {
-        return switch (self) {
-            .@"var", .function_decl, .function_decl_annex_b => true,
-            else => false,
-        };
-    }
-
-    /// Returns true if the binding can be redeclared in the same scope.
-    /// Parameters are redeclarable to support duplicate params in sloppy mode
-    /// (`function f(a, a) {}`). Strict mode duplicate params are caught by the parser.
-    /// TS declarations use canRedeclare=true so semantic.zig doesn't emit spurious
-    /// diagnostics — ESLint rules handle redeclaration checking themselves.
-    pub fn canRedeclare(self: BindingKind) bool {
-        return switch (self) {
-            .@"var", .function_decl, .function_decl_annex_b, .parameter => true,
-            .type_decl, .interface_decl, .enum_decl, .namespace_decl, .type_param => true,
-            else => false,
-        };
-    }
-
-    /// Returns true if the binding is immutable after initialization.
-    pub fn isImmutable(self: BindingKind) bool {
-        return switch (self) {
-            .@"const", .import_binding, .type_import_binding => true,
-            else => false,
-        };
-    }
 };
 
 // ── Reference range ────────────────────────────────────────
