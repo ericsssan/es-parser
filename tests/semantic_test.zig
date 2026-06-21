@@ -749,8 +749,25 @@ test "named class expression: name not visible in outer scope" {
 test "anonymous class expression: no name symbol emitted" {
     var r = try analyzeSource("(class {})");
     defer r.deinit(testing.allocator);
-    // Zero symbols: no name, no members.
+    // No class_expr_name symbol when the class expression is anonymous.
+    try testing.expectEqual(@as(?SymbolId, null), findSymbol(&r, ""));
     try testing.expectEqual(@as(u32, 0), r.symbols.count());
+}
+
+test "named class expression: name is immutable (CreateImmutableBinding)" {
+    // ES §15.7.2.7 step 7.b: class expression name uses CreateImmutableBinding.
+    var r = try analyzeSource("(class Foo {})");
+    defer r.deinit(testing.allocator);
+    const sym = findSymbol(&r, "Foo") orelse return error.SymbolNotFound;
+    try testing.expect(r.symbols.isImmutable(sym));
+}
+
+test "named class expression: self-reference in extends is in class scope" {
+    // (class C extends C {}) — the inner C reference resolves to the class_expr_name
+    // binding declared inside the class scope, not to any outer binding.
+    var r = try analyzeSource("(class C extends C {})");
+    defer r.deinit(testing.allocator);
+    try expectSymbol(&r, "C", .class_expr_name, .class);
 }
 
 test "type parameters are emitted as scope symbols (TS)" {
