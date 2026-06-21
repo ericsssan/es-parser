@@ -109,7 +109,7 @@ pub const BindingKind = enum {
     /// Returns true if the binding introduces a TDZ (temporal dead zone).
     pub fn hasTDZ(self: BindingKind) bool {
         return switch (self) {
-            .let, .@"const", .class_decl => true,
+            .let, .@"const", .class_decl, .class_expr_name => true,
             else => false,
         };
     }
@@ -426,15 +426,17 @@ test "SymbolTable TDZ semantics" {
     const const_id = try table.addSymbol("c", flagsFromBindingKind(.@"const"), .@"const", root_scope, ast.NodeIndex.fromInt(2));
     const fn_id = try table.addSymbol("d", flagsFromBindingKind(.function_decl), .function_decl, root_scope, ast.NodeIndex.fromInt(3));
     const class_id = try table.addSymbol("e", flagsFromBindingKind(.class_decl), .class_decl, root_scope, ast.NodeIndex.fromInt(4));
+    const class_expr_id = try table.addSymbol("f", flagsFromBindingKind(.class_expr_name), .class_expr_name, root_scope, ast.NodeIndex.fromInt(5));
 
     // var and function are not in TDZ (they are hoisted)
     try std.testing.expect(!table.isInTDZ(var_id));
     try std.testing.expect(!table.isInTDZ(fn_id));
 
-    // let, const, and class are in TDZ
+    // let, const, class, and class-expression names are in TDZ
     try std.testing.expect(table.isInTDZ(let_id));
     try std.testing.expect(table.isInTDZ(const_id));
     try std.testing.expect(table.isInTDZ(class_id));
+    try std.testing.expect(table.isInTDZ(class_expr_id));
 }
 
 test "SymbolTable immutability" {

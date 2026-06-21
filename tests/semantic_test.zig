@@ -719,6 +719,40 @@ test "class declaration binding kind" {
     try expectSymbol(&r, "C", .class_decl, .global);
 }
 
+test "named class expression: name bound inside class scope" {
+    var r = try analyzeSource("(class Foo {})");
+    defer r.deinit(testing.allocator);
+    // Foo is a class_expr_name declared in the class's own scope.
+    try expectSymbol(&r, "Foo", .class_expr_name, .class);
+}
+
+test "named class expression: name has TDZ" {
+    var r = try analyzeSource("(class Foo {})");
+    defer r.deinit(testing.allocator);
+    const sym = findSymbol(&r, "Foo") orelse return error.SymbolNotFound;
+    try testing.expect(r.symbols.isInTDZ(sym));
+}
+
+test "named class expression: name not visible in outer scope" {
+    // The class-expr name lives only in the class scope, not in the enclosing scope.
+    // There is exactly one class scope and one global scope.
+    var r = try analyzeSource("(class Bar {})");
+    defer r.deinit(testing.allocator);
+    const sym = findSymbol(&r, "Bar") orelse return error.SymbolNotFound;
+    const sym_scope = r.symbols.getScope(sym);
+    try testing.expectEqual(ScopeKind.class, r.scopes.kind(sym_scope));
+    // The parent of the class scope is global — Bar must NOT be in global scope.
+    const parent = r.scopes.parent(sym_scope);
+    try testing.expectEqual(ScopeKind.global, r.scopes.kind(parent));
+}
+
+test "anonymous class expression: no name symbol emitted" {
+    var r = try analyzeSource("(class {})");
+    defer r.deinit(testing.allocator);
+    // Zero symbols: no name, no members.
+    try testing.expectEqual(@as(u32, 0), r.symbols.count());
+}
+
 test "type parameters are emitted as scope symbols (TS)" {
     // Class type parameter → bound in the class scope.
     {
