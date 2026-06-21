@@ -86,6 +86,9 @@ pub const BindingKind = enum {
     interface_decl,
     /// TypeScript: enum T { ... }
     enum_decl,
+    /// TypeScript: member inside an enum body (`A = 1` in `enum E { A = 1 }`).
+    /// Declared in the enum's inner scope so shadow-checking rules see it.
+    enum_member,
     /// TypeScript: namespace T { } / declare module 'foo' { }
     namespace_decl,
     /// Named function-expression name binding (function's own scope, self-reference).
@@ -98,7 +101,7 @@ pub const BindingKind = enum {
     /// Returns true if the binding is immutable after initialization.
     pub fn isImmutable(self: BindingKind) bool {
         return switch (self) {
-            .@"const", .import_binding, .type_import_binding => true,
+            .@"const", .import_binding, .type_import_binding, .enum_member => true,
             else => false,
         };
     }
@@ -343,6 +346,9 @@ pub fn flagsFromBindingKind(kind: BindingKind) SymbolFlags {
         },
         // TS type declarations: no JS-visible flags (tracked for ESLint scope only)
         .type_decl, .interface_decl, .enum_decl, .namespace_decl, .type_param => {},
+        .enum_member => {
+            f.is_const = true; // enum members are immutable after declaration
+        },
         // Named function/class expression name bindings — declared as function/class
         // inside the expression's own scope, but marked is_expr_name to suppress
         // no-shadow false positives (they're self-referential, not real shadows).

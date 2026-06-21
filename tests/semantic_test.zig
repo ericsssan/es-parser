@@ -306,6 +306,103 @@ test "export { type X as Y } inline type + alias emits type_read on local (#33)"
     try testing.expect(found_type_read);
 }
 
+// ── Enum member symbols (#31) ────────────────────────────────
+
+test "enum members are declared as enum_member symbols (#31)" {
+    var r = try analyzeTsSource("enum Dir { Up, Down, Left, Right }");
+    defer r.deinit(testing.allocator);
+
+    for (&[_][]const u8{ "Up", "Down", "Left", "Right" }) |name| {
+        const sym = findSymbol(&r, name) orelse return error.SymbolNotFound;
+        try testing.expectEqual(BindingKind.enum_member, r.symbols.getBindingKind(sym));
+    }
+}
+
+test "enum name is declared as enum_decl in outer scope (#31)" {
+    var r = try analyzeTsSource("enum Dir { Up }");
+    defer r.deinit(testing.allocator);
+
+    const sym = findSymbol(&r, "Dir") orelse return error.SymbolNotFound;
+    try testing.expectEqual(BindingKind.enum_decl, r.symbols.getBindingKind(sym));
+}
+
+test "enum member shadows outer variable — both symbols exist (#31)" {
+    // Regression for no-shadow: enum member `A` must be a symbol so
+    // no-shadow can detect that it shadows the outer `const A`.
+    var r = try analyzeTsSource("const A = 2; enum Test { A = 1, B = 2 }");
+    defer r.deinit(testing.allocator);
+
+    // Both the outer `A` and the enum member `A` must be in the symbol table.
+    var a_count: u32 = 0;
+    var i: u32 = 0;
+    while (i < r.symbols.count()) : (i += 1) {
+        const id = SymbolId.fromInt(i);
+        if (std.mem.eql(u8, r.symbols.getName(id), "A")) a_count += 1;
+    }
+    try testing.expect(a_count >= 2);
+}
+
+test "string-keyed enum members are NOT declared as symbols (#31)" {
+    // `enum E { "key" = 1 }` — string keys can't shadow identifiers.
+    var r = try analyzeTsSource("enum E { \"key\" = 1 }");
+    defer r.deinit(testing.allocator);
+    try testing.expectEqual(@as(?SymbolId, null), findSymbol(&r, "key"));
+}
+
+test "intra-enum cross-reference B = A resolves to enum member A (#31)" {
+    // Core ordering guarantee: A is declared before B's initializer is parsed,
+    // so the reference in B = A must resolve to the enum-member A symbol.
+    var r = try analyzeTsSource("const A = 2; enum E { A = 1, B = A }");
+    defer r.deinit(testing.allocator);
+
+    // Find the enum-member A (not the outer const A).
+    const enum_a: SymbolId = blk: {
+        var i: u32 = 0;
+        while (i < r.symbols.count()) : (i += 1) {
+            const id = SymbolId.fromInt(i);
+            if (std.mem.eql(u8, r.symbols.getName(id), "A") and
+                r.symbols.getBindingKind(id) == .enum_member) break :blk id;
+        }
+        return error.EnumMemberANotFound;
+    };
+    // The enum member A must have at least one read reference (from B = A).
+    const range = r.symbols.getRefRange(enum_a);
+    try testing.expect(!range.isEmpty());
+    var has_read = false;
+    for (r.ref_by_sym[range.start..range.end]) |ref_id| {
+        if (r.references.getKind(ref_id) == .read) has_read = true;
+    }
+    try testing.expect(has_read);
+}
+
+test "const enum members are declared as enum_member symbols (#31)" {
+    var r = try analyzeTsSource("const enum Dir { Up, Down, Left, Right }");
+    defer r.deinit(testing.allocator);
+
+    for (&[_][]const u8{ "Up", "Down", "Left", "Right" }) |name| {
+        const sym = findSymbol(&r, name) orelse return error.SymbolNotFound;
+        try testing.expectEqual(BindingKind.enum_member, r.symbols.getBindingKind(sym));
+    }
+}
+
+test "contextual-keyword enum members are declared as symbols (#31)" {
+    // `type`, `from`, `as` are valid TS enum member names.
+    var r = try analyzeTsSource("enum E { type, from, as }");
+    defer r.deinit(testing.allocator);
+
+    for (&[_][]const u8{ "type", "from", "as" }) |name| {
+        const sym = findSymbol(&r, name) orelse return error.SymbolNotFound;
+        try testing.expectEqual(BindingKind.enum_member, r.symbols.getBindingKind(sym));
+    }
+}
+
+test "empty enum does not crash and declares enum name (#31)" {
+    var r = try analyzeTsSource("enum E {}");
+    defer r.deinit(testing.allocator);
+    const sym = findSymbol(&r, "E") orelse return error.SymbolNotFound;
+    try testing.expectEqual(BindingKind.enum_decl, r.symbols.getBindingKind(sym));
+}
+
 // ── JSX factory read reference (#34) ────────────────────────
 
 fn analyzeTsxModuleSource(source: []const u8) !semantic.SemanticResult {

@@ -1896,6 +1896,9 @@ pub fn parseEnumDeclaration(p: *Parser) Error!NodeIndex {
 
     // Enum body: `{ members }`
     _ = try p.expect(.l_brace);
+    // Open a scope so members are declared in their own namespace and
+    // shadow-checking rules (no-shadow) can see them as distinct symbols.
+    _ = try p.emitScopeOpen(.ts_enum, .none);
 
     const scratch_top = p.scratchLen();
     defer p.scratchPop(scratch_top);
@@ -1907,6 +1910,9 @@ pub fn parseEnumDeclaration(p: *Parser) Error!NodeIndex {
         var member_name: NodeIndex = undefined;
         if (p.peek() == .identifier or p.peek().isKeyword()) {
             member_name = try p.parseIdentifier();
+            // Declare the member in the enum scope so no-shadow can detect
+            // shadowing between enum members and outer-scope variables.
+            try p.emitDeclare(.enum_member, member_name);
         } else if (p.peek() == .string_literal) {
             const str_tok = p.advance();
             member_name = try p.addNode(.{
@@ -1983,6 +1989,7 @@ pub fn parseEnumDeclaration(p: *Parser) Error!NodeIndex {
     }
 
     _ = try p.expect(.r_brace);
+    try p.emitScopeClose(.none); // close ts_enum scope
 
     const members = p.scratchSlice(scratch_top);
     const members_range = try p.addSlice(members);
