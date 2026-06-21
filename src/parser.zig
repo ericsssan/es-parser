@@ -444,10 +444,11 @@ pub const Parser = struct {
     /// is parsed and the binding name matches `jsx_factory_name`.  `.none`
     /// until then (or when JSX is not active).
     jsx_factory_node: NodeIndex = .none,
-    /// Set true when any intrinsic JSX element (`<div>`, `<span>`, …) is
-    /// parsed.  Triggers a synthetic factory `read` reference at end of the
-    /// program scope so the factory import is not misidentified as type-only.
-    jsx_has_intrinsic: bool = false,
+    /// Set true when any JSX element or fragment is parsed (intrinsic, component,
+    /// or `<>`).  Classic transform calls the factory for every element, so the
+    /// factory import must not be misidentified as type-only.  Triggers a
+    /// synthetic factory `read` reference at end of the program scope.
+    jsx_needs_factory_ref: bool = false,
 
     // ────────────────────────────────────────────────────────────
     // Public API
@@ -2033,7 +2034,7 @@ pub const Parser = struct {
         // intrinsics (<div>, <span>, …).  Emit one read reference so that
         // `import React from 'react'` is not misidentified as type-only by
         // `consistent-type-imports` when the file only uses intrinsic elements.
-        if (self.jsx_has_intrinsic and self.jsx_factory_node != .none) {
+        if (self.jsx_needs_factory_ref and self.jsx_factory_node != .none) {
             try self.emitReference(.read, self.jsx_factory_node);
         }
 

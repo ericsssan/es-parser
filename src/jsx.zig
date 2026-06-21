@@ -671,7 +671,7 @@ fn parseJsxAttribute(p: *Parser) Error!NodeIndex {
 fn parseJsxFragment(p: *Parser) Error!NodeIndex {
     const open_tok: u32 = p.tokIdx();
     // Classic JSX transform: <> compiles to React.createElement(React.Fragment, null, …).
-    p.jsx_has_intrinsic = true;
+    p.jsx_needs_factory_ref = true;
     _ = try p.expect(.greater_than); // consume `>` to complete `<>`
 
     // Parse children.
@@ -768,11 +768,13 @@ fn emitJsxComponentRef(p: *Parser, name_node: NodeIndex) !void {
         const root_tok = p.node_main_token_ptr[@intFromEnum(root)];
         const text = p.tokenText(root_tok);
         if (text.len == 0 or text[0] < 'A' or text[0] > 'Z') {
-            // Intrinsic element — classic transform uses the factory for these too.
-            p.jsx_has_intrinsic = true;
+            // Intrinsic element: no component variable ref, but factory still used.
+            p.jsx_needs_factory_ref = true;
             return;
         }
     }
+    // Component or member-expression element: factory is called for these too.
+    p.jsx_needs_factory_ref = true;
     try p.emitReference(.read, root);
 }
 
