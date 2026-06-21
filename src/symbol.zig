@@ -101,7 +101,8 @@ pub const BindingKind = enum {
     /// Returns true if the binding is immutable after initialization.
     pub fn isImmutable(self: BindingKind) bool {
         return switch (self) {
-            .@"const", .import_binding, .type_import_binding, .enum_member => true,
+            // class_expr_name: ES §15.7.2.7 step 7.b uses CreateImmutableBinding.
+            .@"const", .import_binding, .type_import_binding, .enum_member, .class_expr_name => true,
             else => false,
         };
     }
@@ -109,7 +110,7 @@ pub const BindingKind = enum {
     /// Returns true if the binding introduces a TDZ (temporal dead zone).
     pub fn hasTDZ(self: BindingKind) bool {
         return switch (self) {
-            .let, .@"const", .class_decl => true,
+            .let, .@"const", .class_decl, .class_expr_name => true,
             else => false,
         };
     }
@@ -425,16 +426,22 @@ test "SymbolTable TDZ semantics" {
     const let_id = try table.addSymbol("b", flagsFromBindingKind(.let), .let, root_scope, ast.NodeIndex.fromInt(1));
     const const_id = try table.addSymbol("c", flagsFromBindingKind(.@"const"), .@"const", root_scope, ast.NodeIndex.fromInt(2));
     const fn_id = try table.addSymbol("d", flagsFromBindingKind(.function_decl), .function_decl, root_scope, ast.NodeIndex.fromInt(3));
-    const class_id = try table.addSymbol("e", flagsFromBindingKind(.class_decl), .class_decl, root_scope, ast.NodeIndex.fromInt(4));
+    const fn_expr_id = try table.addSymbol("e", flagsFromBindingKind(.fn_expr_name), .fn_expr_name, root_scope, ast.NodeIndex.fromInt(4));
+    const class_id = try table.addSymbol("f", flagsFromBindingKind(.class_decl), .class_decl, root_scope, ast.NodeIndex.fromInt(5));
+    const class_expr_id = try table.addSymbol("g", flagsFromBindingKind(.class_expr_name), .class_expr_name, root_scope, ast.NodeIndex.fromInt(6));
 
-    // var and function are not in TDZ (they are hoisted)
+    // var, function declarations, and fn_expr_name are not in TDZ.
+    // fn_expr_name: the name binding is initialized to the function object before the body
+    // runs (ES §15.2.5) — no TDZ window.
     try std.testing.expect(!table.isInTDZ(var_id));
     try std.testing.expect(!table.isInTDZ(fn_id));
+    try std.testing.expect(!table.isInTDZ(fn_expr_id));
 
-    // let, const, and class are in TDZ
+    // let, const, class, and class-expression names are in TDZ.
     try std.testing.expect(table.isInTDZ(let_id));
     try std.testing.expect(table.isInTDZ(const_id));
     try std.testing.expect(table.isInTDZ(class_id));
+    try std.testing.expect(table.isInTDZ(class_expr_id));
 }
 
 test "SymbolTable immutability" {
@@ -445,10 +452,13 @@ test "SymbolTable immutability" {
     const let_id = try table.addSymbol("a", flagsFromBindingKind(.let), .let, root_scope, ast.NodeIndex.fromInt(0));
     const const_id = try table.addSymbol("b", flagsFromBindingKind(.@"const"), .@"const", root_scope, ast.NodeIndex.fromInt(1));
     const import_id = try table.addSymbol("c", flagsFromBindingKind(.import_binding), .import_binding, root_scope, ast.NodeIndex.fromInt(2));
+    const class_expr_id = try table.addSymbol("d", flagsFromBindingKind(.class_expr_name), .class_expr_name, root_scope, ast.NodeIndex.fromInt(3));
 
     try std.testing.expect(!table.isImmutable(let_id));
     try std.testing.expect(table.isImmutable(const_id));
     try std.testing.expect(table.isImmutable(import_id));
+    // class expression names are CreateImmutableBinding per ES §15.7.2.7 step 7.b.
+    try std.testing.expect(table.isImmutable(class_expr_id));
 }
 
 test "flagsFromBindingKind sets correct flags" {
