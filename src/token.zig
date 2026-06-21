@@ -492,26 +492,6 @@ pub const keywords = std.StaticStringMap(Tag).initComptime(.{
     .{ "false", .kw_false },
 });
 
-/// TypeScript contextual keyword lookup map.
-/// These are only recognized as keywords in TS/TSX mode.
-pub const ts_keywords = std.StaticStringMap(Tag).initComptime(.{
-    .{ "interface", .kw_interface },
-    .{ "type", .kw_type },
-    .{ "namespace", .kw_namespace },
-    .{ "declare", .kw_declare },
-    .{ "abstract", .kw_abstract },
-    .{ "implements", .kw_implements },
-    .{ "readonly", .kw_readonly },
-    .{ "keyof", .kw_keyof },
-    .{ "infer", .kw_infer },
-    .{ "is", .kw_is },
-    .{ "asserts", .kw_asserts },
-    .{ "override", .kw_override },
-    .{ "satisfies", .kw_satisfies },
-    .{ "module", .kw_module },
-    .{ "unique", .kw_unique },
-});
-
 /// Language mode for the parser/lexer pipeline.
 pub const Language = enum {
     js,

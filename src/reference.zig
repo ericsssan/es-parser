@@ -69,10 +69,6 @@ pub const ReferenceKind = enum {
         };
     }
 
-    /// Returns true when this reference appears in a TS type position.
-    pub fn isTypeRef(self: ReferenceKind) bool {
-        return self == .type_read;
-    }
 };
 
 // ── Reference table (SoA) ──────────────────────────────────
@@ -190,69 +186,6 @@ pub const ReferenceTable = struct {
     /// Total number of tracked references.
     pub fn count(self: *const ReferenceTable) u32 {
         return @intCast(self.list.len);
-    }
-
-    /// Sort references by symbol_id using counting sort (O(n + k)).  Unresolved
-    /// refs (symbol_id = .none) sort to the end.  The input `max_symbol` is the
-    /// number of distinct symbol IDs, used to size the counting buckets.
-    pub fn sortBySymbolWithMax(self: *ReferenceTable, allocator: std.mem.Allocator, max_symbol: ?u32) !void {
-        const n: u32 = @intCast(self.list.len);
-        if (n == 0) return;
-
-        // Count unresolved refs (sort key = k, placed at end).
-        const syms = self.list.items(.symbol_id);
-        var k: u32 = 0;
-        if (max_symbol) |m| {
-            k = m;
-        } else {
-            for (syms) |s| {
-                if (s != .none) {
-                    const v = s.toInt();
-                    if (v + 1 > k) k = v + 1;
-                }
-            }
-        }
-        const buckets = k + 1; // last bucket = unresolved
-
-        // Step 1: count occurrences per bucket.
-        const counts = try allocator.alloc(u32, buckets);
-        defer allocator.free(counts);
-        @memset(counts, 0);
-        for (syms) |s| {
-            const b = if (s == .none) k else s.toInt();
-            counts[b] += 1;
-        }
-
-        // Step 2: prefix sum → starting position per bucket.
-        const starts = try allocator.alloc(u32, buckets);
-        defer allocator.free(starts);
-        {
-            var acc: u32 = 0;
-            for (0..buckets) |i| {
-                starts[i] = acc;
-                acc += counts[i];
-            }
-        }
-
-        // Step 3: build permutation `new_pos[old] = dst` via counting placement.
-        const new_pos = try allocator.alloc(u32, n);
-        defer allocator.free(new_pos);
-        const cursor = try allocator.alloc(u32, buckets);
-        defer allocator.free(cursor);
-        @memcpy(cursor, starts);
-        for (syms, 0..) |s, old| {
-            const b = if (s == .none) k else s.toInt();
-            new_pos[old] = cursor[b];
-            cursor[b] += 1;
-        }
-
-        // Step 4: apply permutation via scratch copy — one copy per field (6 fields).
-        try applyPermutation(SymbolId,      self.list.items(.symbol_id),     new_pos, allocator);
-        try applyPermutation(ReferenceKind, self.list.items(.kind),          new_pos, allocator);
-        try applyPermutation(ast.NodeIndex, self.list.items(.node_id),       new_pos, allocator);
-        try applyPermutation(ScopeId,       self.list.items(.scope_id),      new_pos, allocator);
-        try applyPermutation(ast.NodeIndex, self.list.items(.write_expr_id), new_pos, allocator);
-        try applyPermutation(u32,           self.list.items(.seg_id),        new_pos, allocator);
     }
 
     /// Permute `arr[new_pos[i]] = arr[i]` using a scratch copy.
