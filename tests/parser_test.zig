@@ -869,3 +869,60 @@ test "#19 duplicate import attribute is detected beyond the old 32-key cap" {
     defer tree.deinit(testing.allocator);
     try testing.expect(tree.errors.len >= 1);
 }
+
+// ── lang:js_ts — JS files with TypeScript annotations (#32) ─────────────────
+
+fn parseJsTs(source: []const u8) !ast.Ast {
+    var lr = try Lexer.tokenizeWithLanguage(testing.allocator, source, .js_ts);
+    defer lr.deinit(testing.allocator);
+    return Parser.parseWithOptions(testing.allocator, source, lr.tokens.slice(), .{ .language = .js_ts, .emit_events = true });
+}
+
+test "lang:js_ts accepts arrow function with TS return type annotation (#32)" {
+    // Plain lang:js rejects ): void =>; lang:js_ts must accept it.
+    var tree = try parseJsTs("const f = (): void => {};");
+    defer tree.deinit(testing.allocator);
+    try expectNoErrors(&tree);
+}
+
+test "lang:js_ts accepts param type annotation (#32)" {
+    var tree = try parseJsTs("const f = (arg: string): void => {};");
+    defer tree.deinit(testing.allocator);
+    try expectNoErrors(&tree);
+}
+
+test "lang:js_ts accepts method shorthand with TS annotation (#32)" {
+    // Reproduces the object-shorthand corpus case from the issue.
+    var tree = try parseJsTs("const obj = { key: (): void => { x() } };");
+    defer tree.deinit(testing.allocator);
+    try expectNoErrors(&tree);
+}
+
+test "lang:js rejects TypeScript return type annotation — no regression (#32)" {
+    var tree = try parseSource("const f = (): void => {};");
+    defer tree.deinit(testing.allocator);
+    try testing.expect(tree.errors.len >= 1);
+}
+
+test "lang:js_ts accepts `as` type cast (#32)" {
+    var tree = try parseJsTs("const x = foo as string;");
+    defer tree.deinit(testing.allocator);
+    try expectNoErrors(&tree);
+}
+
+test "lang:js_ts + is_module accepts top-level import with TS annotation (#32)" {
+    const allocator = testing.allocator;
+    const source = "import type { Foo } from 'x'; const f = (arg: Foo): void => {};";
+    var lr = try Lexer.tokenizeWithLanguage(allocator, source, .js_ts);
+    defer lr.deinit(allocator);
+    var tree = try Parser.parseWithOptions(allocator, source, lr.tokens.slice(), .{ .language = .js_ts, .is_module = true, .emit_events = true });
+    defer tree.deinit(allocator);
+    try expectNoErrors(&tree);
+}
+
+test "lang:js_ts angle-bracket type assertion parsed as TS (not JSX) (#32)" {
+    // isJsx()=false, isTs()=true — <string>x takes the TS assertion branch.
+    var tree = try parseJsTs("const x = <string>y;");
+    defer tree.deinit(testing.allocator);
+    try expectNoErrors(&tree);
+}

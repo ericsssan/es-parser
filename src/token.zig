@@ -501,15 +501,30 @@ pub const Language = enum {
     /// TypeScript declaration file (.d.ts). Treated as TS for rule filtering
     /// but rules can gate on `ctx.language == .dts` to skip definition files.
     dts,
+    /// JavaScript file that allows TypeScript type annotations. Accepts TS
+    /// syntax (type annotations, `as`, generics, etc.) without requiring a
+    /// `.ts` extension. Useful when a caller supplies `.js` files whose oracle
+    /// was produced by a TS-aware parser (e.g. @typescript-eslint/parser).
+    js_ts,
 
-    /// Returns true for TypeScript languages (ts, tsx, dts).
+    /// Returns true for TypeScript languages (ts, tsx, dts, js_ts).
+    /// Exhaustive switch — adding a new variant without updating this is a
+    /// compile error.
     pub inline fn isTs(self: Language) bool {
-        return self == .ts or self == .tsx or self == .dts;
+        return switch (self) {
+            .ts, .tsx, .dts, .js_ts => true,
+            .js, .jsx => false,
+        };
     }
 
     /// Returns true for JSX languages (jsx, tsx).
+    /// Exhaustive switch — adding a new variant without updating this is a
+    /// compile error.
     pub inline fn isJsx(self: Language) bool {
-        return self == .jsx or self == .tsx;
+        return switch (self) {
+            .jsx, .tsx => true,
+            .js, .ts, .dts, .js_ts => false,
+        };
     }
 
     /// Detect language from file extension.
