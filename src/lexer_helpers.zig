@@ -60,20 +60,7 @@ pub const TokenizeOptions = struct {
     annex_b: bool = true,
     /// When non-null, the scalar lexer records comment spans here (trivia).
     comment_sink: ?*CommentSink = null,
-    /// Streaming publish: when non-null, the lexer atomically stores `tok_n`
-    /// to this slot every PUBLISH_BATCH tokens, allowing a concurrent parser
-    /// to consume tokens as they are produced. Null in sequential mode —
-    /// hot-loop branch is predicted not-taken with zero overhead.
-    publish_to: ?*std.atomic.Value(usize) = null,
-    /// Bitmask for publish granularity (batch_size - 1). Must be power-of-2 - 1.
-    /// Defaults to PUBLISH_BATCH - 1. Override to tune streaming latency vs overhead.
-    publish_batch_mask: usize = PUBLISH_BATCH - 1,
 };
-
-/// Streaming publish granularity. Tuned to amortise atomic store cost
-/// (~10ns each) over many tokens — at 1024 the lex side adds <20µs total
-/// publish overhead on a 9MB file, while the parse side rarely waits.
-pub const PUBLISH_BATCH: usize = 1024;
 
 /// Scan to the end of a `/*…*/` block comment. `has_nl` reports whether the
 /// comment body contains a line terminator (`\n`/`\r`/LS/PS) — the lexer uses it

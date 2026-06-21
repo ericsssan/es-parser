@@ -1874,9 +1874,8 @@ pub const CodePathBuilder = struct {
     }
 
     /// Optional dump of the CFG event list — fires when `EZ_DUMP_CFG_EVENTS`
-    /// points to a writable path. Used to bisect ordering divergences between
-    /// the streaming and non-streaming `resolveFullImpl` paths. Format is
-    /// stable so the two paths' dumps can be diffed line-by-line.
+    /// points to a writable path. Used to bisect CFG-event ordering
+    /// divergences. Format is stable so dumps can be diffed line-by-line.
     fn maybeDumpEvents(self: *const CodePathBuilder) void {
         const path_z = std.c.getenv("EZ_DUMP_CFG_EVENTS") orelse return;
         // Convert C string to slice.

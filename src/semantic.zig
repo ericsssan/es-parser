@@ -221,8 +221,6 @@ pub const SemanticAnalyzer = struct {
             // code paths. Callers must only set need_cfg=false when no active
             // rule needs flow analysis.
             const sp = try event_resolver.resolveFullScope(allocator, ast, ast.scope_events, ropts);
-            // ref_event_to_id is only used to stitch CFG seg ids; unused here.
-            if (sp.ref_event_to_id.len != 0) allocator.free(sp.ref_event_to_id);
             break :blk SemanticResult{
                 .scopes = sp.scopes,
                 .symbols = sp.symbols,

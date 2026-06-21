@@ -19,7 +19,6 @@ pub const TokenList = Ast.Ast.TokenList;
 pub const TokenizeResult = Lex.TokenizeResult;
 pub const TokenizeOptions = Lex.TokenizeOptions;
 pub const CommentSink = Lex.CommentSink;
-pub const PUBLISH_BATCH: usize = Lex.PUBLISH_BATCH;
 
 pub fn tokenize(alloc: std.mem.Allocator, source: []const u8) !TokenizeResult {
     return tokenizeWithAllOptions(alloc, source, .js, .{});
