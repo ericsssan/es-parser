@@ -292,12 +292,12 @@ fn resolveFullImpl(
     // Terminators set it to false; branch_open/else/close save/restore/merge
     // the state.  `branch_stack` holds {save, consequent_alive} per nesting.
     var cfg_alive: bool = true;
-    var branch_save: [64]bool = undefined; // alive state at branch_open
-    var branch_cons: [64]bool = undefined; // alive state at branch_else
+    var branch_save: []bool = try sa.alloc(bool, 64); // alive state at branch_open
+    var branch_cons: []bool = try sa.alloc(bool, 64); // alive state at branch_else
     var bsp: u32 = 0;
     // A function boundary resets cfg_alive since the body starts with a
     // fresh path.  Track this via scope_open(.function) events.
-    var fn_alive_stack: [64]bool = undefined;
+    var fn_alive_stack: []bool = try sa.alloc(bool, 64);
     var fsp: u32 = 0;
 
     // Module/global root scope — always the first scope.  We don't see a
@@ -356,10 +356,9 @@ fn resolveFullImpl(
             if (kind == .function or kind == .arrow_function or kind == .global or
                 kind == .module or kind == .static_block or kind == .class_field_initializer)
             {
-                if (fsp < fn_alive_stack.len) {
-                    fn_alive_stack[fsp] = cfg_alive;
-                    fsp += 1;
-                }
+                if (fsp == fn_alive_stack.len) fn_alive_stack = try sa.realloc(fn_alive_stack, fn_alive_stack.len * 2);
+                fn_alive_stack[fsp] = cfg_alive;
+                fsp += 1;
                 cfg_alive = true;
 
                 // CodePath entry.  For module/global the owner node is root(0);
@@ -453,11 +452,14 @@ fn resolveFullImpl(
         },
         .branch_open => {
             // Save the pre-branch alive state.
-            if (bsp < branch_save.len) {
-                branch_save[bsp] = cfg_alive;
-                branch_cons[bsp] = cfg_alive; // placeholder; updated on branch_else/close
-                bsp += 1;
+            if (bsp == branch_save.len) {
+                const new_cap = branch_save.len * 2;
+                branch_save = try sa.realloc(branch_save, new_cap);
+                branch_cons = try sa.realloc(branch_cons, new_cap);
             }
+            branch_save[bsp] = cfg_alive;
+            branch_cons[bsp] = cfg_alive; // placeholder; updated on branch_else/close
+            bsp += 1;
             // Entering the consequent: alive state carries in.
         },
         .branch_else => {
@@ -629,11 +631,14 @@ fn resolveFullImpl(
         // cfg_alive logic merged here (branch_open/else/close no longer
         // emitted for if-statements; branch_* still fired by loops/try).
         .if_open => {
-            if (bsp < branch_save.len) {
-                branch_save[bsp] = cfg_alive;
-                branch_cons[bsp] = cfg_alive;
-                bsp += 1;
+            if (bsp == branch_save.len) {
+                const new_cap = branch_save.len * 2;
+                branch_save = try sa.realloc(branch_save, new_cap);
+                branch_cons = try sa.realloc(branch_cons, new_cap);
             }
+            branch_save[bsp] = cfg_alive;
+            branch_cons[bsp] = cfg_alive;
+            bsp += 1;
             if (do_cfg) try cpb.pushChoiceContext(.test_kind, false);
             const n: NodeIndex = @enumFromInt(e.node);
             if (do_cfg) try cpb.makeIfConsequent(n);
