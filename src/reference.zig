@@ -172,7 +172,7 @@ pub const ReferenceTable = struct {
         return self.list.items(.symbol_id)[ref_id.toInt()] != .none;
     }
 
-    /// Get the kind of reference (read, write, read_write, type_of).
+    /// Get the kind of reference (read, write, read_write, type_of, write_init, type_read).
     pub fn getKind(self: *const ReferenceTable, ref_id: ReferenceId) ReferenceKind {
         return self.list.items(.kind)[ref_id.toInt()];
     }
@@ -246,8 +246,7 @@ pub const ReferenceTable = struct {
             cursor[b] += 1;
         }
 
-        // Step 4: apply permutation in place via cycle decomposition — one copy
-        // per element instead of 2× full-array copies for each of 5 fields.
+        // Step 4: apply permutation via scratch copy — one copy per field (6 fields).
         try applyPermutation(SymbolId,      self.list.items(.symbol_id),     new_pos, allocator);
         try applyPermutation(ReferenceKind, self.list.items(.kind),          new_pos, allocator);
         try applyPermutation(ast.NodeIndex, self.list.items(.node_id),       new_pos, allocator);
@@ -256,8 +255,7 @@ pub const ReferenceTable = struct {
         try applyPermutation(u32,           self.list.items(.seg_id),        new_pos, allocator);
     }
 
-    /// In-place permute `arr[new_pos[i]] = arr[i]` using cycle decomposition.
-    /// Visits each element exactly once. Uses a bitset to track placed elements.
+    /// Permute `arr[new_pos[i]] = arr[i]` using a scratch copy.
     fn applyPermutation(comptime T: type, arr: []T, new_pos: []const u32, allocator: std.mem.Allocator) !void {
         const n = arr.len;
         if (n == 0) return;

@@ -32,7 +32,7 @@ pub const TokenIndex = u32;
 /// Index into the extra_data array.
 pub const ExtraIndex = u32;
 
-/// The AST node — 20 bytes per node with parent pointer.
+/// The AST node — 16 bytes per node.
 /// Stored in a MultiArrayList for SoA layout.
 pub const Node = struct {
     tag: Tag,
@@ -46,7 +46,7 @@ pub const Node = struct {
         rhs: NodeIndex,
     };
 
-    /// ES2024 JavaScript AST node tags (~140 variants).
+    /// ES2024 JavaScript AST node tags (214 variants).
     pub const Tag = enum(u8) {
         // ── Program ────────────────────────────────────────────
         /// Top-level root node. lhs = extra index to SubRange of top-level statements
@@ -332,11 +332,11 @@ pub const Node = struct {
         call_expr,
         /// new Ctor(args). lhs = callee, rhs = extra index to SubRange of args (or none)
         new_expr,
-        /// obj.prop. lhs = object, rhs encodes property token
+        /// obj.prop. lhs = object, rhs = NodeIndex to a `property_ident` node
         member_expr,
         /// obj[expr]. lhs = object, rhs = computed expression
         computed_member_expr,
-        /// obj?.prop. lhs = object, rhs encodes property token
+        /// obj?.prop. lhs = object, rhs = NodeIndex to a `property_ident` node
         optional_member_expr,
         /// obj?.[expr]. lhs = object, rhs = computed expression
         optional_computed_member_expr,

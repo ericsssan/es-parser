@@ -7,7 +7,7 @@
 //! no visiting of literal nodes.
 //!
 //! Event packing: 8 bytes each.  Fits 8 per cache line.
-//!   kind:   u8   (4 variants: open/close/declare/reference)
+//!   kind:   u8   (EventKind — 35 variants)
 //!   aux:    u8   (BindingKind for declare, ReferenceKind for reference,
 //!                 ScopeKind for open, unused for close)
 //!   _pad:   u16

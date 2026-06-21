@@ -1,8 +1,7 @@
 //! Single-pass scalar tokenizer.
 //!
-//! Produces the same `TokenList` token stream as `lexer.zig` (the two-phase
-//! bitmap lexer) so it can serve as a drop-in tokenizer with the parser
-//! unchanged. Scans the source once with a per-first-byte dispatch and plain
+//! Produces the same `TokenList` token stream as `lexer.zig` and serves as a
+//! drop-in tokenizer with the parser unchanged. Scans the source once with a per-first-byte dispatch and plain
 //! scalar inner loops (no bitmaps). Handles the full grammar the bitmap lexer
 //! does: ASCII and Unicode identifiers, `\u`-escaped identifiers and escaped
 //! keywords, numeric/bigint literals, strings, regex-vs-division, template
