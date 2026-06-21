@@ -384,7 +384,7 @@ fn fuzzLexer(_: void, smith: *std.testing.Smith) !void {
     var buf: [512]u8 = undefined; // small → frequent EOF stress
     const src = fuzzBytesShort(smith, &buf);
     // Pick language based on first byte of input for coverage diversity.
-    const langs = [_]es.token.Language{ .js, .ts, .jsx, .tsx, .dts };
+    const langs = [_]es.token.Language{ .js, .ts, .jsx, .tsx, .dts, .js_ts };
     const lang = langs[if (src.len > 0) src[0] % langs.len else 0];
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
