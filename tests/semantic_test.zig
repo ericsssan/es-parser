@@ -424,6 +424,42 @@ test "combined import React + named specifiers records factory node (#34)" {
     try testing.expect(has_read);
 }
 
+test "fragment-only JSX emits read ref for factory (#40)" {
+    // Classic transform: <>{children}</> → React.createElement(React.Fragment, null, children).
+    // Factory must have a read ref even when no intrinsic or component element is present.
+    var r = try analyzeTsxModuleSource(
+        \\import React from 'react';
+        \\const W: React.FC<{children: React.ReactNode}> = ({children}) => <>{children}</>;
+    );
+    defer r.deinit(testing.allocator);
+
+    const sym = findSymbol(&r, "React") orelse return error.SymbolNotFound;
+    const range = r.symbols.getRefRange(sym);
+    try testing.expect(!range.isEmpty());
+    var has_read = false;
+    for (r.ref_by_sym[range.start..range.end]) |ref_id| {
+        if (r.references.getKind(ref_id) == .read) has_read = true;
+    }
+    try testing.expect(has_read);
+}
+
+test "nested fragment emits read ref for factory (#40)" {
+    var r = try analyzeTsxModuleSource(
+        \\import React from 'react';
+        \\const C = () => <><div /><span /></>;
+    );
+    defer r.deinit(testing.allocator);
+
+    const sym = findSymbol(&r, "React") orelse return error.SymbolNotFound;
+    const range = r.symbols.getRefRange(sym);
+    try testing.expect(!range.isEmpty());
+    var has_read = false;
+    for (r.ref_by_sym[range.start..range.end]) |ref_id| {
+        if (r.references.getKind(ref_id) == .read) has_read = true;
+    }
+    try testing.expect(has_read);
+}
+
 test "component JSX <Foo> still emits read ref (not affected by #34)" {
     var r = try analyzeTsxModuleSource(
         \\import React from 'react';

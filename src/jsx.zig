@@ -670,6 +670,8 @@ fn parseJsxAttribute(p: *Parser) Error!NodeIndex {
 /// of the `<>` opening).
 fn parseJsxFragment(p: *Parser) Error!NodeIndex {
     const open_tok: u32 = p.tokIdx();
+    // Classic JSX transform: <> compiles to React.createElement(React.Fragment, null, …).
+    p.jsx_has_intrinsic = true;
     _ = try p.expect(.greater_than); // consume `>` to complete `<>`
 
     // Parse children.
