@@ -951,3 +951,134 @@ test "regression: analyze does not index past the node array on error-recovered 
     });
     defer sem.deinit(allocator);
 }
+
+// ── Issue #30: interface/call-signature parameters bound as symbols ──────────
+
+test "interface method signature params are declared as parameter symbols (#30)" {
+    var r = try analyzeTsSource("const arg = 0; interface I { m(arg: string): void; }");
+    defer r.deinit(testing.allocator);
+    // There must be TWO symbols named `arg`: one `let`-like const and one parameter.
+    var param_found = false;
+    var i: u32 = 0;
+    while (i < r.symbols.count()) : (i += 1) {
+        const id = SymbolId.fromInt(i);
+        if (std.mem.eql(u8, r.symbols.getName(id), "arg") and
+            r.symbols.getBindingKind(id) == .parameter)
+        {
+            param_found = true;
+            try testing.expectEqual(ScopeKind.function, r.scopes.kind(r.symbols.getScope(id)));
+        }
+    }
+    try testing.expect(param_found);
+}
+
+test "interface call signature params are declared as parameter symbols (#30)" {
+    var r = try analyzeTsSource("const x = 0; interface Fn { (x: string): void; }");
+    defer r.deinit(testing.allocator);
+    var param_found = false;
+    var i: u32 = 0;
+    while (i < r.symbols.count()) : (i += 1) {
+        const id = SymbolId.fromInt(i);
+        if (std.mem.eql(u8, r.symbols.getName(id), "x") and
+            r.symbols.getBindingKind(id) == .parameter)
+        {
+            param_found = true;
+            try testing.expectEqual(ScopeKind.function, r.scopes.kind(r.symbols.getScope(id)));
+        }
+    }
+    try testing.expect(param_found);
+}
+
+test "interface construct signature params are declared as parameter symbols (#30)" {
+    var r = try analyzeTsSource("const n = 0; interface Ctor { new(n: number): object; }");
+    defer r.deinit(testing.allocator);
+    var param_found = false;
+    var i: u32 = 0;
+    while (i < r.symbols.count()) : (i += 1) {
+        const id = SymbolId.fromInt(i);
+        if (std.mem.eql(u8, r.symbols.getName(id), "n") and
+            r.symbols.getBindingKind(id) == .parameter)
+        {
+            param_found = true;
+            try testing.expectEqual(ScopeKind.function, r.scopes.kind(r.symbols.getScope(id)));
+        }
+    }
+    try testing.expect(param_found);
+}
+
+test "constructor type params are declared as parameter symbols (#30)" {
+    var r = try analyzeTsSource("const arg = 0; type Bar = new (arg: number) => object;");
+    defer r.deinit(testing.allocator);
+    var param_found = false;
+    var i: u32 = 0;
+    while (i < r.symbols.count()) : (i += 1) {
+        const id = SymbolId.fromInt(i);
+        if (std.mem.eql(u8, r.symbols.getName(id), "arg") and
+            r.symbols.getBindingKind(id) == .parameter)
+        {
+            param_found = true;
+            try testing.expectEqual(ScopeKind.function, r.scopes.kind(r.symbols.getScope(id)));
+        }
+    }
+    try testing.expect(param_found);
+}
+
+test "function type params already declared as parameter symbols — no regression (#30)" {
+    // TSFunctionType was already wired; verify it still works after the changes.
+    var r = try analyzeTsSource("type Fn = (arg: string) => void;");
+    defer r.deinit(testing.allocator);
+    try expectSymbol(&r, "arg", .parameter, .function);
+}
+
+test "interface method signature rest param is declared as parameter symbol (#30)" {
+    var r = try analyzeTsSource("interface I { m(...args: string[]): void; }");
+    defer r.deinit(testing.allocator);
+    try expectSymbol(&r, "args", .parameter, .function);
+}
+
+test "multiple interface method params all declared (#30)" {
+    var r = try analyzeTsSource("interface I { add(a: number, b: number): number; }");
+    defer r.deinit(testing.allocator);
+    try expectSymbol(&r, "a", .parameter, .function);
+    try expectSymbol(&r, "b", .parameter, .function);
+}
+
+test "this pseudo-parameter is NOT declared as a symbol (#30)" {
+    // `this: void` is a type-only annotation, not a real parameter.
+    var r = try analyzeTsSource("interface I { m(this: void, x: number): void; }");
+    defer r.deinit(testing.allocator);
+    try testing.expectEqual(@as(?SymbolId, null), findSymbol(&r, "this"));
+    try expectSymbol(&r, "x", .parameter, .function);
+}
+
+test "optional param in interface method is declared as symbol (#30)" {
+    // `arg?:` — optional marker does not change the node tag.
+    var r = try analyzeTsSource("interface I { m(arg?: string): void; }");
+    defer r.deinit(testing.allocator);
+    try expectSymbol(&r, "arg", .parameter, .function);
+}
+
+test "generic method type-param lands in interface scope, value param in function scope (#30)" {
+    // Type params are intentionally emitted into the enclosing interface scope
+    // (for no-unnecessary-type-parameters); value params go in the function scope.
+    var r = try analyzeTsSource("interface I { m<T>(arg: T): T; }");
+    defer r.deinit(testing.allocator);
+    try expectSymbol(&r, "arg", .parameter, .function);
+    // T must exist as a type_param symbol (in the enclosing interface block scope).
+    const t_sym = findSymbol(&r, "T") orelse return error.TypeParamNotFound;
+    try testing.expectEqual(BindingKind.type_param, r.symbols.getBindingKind(t_sym));
+}
+
+test "overloaded interface method creates independent scopes per overload (#30)" {
+    var r = try analyzeTsSource("interface I { m(a: number): void; m(a: string): void; }");
+    defer r.deinit(testing.allocator);
+    // Two parameter symbols named `a`, each in their own function scope.
+    var count: u32 = 0;
+    var i: u32 = 0;
+    while (i < r.symbols.count()) : (i += 1) {
+        const id = SymbolId.fromInt(i);
+        if (std.mem.eql(u8, r.symbols.getName(id), "a") and
+            r.symbols.getBindingKind(id) == .parameter) count += 1;
+    }
+    try testing.expectEqual(@as(u32, 2), count);
+}

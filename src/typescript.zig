@@ -942,8 +942,11 @@ fn parseFunctionTypeWithScope(p: *Parser, pre_scope_ev: ?u32) Error!NodeIndex {
         const param_node = try parseFunctionTypeParam(p);
         // Declare simple identifier parameters in the function type scope.
         // Destructuring patterns are handled inside parseFunctionTypeParam.
+        // `this` is a type-only pseudo-parameter; skip it.
         if (p.node_tags_ptr[param_node.toInt()] == .identifier) {
-            try p.emitDeclare(.parameter, param_node);
+            if (p.tokenTagAt(p.node_main_token_ptr[param_node.toInt()]) != .kw_this) {
+                try p.emitDeclare(.parameter, param_node);
+            }
         } else if (p.node_tags_ptr[param_node.toInt()] == .rest_element) {
             const lhs = p.node_data_ptr[param_node.toInt()].lhs;
             if (lhs != .none and p.node_tags_ptr[lhs.toInt()] == .identifier) {
@@ -1409,6 +1412,8 @@ fn parseConstructorType(p: *Parser) Error!NodeIndex {
         type_params_range = try parseTypeParameterList(p);
     }
 
+    const ctor_scope_ev: u32 = try p.emitScopeOpen(.function, .none);
+    errdefer p.emitScopeClose(.none) catch {};
     _ = try p.expect(.l_paren);
 
     const scratch_top = p.scratchLen();
@@ -1416,6 +1421,16 @@ fn parseConstructorType(p: *Parser) Error!NodeIndex {
 
     while (p.peek() != .r_paren and !p.isAtEnd()) {
         const param = try parseFunctionTypeParam(p);
+        if (p.node_tags_ptr[param.toInt()] == .identifier) {
+            if (p.tokenTagAt(p.node_main_token_ptr[param.toInt()]) != .kw_this) {
+                try p.emitDeclare(.parameter, param);
+            }
+        } else if (p.node_tags_ptr[param.toInt()] == .rest_element) {
+            const lhs = p.node_data_ptr[param.toInt()].lhs;
+            if (lhs != .none and p.node_tags_ptr[lhs.toInt()] == .identifier) {
+                try p.emitDeclare(.parameter, lhs);
+            }
+        }
         try p.scratchPush(param);
 
         if (p.peek() == .comma) {
@@ -1446,11 +1461,14 @@ fn parseConstructorType(p: *Parser) Error!NodeIndex {
         .type_params_end = type_params_range.end,
     });
 
-    return p.addNode(.{
+    const ctor_type_node = try p.addNode(.{
         .tag = .ts_constructor_type,
         .main_token = new_tok,
         .data = .{ .lhs = NodeIndex.fromInt(fn_extra), .rhs = .none },
     });
+    try p.emitScopeClose(.none);
+    p.patchScopeOpenNode(ctor_scope_ev, ctor_type_node);
+    return ctor_type_node;
 }
 
 // =====================================================================
@@ -2334,12 +2352,24 @@ pub fn parseInterfaceMember(p: *Parser) Error!NodeIndex {
             p.emit_fn_type_params = prev_eftp;
         }
 
+        const method_scope_ev: u32 = try p.emitScopeOpen(.function, .none);
+        errdefer p.emitScopeClose(.none) catch {};
         _ = try p.expect(.l_paren);
         const scratch_top = p.scratchLen();
         defer p.scratchPop(scratch_top);
 
         while (p.peek() != .r_paren and !p.isAtEnd()) {
             const param = try parseFunctionTypeParam(p);
+            if (p.node_tags_ptr[param.toInt()] == .identifier) {
+                if (p.tokenTagAt(p.node_main_token_ptr[param.toInt()]) != .kw_this) {
+                    try p.emitDeclare(.parameter, param);
+                }
+            } else if (p.node_tags_ptr[param.toInt()] == .rest_element) {
+                const lhs = p.node_data_ptr[param.toInt()].lhs;
+                if (lhs != .none and p.node_tags_ptr[lhs.toInt()] == .identifier) {
+                    try p.emitDeclare(.parameter, lhs);
+                }
+            }
             try p.scratchPush(param);
 
             if (p.peek() == .comma) {
@@ -2370,11 +2400,14 @@ pub fn parseInterfaceMember(p: *Parser) Error!NodeIndex {
             .type_params = type_params_range.start,
             .type_params_end = type_params_range.end,
         });
-        return p.addNode(.{
+        const method_sig_node = try p.addNode(.{
             .tag = .ts_method_signature,
             .main_token = member_tok,
             .data = .{ .lhs = ast.NodeIndex.fromInt(sig_extra), .rhs = .none },
         });
+        try p.emitScopeClose(.none);
+        p.patchScopeOpenNode(method_scope_ev, method_sig_node);
+        return method_sig_node;
     }
 
     // ── Property signature: `name: Type` ─────────────────────
@@ -2402,12 +2435,24 @@ fn parseCallOrConstructSignature(p: *Parser, member_tok: TokenIndex, is_construc
         p.emit_fn_type_params = prev_eftp;
     }
 
+    const sig_scope_ev: u32 = try p.emitScopeOpen(.function, .none);
+    errdefer p.emitScopeClose(.none) catch {};
     _ = try p.expect(.l_paren);
     const scratch_top = p.scratchLen();
     defer p.scratchPop(scratch_top);
 
     while (p.peek() != .r_paren and !p.isAtEnd()) {
         const param = try parseFunctionTypeParam(p);
+        if (p.node_tags_ptr[param.toInt()] == .identifier) {
+            if (p.tokenTagAt(p.node_main_token_ptr[param.toInt()]) != .kw_this) {
+                try p.emitDeclare(.parameter, param);
+            }
+        } else if (p.node_tags_ptr[param.toInt()] == .rest_element) {
+            const lhs = p.node_data_ptr[param.toInt()].lhs;
+            if (lhs != .none and p.node_tags_ptr[lhs.toInt()] == .identifier) {
+                try p.emitDeclare(.parameter, lhs);
+            }
+        }
         try p.scratchPush(param);
 
         if (p.peek() == .comma) {
@@ -2449,11 +2494,14 @@ fn parseCallOrConstructSignature(p: *Parser, member_tok: TokenIndex, is_construc
         .type_params_end = sig_type_params_range.end,
     });
     const sig_tag: @import("ast.zig").Node.Tag = if (is_construct) .ts_construct_signature else .ts_call_signature;
-    return p.addNode(.{
+    const sig_node = try p.addNode(.{
         .tag = sig_tag,
         .main_token = member_tok,
         .data = .{ .lhs = ast.NodeIndex.fromInt(sig_extra), .rhs = .none },
     });
+    try p.emitScopeClose(.none);
+    p.patchScopeOpenNode(sig_scope_ev, sig_node);
+    return sig_node;
 }
 
 /// Parse an index signature: `[key: Type]: ValueType`.
