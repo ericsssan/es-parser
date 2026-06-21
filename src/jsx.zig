@@ -765,7 +765,11 @@ fn emitJsxComponentRef(p: *Parser, name_node: NodeIndex) !void {
     if (!is_member) {
         const root_tok = p.node_main_token_ptr[@intFromEnum(root)];
         const text = p.tokenText(root_tok);
-        if (text.len == 0 or text[0] < 'A' or text[0] > 'Z') return;
+        if (text.len == 0 or text[0] < 'A' or text[0] > 'Z') {
+            // Intrinsic element — classic transform uses the factory for these too.
+            p.jsx_has_intrinsic = true;
+            return;
+        }
     }
     try p.emitReference(.read, root);
 }

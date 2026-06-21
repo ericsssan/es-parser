@@ -306,6 +306,142 @@ test "export { type X as Y } inline type + alias emits type_read on local (#33)"
     try testing.expect(found_type_read);
 }
 
+// ── JSX factory read reference (#34) ────────────────────────
+
+fn analyzeTsxModuleSource(source: []const u8) !semantic.SemanticResult {
+    const allocator = testing.allocator;
+    var _lr = try Lexer.tokenizeWithLanguage(allocator, source, .tsx);
+    defer _lr.deinit(allocator);
+    var tokens = _lr.tokens;
+    var tree = try Parser.parseWithOptions(allocator, source, tokens.slice(), .{ .language = .tsx, .is_module = true, .emit_events = true });
+    defer tree.deinit(allocator);
+    return semantic.SemanticAnalyzer.analyzeModule(allocator, &tree, true);
+}
+
+test "intrinsic JSX <div> emits read ref for default React import (#34)" {
+    // Classic transform: React.createElement('div',...) — React must be read.
+    var r = try analyzeTsxModuleSource(
+        \\import React from 'react';
+        \\const C: React.FC = () => <div />;
+    );
+    defer r.deinit(testing.allocator);
+
+    const sym = findSymbol(&r, "React") orelse return error.SymbolNotFound;
+    const range = r.symbols.getRefRange(sym);
+    try testing.expect(!range.isEmpty());
+    var has_read = false;
+    for (r.ref_by_sym[range.start..range.end]) |ref_id| {
+        if (r.references.getKind(ref_id) == .read) has_read = true;
+    }
+    try testing.expect(has_read);
+}
+
+test "intrinsic JSX emits read ref for namespace React import (#34)" {
+    var r = try analyzeTsxModuleSource(
+        \\import * as React from 'react';
+        \\const C = () => <span />;
+    );
+    defer r.deinit(testing.allocator);
+
+    const sym = findSymbol(&r, "React") orelse return error.SymbolNotFound;
+    const range = r.symbols.getRefRange(sym);
+    try testing.expect(!range.isEmpty());
+    var has_read = false;
+    for (r.ref_by_sym[range.start..range.end]) |ref_id| {
+        if (r.references.getKind(ref_id) == .read) has_read = true;
+    }
+    try testing.expect(has_read);
+}
+
+test "@jsx pragma overrides default factory name (#34)" {
+    // /* @jsx h */ pragma → factory is `h`, not `React`.
+    var r = try analyzeTsxModuleSource(
+        \\/* @jsx h */
+        \\import h from 'preact';
+        \\const C = () => <div />;
+    );
+    defer r.deinit(testing.allocator);
+
+    const sym = findSymbol(&r, "h") orelse return error.SymbolNotFound;
+    const range = r.symbols.getRefRange(sym);
+    try testing.expect(!range.isEmpty());
+    var has_read = false;
+    for (r.ref_by_sym[range.start..range.end]) |ref_id| {
+        if (r.references.getKind(ref_id) == .read) has_read = true;
+    }
+    try testing.expect(has_read);
+}
+
+test "import type * as React does NOT set factory node — no spurious read ref (#34)" {
+    // `import type * as React` is type-erased. Using it as factory would be
+    // a runtime error. The !is_type_import guard in parseNamespaceImportSpecifier
+    // must prevent jsx_factory_node from being set.
+    var r = try analyzeTsxModuleSource(
+        \\import type * as React from 'react';
+        \\const C: React.FC = () => <div />;
+    );
+    defer r.deinit(testing.allocator);
+
+    const sym = findSymbol(&r, "React") orelse return error.SymbolNotFound;
+    const range = r.symbols.getRefRange(sym);
+    for (r.ref_by_sym[range.start..range.end]) |ref_id| {
+        try testing.expect(r.references.getKind(ref_id) != .read);
+    }
+}
+
+test "@jsx React.createElement dotted pragma extracts root identifier (#34)" {
+    var r = try analyzeTsxModuleSource(
+        \\/* @jsx React.createElement */
+        \\import React from 'react';
+        \\const C = () => <div />;
+    );
+    defer r.deinit(testing.allocator);
+
+    const sym = findSymbol(&r, "React") orelse return error.SymbolNotFound;
+    const range = r.symbols.getRefRange(sym);
+    try testing.expect(!range.isEmpty());
+    var has_read = false;
+    for (r.ref_by_sym[range.start..range.end]) |ref_id| {
+        if (r.references.getKind(ref_id) == .read) has_read = true;
+    }
+    try testing.expect(has_read);
+}
+
+test "combined import React + named specifiers records factory node (#34)" {
+    var r = try analyzeTsxModuleSource(
+        \\import React, { useState } from 'react';
+        \\const C = () => <div />;
+    );
+    defer r.deinit(testing.allocator);
+
+    const sym = findSymbol(&r, "React") orelse return error.SymbolNotFound;
+    const range = r.symbols.getRefRange(sym);
+    try testing.expect(!range.isEmpty());
+    var has_read = false;
+    for (r.ref_by_sym[range.start..range.end]) |ref_id| {
+        if (r.references.getKind(ref_id) == .read) has_read = true;
+    }
+    try testing.expect(has_read);
+}
+
+test "component JSX <Foo> still emits read ref (not affected by #34)" {
+    var r = try analyzeTsxModuleSource(
+        \\import React from 'react';
+        \\function Foo() { return <div />; }
+        \\const C = () => <Foo />;
+    );
+    defer r.deinit(testing.allocator);
+
+    const sym = findSymbol(&r, "Foo") orelse return error.SymbolNotFound;
+    const range = r.symbols.getRefRange(sym);
+    try testing.expect(!range.isEmpty());
+    var has_read = false;
+    for (r.ref_by_sym[range.start..range.end]) |ref_id| {
+        if (r.references.getKind(ref_id) == .read) has_read = true;
+    }
+    try testing.expect(has_read);
+}
+
 // ── Structural test helpers ─────────────────────────────────
 //
 // Unlike count-based smoke checks (`symbols.count() > 0`), these assert the
