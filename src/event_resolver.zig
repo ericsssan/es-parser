@@ -519,7 +519,7 @@ fn resolveFullImpl(
                     while (j >= 0) : (j -= 1) {
                         const sk = kind_stack[@intCast(j)];
                         switch (sk) {
-                            .global, .module, .function, .static_block, .class_field_initializer, .arrow_function => break :blk @intCast(j),
+                            .global, .module, .function, .static_block, .class_field_initializer, .arrow_function, .ts_namespace => break :blk @intCast(j),
                             else => {},
                         }
                     }
@@ -1190,7 +1190,7 @@ fn checkRedeclarations(
                 var vs = sid;
                 while (vs.isValid()) : (vs = scopes.parent(vs)) {
                     switch (scopes.kind(vs)) {
-                        .function, .arrow_function, .global, .module => break,
+                        .function, .arrow_function, .global, .module, .ts_namespace => break,
                         else => {},
                     }
                 }
@@ -1361,7 +1361,7 @@ fn checkRedeclarations(
                 var s = scopes.parent(csid);
                 while (s.isValid()) {
                     switch (scopes.kind(s)) {
-                        .global, .module, .function, .static_block, .class_field_initializer, .arrow_function => break :blk s,
+                        .global, .module, .function, .static_block, .class_field_initializer, .arrow_function, .ts_namespace => break :blk s,
                         else => s = scopes.parent(s),
                     }
                 }

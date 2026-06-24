@@ -59,6 +59,12 @@ pub const ScopeKind = enum(u8) {
     /// member symbols.  Not a var-scope; `var` declarations inside an enum
     /// initializer hoist past the enum body to the enclosing function/module.
     ts_enum,
+    /// TypeScript `namespace N { }` / `module N { }` body.  A var-scope —
+    /// `var` declarations stop at the namespace boundary instead of hoisting
+    /// to the enclosing function/global, matching TypeScript's scope analyzer
+    /// (a namespace compiles to an IIFE).  Distinct from `.block` so rules can
+    /// recognise namespace bodies (no-shadow, no-inner-declarations, etc.).
+    ts_namespace,
 };
 
 // ── Scope Flags ────────────────────────────────────────────
@@ -83,9 +89,10 @@ pub const ScopeFlags = packed struct(u16) {
     is_generator: bool = false,
     has_arguments: bool = false,
     has_this_binding: bool = false,
-    /// Body block of a ts_namespace_decl or ts_module_decl.
-    /// Used by no-shadow to suppress reports when the outer symbol is
-    /// declared inside a namespace/module body (declare global / declare namespace).
+    /// Body block of a ts_namespace_decl or ts_module_decl. Set automatically
+    /// for `ScopeKind.ts_namespace` scopes (see addScope). Used by no-shadow to
+    /// suppress reports when the outer symbol is declared inside a
+    /// namespace/module body (declare namespace).
     is_namespace_body: bool = false,
     _padding: u8 = 0,
 };
@@ -189,6 +196,13 @@ pub const ScopeTree = struct {
                 scope_flags.is_var_scope = true; // var declarations hoist to static block, not beyond
             },
             .block, .catch_clause, .switch_stmt, .with_stmt, .elided, .ts_enum => {},
+            .ts_namespace => {
+                // Namespace/module bodies are var-scopes: `var` declarations stop
+                // here rather than hoisting past the namespace boundary (TS compiles
+                // a namespace to an IIFE). Flag the body for no-shadow et al.
+                scope_flags.is_var_scope = true;
+                scope_flags.is_namespace_body = true;
+            },
             .arrow_function => {
                 // Arrow functions ARE var-scopes — var declarations stop here,
                 // matching ES2015+ spec.  They do not provide `arguments` or

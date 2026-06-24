@@ -749,6 +749,65 @@ test "namespace declaration emits namespace_decl symbol in enclosing scope (TS)"
     }
 }
 
+test "namespace body opens a ts_namespace scope, not a plain block (#52)" {
+    // `namespace`, `module`, and ambient string `module "x"` bodies all open a
+    // ts_namespace scope (a var-scope) rather than the plain `.block` that
+    // parseBlockStatement would otherwise emit.
+    const cases = [_][]const u8{
+        "namespace N { }",
+        "module N { }",
+        "declare module 'foo' { }",
+    };
+    for (cases) |src| {
+        var r = try analyzeTsSource(src);
+        defer r.deinit(testing.allocator);
+        try testing.expectEqual(@as(u32, 1), countScopesOfKind(&r, .ts_namespace));
+        try testing.expectEqual(@as(u32, 0), countScopesOfKind(&r, .block));
+    }
+}
+
+test "ts_namespace scope is a var-scope flagged as a namespace body (#52)" {
+    var r = try analyzeTsSource("namespace N { var x = 1; }");
+    defer r.deinit(testing.allocator);
+    // Locate the ts_namespace scope and assert its flags were wired up.
+    var ns: ?ScopeId = null;
+    var i: u32 = 0;
+    while (i < r.scopes.len()) : (i += 1) {
+        const id = ScopeId.fromInt(i);
+        if (r.scopes.kind(id) == .ts_namespace) ns = id;
+    }
+    const nsid = ns orelse return error.NamespaceScopeNotFound;
+    const flags = r.scopes.getFlags(nsid);
+    try testing.expect(flags.is_var_scope);
+    try testing.expect(flags.is_namespace_body);
+}
+
+test "var stops at the namespace boundary instead of hoisting out (#52)" {
+    // TS compiles a namespace to an IIFE, so a `var` inside it is namespace-local
+    // — it must NOT hoist to the enclosing global scope.
+    {
+        // var declared directly in the namespace body.
+        var r = try analyzeTsSource("namespace N { var x = 1; }");
+        defer r.deinit(testing.allocator);
+        try expectSymbol(&r, "x", .@"var", .ts_namespace);
+    }
+    {
+        // var declared in a nested block still hoists only as far as the namespace.
+        var r = try analyzeTsSource("namespace N { { var y = 1; } }");
+        defer r.deinit(testing.allocator);
+        try expectSymbol(&r, "y", .@"var", .ts_namespace);
+    }
+}
+
+test "var in a namespace resolves a reference inside the same namespace (#52)" {
+    // The hoist target and the reference walk must agree: a read of `x` inside
+    // the namespace resolves to the namespace-scoped `var x`.
+    var r = try analyzeTsSource("namespace N { var x = 1; x; }");
+    defer r.deinit(testing.allocator);
+    const x = findSymbol(&r, "x") orelse return error.SymbolNotFound;
+    try testing.expect(r.symbols.getRefRange(x).len() >= 1);
+}
+
 test "named class expression: name bound inside class scope" {
     var r = try analyzeSource("(class Foo {})");
     defer r.deinit(testing.allocator);

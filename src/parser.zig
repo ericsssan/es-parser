@@ -2412,6 +2412,13 @@ pub const Parser = struct {
     /// Classify a FunctionDeclaration's flavor by inspecting tokens around its name.
     /// Only plain (non-async, non-generator) FunctionDeclaration enjoys B.3.2 legacy semantics.
     pub fn parseBlockStatement(self: *Parser) Error!NodeIndex {
+        return self.parseBlockStatementWithScope(.block);
+    }
+
+    /// Parse `{ ... }`, opening a scope of `scope_kind` for its body. Callers that
+    /// want a plain block use `parseBlockStatement` (`.block`); namespace/module
+    /// bodies pass `.ts_namespace` so `var` stops at the namespace boundary.
+    pub fn parseBlockStatementWithScope(self: *Parser, scope_kind: ScopeKindU8) Error!NodeIndex {
         const lbrace = try self.expect(.l_brace);
         const prev_in_block = self.in_block;
         self.in_block = true;
@@ -2419,7 +2426,7 @@ pub const Parser = struct {
         const prev_in_case_clause = self.in_case_clause;
         self.in_case_clause = false;
         defer self.in_case_clause = prev_in_case_clause;
-        const scope_ev = try self.emitScopeOpen(.block, .none);
+        const scope_ev = try self.emitScopeOpen(scope_kind, .none);
         const range = try self.parseStatementList(.r_brace);
         _ = try self.expect(.r_brace);
         try self.emitScopeClose(.none);
