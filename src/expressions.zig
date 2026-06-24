@@ -6602,8 +6602,10 @@ fn parseBindingElement(p: *Parser) Error!NodeIndex {
     if (p.peek() == .ellipsis) {
         const tok = p.advance();
         const arg = try parseBindingPattern(p);
-        if (!p.suppress_param_declares) try p.emitDeclaresFromPattern(arg, .parameter);
+        // Declare AFTER the type annotation: a parameter is not in scope for its
+        // own type annotation, so its identifiers resolve in the enclosing scope (#53).
         const type_ann = try p.parseOptionalTypeAnnotation();
+        if (!p.suppress_param_declares) try p.emitDeclaresFromPattern(arg, .parameter);
         return p.addNode(.{
             .tag = .rest_element,
             .main_token = tok,
@@ -6680,7 +6682,6 @@ fn parseBindingElement(p: *Parser) Error!NodeIndex {
 
     const binding_main_tok = p.tok_i;
     var node = try parseBindingPattern(p);
-    if (!p.suppress_param_declares) try p.emitDeclaresFromPattern(node, .parameter);
 
     // TS optional parameter marker and type annotation
     if (p.is_ts) {
@@ -6728,6 +6729,11 @@ fn parseBindingElement(p: *Parser) Error!NodeIndex {
             try p.emitDiagnostic(p.currentSpan(), "Parameter cannot have question mark and initializer", .{});
         }
     }
+
+    // Declare AFTER the type annotation (parsed above): a parameter is not in scope
+    // for its own type annotation, so its identifiers resolve in the enclosing scope.
+    // The default initializer below IS evaluated in the parameter scope (#53).
+    if (!p.suppress_param_declares) try p.emitDeclaresFromPattern(node, .parameter);
 
     // Default initializer
     if (p.peek() == .equal) {

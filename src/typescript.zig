@@ -916,8 +916,7 @@ fn parseFunctionTypeWithScope(p: *Parser, pre_scope_ev: ?u32) Error!NodeIndex {
         if (p.peek() == .ellipsis) {
             const rest_tok = p.advance(); // consume `...`
             const param_name = try p.parseIdentifier();
-            try p.emitDeclare(.parameter, param_name);
-            // Optional type annotation — wrap in ts_type_annotation for consistent parent chain
+            // Optional type annotation — wrap in ts_type_annotation for consistent parent chain.
             var type_ann: NodeIndex = .none;
             if (p.peek() == .colon) {
                 const colon_tok: u32 = p.tokIdx();
@@ -929,6 +928,9 @@ fn parseFunctionTypeWithScope(p: *Parser, pre_scope_ev: ?u32) Error!NodeIndex {
                     .data = .{ .lhs = inner_type, .rhs = .none },
                 });
             }
+            // Declare AFTER the type annotation: the rest parameter is not in scope
+            // for its own type annotation, so it resolves in the enclosing scope (#53).
+            try p.emitDeclare(.parameter, param_name);
             const rest_node = try p.addNode(.{
                 .tag = .rest_element,
                 .main_token = rest_tok,
