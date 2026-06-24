@@ -89,7 +89,7 @@ pub const ScopeFlags = packed struct(u16) {
     is_generator: bool = false,
     has_arguments: bool = false,
     has_this_binding: bool = false,
-    /// Body block of a ts_namespace_decl or ts_module_decl. Set automatically
+    /// Body of a TypeScript `namespace`/`module` declaration. Set automatically
     /// for `ScopeKind.ts_namespace` scopes (see addScope). Used by no-shadow to
     /// suppress reports when the outer symbol is declared inside a
     /// namespace/module body (declare namespace).

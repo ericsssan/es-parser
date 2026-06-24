@@ -799,13 +799,50 @@ test "var stops at the namespace boundary instead of hoisting out (#52)" {
     }
 }
 
-test "var in a namespace resolves a reference inside the same namespace (#52)" {
-    // The hoist target and the reference walk must agree: a read of `x` inside
-    // the namespace resolves to the namespace-scoped `var x`.
-    var r = try analyzeTsSource("namespace N { var x = 1; x; }");
+test "forward var-ref inside a namespace resolves to the namespace-scoped var (#52)" {
+    // A read that appears BEFORE the `var` declaration is left unresolved on the
+    // main pass and patched up by the retry walk (which uses the precomputed
+    // var_scope field). This exercises a different code path than the in-order
+    // case and confirms both paths agree on the ts_namespace scope.
+    var r = try analyzeTsSource("namespace N { x; var x = 1; }");
     defer r.deinit(testing.allocator);
     const x = findSymbol(&r, "x") orelse return error.SymbolNotFound;
+    // The `var x` is namespace-scoped...
+    try testing.expectEqual(ScopeKind.ts_namespace, r.scopes.kind(r.symbols.getScope(x)));
+    // ...and the forward `x;` reference resolved to it.
     try testing.expect(r.symbols.getRefRange(x).len() >= 1);
+}
+
+test "module / ambient-module bodies also trap var (#52)" {
+    // The `module N` keyword path and the ambient string `module "x"` path both go
+    // through parseNamespaceOrModule, so their `var`s are namespace-scoped too.
+    {
+        var r = try analyzeTsSource("module N { var z = 1; }");
+        defer r.deinit(testing.allocator);
+        try expectSymbol(&r, "z", .@"var", .ts_namespace);
+    }
+    {
+        var r = try analyzeTsSource("declare module 'foo' { var w = 1; }");
+        defer r.deinit(testing.allocator);
+        try expectSymbol(&r, "w", .@"var", .ts_namespace);
+    }
+}
+
+test "let/const in a namespace bind to the ts_namespace scope (#52)" {
+    // Guards against a regression that reverts the body to `.block` (where let/const
+    // would still bind, but the scope kind would be wrong) or mis-hoists them.
+    var r = try analyzeTsSource("namespace N { let q = 1; const c = 2; }");
+    defer r.deinit(testing.allocator);
+    try expectSymbol(&r, "q", .let, .ts_namespace);
+    try expectSymbol(&r, "c", .@"const", .ts_namespace);
+}
+
+test "top-level var is not trapped by the namespace change (#52)" {
+    // Negative control: the new var-scope must not over-reach. A `var` at module
+    // top level still belongs to the global scope.
+    var r = try analyzeTsSource("var top = 1;");
+    defer r.deinit(testing.allocator);
+    try expectSymbol(&r, "top", .@"var", .global);
 }
 
 test "named class expression: name bound inside class scope" {
