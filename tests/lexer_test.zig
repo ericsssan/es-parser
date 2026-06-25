@@ -357,3 +357,57 @@ test "only whitespace" {
 test "only comments" {
     try expectTokens("// comment\n/* block */", &.{});
 }
+
+// ── JSX text tokens (#61) ────────────────────────────────
+
+/// Collect the [start, end) byte ranges of every jsx_text token, in order.
+fn expectJsxTextLang(src: []const u8, lang: Token.Language, expected: []const [2]u32) !void {
+    var result = try Lexer.tokenizeWithLanguage(testing.allocator, src, lang);
+    defer result.deinit(testing.allocator);
+    const tags = result.tokens.items(.tag);
+    const starts = result.tokens.items(.start);
+    const lens = result.tokens.items(.len);
+    var got: [16][2]u32 = undefined;
+    var k: usize = 0;
+    var i: usize = 0;
+    while (i < result.tokens.len) : (i += 1) {
+        if (tags[i] == .jsx_text) {
+            got[k] = .{ starts[i], starts[i] + lens[i] };
+            k += 1;
+        }
+    }
+    try testing.expectEqual(expected.len, k);
+    for (expected, got[0..k]) |e, g| {
+        try testing.expectEqual(e[0], g[0]);
+        try testing.expectEqual(e[1], g[1]);
+    }
+}
+
+fn expectJsxText(src: []const u8, expected: []const [2]u32) !void {
+    try expectJsxTextLang(src, .jsx, expected);
+}
+
+test "JSX text child is one jsx_text token spanning whitespace (#61)" {
+    // The issue's repro: text before/after the expression container are each ONE
+    // jsx_text token including the leading "\n   " — matching espree/@typescript-eslint.
+    try expectJsxText("<div>\n   unrelated{\n        foo\n    }\n</div>", &.{ .{ 5, 18 }, .{ 37, 38 } });
+    // Multi-word text is one token, not several identifiers.
+    try expectJsxText("<div>hello world</div>", &.{.{ 5, 16 }});
+    // Nested elements: only the innermost text is jsx_text; adjacent tags have none.
+    try expectJsxText("<a><b>x</b></a>", &.{.{ 6, 7 }});
+    // Text inside a nested element within an expression container.
+    try expectJsxText("<div>{cond && <span>hi</span>}</div>", &.{.{ 20, 22 }});
+    // Fragment body.
+    try expectJsxText("<>frag</>", &.{.{ 2, 6 }});
+    // A self-closing element opens no body — the surrounding gaps are not jsx_text.
+    try expectJsxText("<div><br/></div>", &.{});
+}
+
+test "JSX text tokens are gated to plain JSX, not TSX / non-JSX (#61)" {
+    // Plain JS: `<` / `>` are operators, never JSX tags.
+    try expectJsxTextLang("a < b > c", .js, &.{});
+    // TSX keeps the prior token stream (the JSX-vs-generic ambiguity needs the
+    // parser); a generic arrow must NOT be misread as a JSX element opening a body.
+    try expectJsxTextLang("const f = <T,>() => 1;", .tsx, &.{});
+    try expectJsxTextLang("<div>hi</div>", .tsx, &.{});
+}

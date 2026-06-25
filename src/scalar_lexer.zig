@@ -534,6 +534,26 @@ pub fn tokenizeScalarWithOptions(
     language: Language,
     opts: Lex.TokenizeOptions,
 ) !TokenList {
+    // JSX text tokenization (#61) needs to know when a `<tag>` opens an element
+    // body. In TSX a `<T>` is ambiguous (JSX element vs generic type arguments vs
+    // generic arrow), and only the parser's speculative parse can disambiguate, so
+    // element-body tracking is restricted to plain JSX (no TS); TSX keeps the prior
+    // token stream. `jsx_text_mode` is threaded as a COMPTIME parameter so the entire
+    // text-tracking path compiles away for non-JSX input — the hot lexer used by the
+    // overwhelming majority of files is byte-for-byte identical to before.
+    if (language.isJsx() and !language.isTs()) {
+        return tokenizeScalarImpl(true, alloc, src, language, opts);
+    }
+    return tokenizeScalarImpl(false, alloc, src, language, opts);
+}
+
+fn tokenizeScalarImpl(
+    comptime jsx_text_mode: bool,
+    alloc: std.mem.Allocator,
+    src: []const u8,
+    language: Language,
+    opts: Lex.TokenizeOptions,
+) !TokenList {
     var toks: TokenList = .empty;
     try toks.ensureTotalCapacity(alloc, @max(src.len / 2 + 16, 64));
     const n: u32 = @intCast(src.len);
@@ -559,6 +579,24 @@ pub fn tokenizeScalarWithOptions(
     // classify a string as a JSX attribute value vs. an ordinary string.
     var jsx_tag_depth: u32 = 0;
     var jsx_brace_nest: u32 = 0;
+    // JSX element-body tracking, to emit one `jsx_text` token per text child (#61).
+    // The lexer is context-free, so it tracks JSX structure here: a stack of frames,
+    // each an element BODY (text context) or an expression container EXPR (JS
+    // context). `<tag>` pushes BODY, `</tag>` pops it; `{` inside a body pushes EXPR
+    // and its matching `}` pops it (the frame's low bits count nested object/block
+    // braces so the right `}` closes the container). `jsx_in_text` caches "top frame
+    // is a BODY and we are outside any tag header" — the single bit the hot loop
+    // tests. All of this is gated on is_jsx, so non-JSX lexing is unchanged.
+    const JSX_EXPR_BIT: u32 = 0x8000_0000;
+    var jsx_in_text = false;
+    var jsx_closing = false; // the `<` just seen begins a closing tag `</…`
+    var jsx_sp: u32 = 0;
+    var jsx_frame_inline: [64]u32 = undefined;
+    var jsx_frame_ptr: [*]u32 = &jsx_frame_inline;
+    var jsx_frame_cap: u32 = jsx_frame_inline.len;
+    var jsx_frame_heap: ?[]u32 = null;
+    var jsx_text_nl = false; // last jsx_text token contained a line terminator
+    defer if (jsx_frame_heap) |h| alloc.free(h);
     // Annex B HTML comments (`<!--` / `-->`) are enabled only in non-module
     // scripts with annex_b set.
     const annex_b = opts.annex_b;
@@ -600,7 +638,23 @@ pub fn tokenizeScalarWithOptions(
         // one indirect branch instead of the former 11-deep if/else chain.
         // No-token cases (whitespace, comments, BOM/LS/PS) `continue`;
         // token-producing cases set `tag`/`i` and fall to the shared emit tail.
-        if (c == ' ' or c == '\t' or c == 0x0B or c == 0x0C) {
+        if (jsx_text_mode and jsx_in_text and c != '<' and c != '{' and c != '>' and c != '}') {
+            // JSX text child (#61): in element-body context, everything up to the
+            // next `<` (tag) or `{` (expression container) is one literal jsx_text
+            // token, surrounding whitespace included. JSXText excludes `> }` too, so
+            // a bare `>`/`}` ends the run and is lexed as its own token — which the
+            // parser rejects, matching the reference. `jsx_in_text` is false for all
+            // non-JSX input, so this branch never fires off the JSX path.
+            @branchHint(.unlikely);
+            var j = i + 1;
+            var nl = c == '\n' or c == '\r';
+            while (j < n and src[j] != '<' and src[j] != '{' and src[j] != '>' and src[j] != '}') : (j += 1) {
+                if (src[j] == '\n' or src[j] == '\r') nl = true;
+            }
+            jsx_text_nl = nl;
+            tag = .jsx_text;
+            i = j;
+        } else if (c == ' ' or c == '\t' or c == 0x0B or c == 0x0C) {
             i += 1;
             continue;
         } else if (c == '\n' or c == '\r') {
@@ -920,35 +974,111 @@ pub fn tokenizeScalarWithOptions(
         p_esc[t_len] = has_esc;
         t_len += 1;
 
-        // Maintain JSX opening-tag depth. `<` opens a JSX element when in
-        // expression/child position (regexAllowed) and followed by a tag-name
-        // start or `>` (fragment); `{`/`}` nest inside the tag header; `>`
-        // closes the header.
+        // Maintain JSX structure state. `<` opens an opening tag (in a body, or
+        // where a JSX expression may start) or a closing tag (`</`); `{`/`}` nest
+        // inside a tag header (attribute expression) or, in a body, open/close an
+        // expression container; `>` closes a header — entering the element body
+        // (opening tag) or leaving it (closing tag). See the var block above.
         if (is_jsx) {
             switch (tag) {
                 .less_than => {
-                    if (Lex.regexAllowed(prev)) {
+                    // In a body a `<` is always a tag (text can't contain a bare `<`);
+                    // elsewhere fall back to the expression-position heuristic.
+                    if (jsx_in_text or Lex.regexAllowed(prev)) {
                         const nb: u8 = if (i < n) src[i] else 0;
-                        const opens = nb == '>' or nb == '_' or nb == '$' or
-                            (nb >= 'a' and nb <= 'z') or (nb >= 'A' and nb <= 'Z') or nb >= 0x80;
-                        if (opens) jsx_tag_depth += 1;
+                        if (nb == '/') {
+                            // Closing tag `</…>` — only meaningful directly in a body.
+                            if (jsx_sp > 0 and (jsx_frame_ptr[jsx_sp - 1] & JSX_EXPR_BIT) == 0) {
+                                jsx_closing = true;
+                                jsx_tag_depth += 1; // header until the matching `>`
+                            }
+                        } else {
+                            const opens = nb == '>' or nb == '_' or nb == '$' or
+                                (nb >= 'a' and nb <= 'z') or (nb >= 'A' and nb <= 'Z') or nb >= 0x80;
+                            if (opens) jsx_tag_depth += 1;
+                        }
                     }
                 },
-                .l_brace => if (jsx_tag_depth > 0) {
-                    jsx_brace_nest += 1;
+                .l_brace => {
+                    if (jsx_tag_depth > 0) {
+                        jsx_brace_nest += 1; // brace inside a tag header
+                    } else if (jsx_sp > 0) {
+                        const top = jsx_frame_ptr[jsx_sp - 1];
+                        if (top & JSX_EXPR_BIT == 0) {
+                            // `{` in a body opens an expression container.
+                            if (jsx_sp == jsx_frame_cap) {
+                                const new_cap = jsx_frame_cap * 2;
+                                const grown = try alloc.alloc(u32, new_cap);
+                                @memcpy(grown[0..jsx_frame_cap], jsx_frame_ptr[0..jsx_frame_cap]);
+                                if (jsx_frame_heap) |h| alloc.free(h);
+                                jsx_frame_heap = grown;
+                                jsx_frame_ptr = grown.ptr;
+                                jsx_frame_cap = new_cap;
+                            }
+                            jsx_frame_ptr[jsx_sp] = JSX_EXPR_BIT;
+                            jsx_sp += 1;
+                        } else {
+                            jsx_frame_ptr[jsx_sp - 1] = top + 1; // nested object/block brace
+                        }
+                    }
                 },
-                .r_brace => if (jsx_brace_nest > 0) {
-                    jsx_brace_nest -= 1;
+                .r_brace => {
+                    if (jsx_brace_nest > 0) {
+                        jsx_brace_nest -= 1;
+                    } else if (jsx_sp > 0) {
+                        const top = jsx_frame_ptr[jsx_sp - 1];
+                        if (top & JSX_EXPR_BIT != 0) {
+                            if (top & ~JSX_EXPR_BIT > 0) {
+                                jsx_frame_ptr[jsx_sp - 1] = top - 1; // close a nested brace
+                            } else {
+                                jsx_sp -= 1; // close the expression container
+                            }
+                        }
+                    }
                 },
-                .greater_than => if (jsx_tag_depth > 0 and jsx_brace_nest == 0) {
-                    jsx_tag_depth -= 1;
+                .greater_than => {
+                    if (jsx_closing) {
+                        // `>` of a closing tag `</…>` — leave the element body.
+                        jsx_closing = false;
+                        jsx_tag_depth -= 1;
+                        if (jsx_sp > 0 and (jsx_frame_ptr[jsx_sp - 1] & JSX_EXPR_BIT) == 0) jsx_sp -= 1;
+                    } else if (jsx_tag_depth > 0 and jsx_brace_nest == 0) {
+                        jsx_tag_depth -= 1;
+                        // Opening-tag header closed: enter the body unless self-closing `/>`.
+                        // Gated to plain JSX — see jsx_text_mode. (No body pushed in TSX, so
+                        // jsx_sp stays 0 and all body/expr/text tracking stays inert.)
+                        if (prev != .slash and jsx_text_mode) {
+                            if (jsx_sp == jsx_frame_cap) {
+                                const new_cap = jsx_frame_cap * 2;
+                                const grown = try alloc.alloc(u32, new_cap);
+                                @memcpy(grown[0..jsx_frame_cap], jsx_frame_ptr[0..jsx_frame_cap]);
+                                if (jsx_frame_heap) |h| alloc.free(h);
+                                jsx_frame_heap = grown;
+                                jsx_frame_ptr = grown.ptr;
+                                jsx_frame_cap = new_cap;
+                            }
+                            jsx_frame_ptr[jsx_sp] = 0; // BODY frame
+                            jsx_sp += 1;
+                        }
+                    }
                 },
                 else => {},
             }
+            // Recompute the hot-loop text-context bit: top frame is a body and we
+            // are outside any tag header / attribute brace.
+            jsx_in_text = jsx_sp > 0 and (jsx_frame_ptr[jsx_sp - 1] & JSX_EXPR_BIT) == 0 and
+                jsx_tag_depth == 0 and jsx_brace_nest == 0;
         }
 
         prev_kind = if (isPropertyAccess(prev) and tag.isKeyword()) .identifier else tag;
-        saw_nl = false;
+        // A jsx_text token may span line terminators; carry that to the next token's
+        // has_newline_before. Comptime-gated so non-JSX keeps the plain `saw_nl = false`.
+        if (jsx_text_mode) {
+            saw_nl = jsx_text_nl;
+            jsx_text_nl = false;
+        } else {
+            saw_nl = false;
+        }
         at_line_start = false;
     }
 
