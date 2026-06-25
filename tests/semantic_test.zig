@@ -799,6 +799,48 @@ test "reference nested in an arrow default keeps resolving to the outer binding 
     try testing.expect(r.symbols.getRefRange(outer_c).len() >= 1);
 }
 
+/// Analyze `source` as a `js_ts` module (JS file with TypeScript annotations).
+fn analyzeJsTsModuleSource(source: []const u8) !semantic.SemanticResult {
+    const allocator = testing.allocator;
+    var _lr = try Lexer.tokenizeWithLanguage(allocator, source, .js_ts);
+    defer _lr.deinit(allocator);
+    var tokens = _lr.tokens;
+    var tree = try Parser.parseWithOptions(allocator, source, tokens.slice(), .{ .language = .js_ts, .is_module = true, .emit_events = true });
+    defer tree.deinit(allocator);
+    return semantic.SemanticAnalyzer.analyzeModule(allocator, &tree, true);
+}
+
+test "typed-return concise arrow opens a scope and declares its parameters (#60)" {
+    // `(params): T => body` (untyped params + explicit return type) must open an
+    // arrow scope and declare its parameters — previously it declared none.
+    var r = try analyzeTsModuleSource("const f = (a, b): number => a + b;");
+    defer r.deinit(testing.allocator);
+    try expectSymbol(&r, "a", .parameter, .arrow_function);
+    try expectSymbol(&r, "b", .parameter, .arrow_function);
+    // The body `a + b` resolves to the params (one read each).
+    const a = findSymbolByKind(&r, "a", .parameter) orelse return error.ParamNotFound;
+    const b = findSymbolByKind(&r, "b", .parameter) orelse return error.ParamNotFound;
+    try testing.expectEqual(@as(u32, 1), r.symbols.getRefRange(a).len());
+    try testing.expectEqual(@as(u32, 1), r.symbols.getRefRange(b).len());
+}
+
+test "typed-return concise arrow default resolves to the parameter (#60/#56)" {
+    // The param scope + default re-homing both apply on this path too.
+    var r = try analyzeTsModuleSource("const g = (a, b = a): string => b;");
+    defer r.deinit(testing.allocator);
+    const a = findSymbolByKind(&r, "a", .parameter) orelse return error.ParamNotFound;
+    const b = findSymbolByKind(&r, "b", .parameter) orelse return error.ParamNotFound;
+    try testing.expectEqual(@as(u32, 1), r.symbols.getRefRange(a).len()); // default `b = a`
+    try testing.expectEqual(@as(u32, 1), r.symbols.getRefRange(b).len()); // body `b`
+}
+
+test "typed-return concise arrow declares params in js_ts mode too (#60)" {
+    var r = try analyzeJsTsModuleSource("const f = (a, b): number => a + b;");
+    defer r.deinit(testing.allocator);
+    try expectSymbol(&r, "a", .parameter, .arrow_function);
+    try expectSymbol(&r, "b", .parameter, .arrow_function);
+}
+
 /// Count scopes of a given kind in the tree.
 fn countScopesOfKind(result: *const semantic.SemanticResult, want: ScopeKind) u32 {
     var n: u32 = 0;
