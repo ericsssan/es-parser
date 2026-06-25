@@ -1141,6 +1141,58 @@ pub const Parser = struct {
         }
     }
 
+    /// The current scope-event high-water mark. Paired with `rehomeParamRefs`
+    /// to bracket the events emitted while parsing an arrow's parameter list.
+    pub inline fn eventMark(self: *const Parser) u32 {
+        return @intCast(self.ev_len);
+    }
+
+    /// Re-home parameter default-initializer (and computed-key) references from
+    /// the enclosing scope into the just-opened arrow/parameter scope.
+    ///
+    /// Arrow parameters are parsed via the cover grammar BEFORE the arrow scope
+    /// exists, so references inside parameter defaults land in the enclosing
+    /// scope. A default is evaluated in the parameter scope, so those references
+    /// must be able to see the parameters. After the arrow scope is opened and
+    /// the parameters declared, scan the events emitted while parsing the list —
+    /// `[mark, scope_ev)` — and re-home the eligible references:
+    ///   - depth-0 only: a reference nested inside a default's own
+    ///     function/arrow belongs to that inner scope (depth tracking skips it);
+    ///   - value reads/writes only: `type_read`/`type_of` annotation and
+    ///     type-query references stay in the enclosing scope, matching
+    ///     TypeScript — a parameter is not in scope for its own type annotation
+    ///     (see #53);
+    ///   - parameter-name references are already cancelled to `.nop` by
+    ///     `emitParamDeclaresFromRange`, so they are skipped.
+    ///
+    /// Re-homing is safe because the arrow scope is a child of the enclosing
+    /// scope: a re-homed reference still resolves up to the enclosing binding
+    /// when no parameter shadows it, and resolves to the parameter when one does.
+    pub fn rehomeParamRefs(self: *Parser, mark: u32, scope_ev: u32) std.mem.Allocator.Error!void {
+        if (!self.emit_scope_events) return;
+        var depth: i32 = 0;
+        var i: u32 = mark;
+        while (i < scope_ev) : (i += 1) {
+            const ekind = self.ev_ptr[i].kind;
+            if (ekind == .scope_open) {
+                depth += 1;
+                continue;
+            }
+            if (ekind == .scope_close) {
+                depth -= 1;
+                continue;
+            }
+            if (ekind != .reference or depth != 0) continue;
+            const rk: ReferenceKindU8 = @enumFromInt(self.ev_ptr[i].aux);
+            if (rk == .type_read or rk == .type_of) continue;
+            const node_raw = self.ev_ptr[i].node;
+            // Cancel the original (enclosing-scope) reference, then re-emit it at
+            // the current position — inside the arrow scope, after the declares.
+            self.ev_ptr[i].kind = .nop;
+            try self.emitReference(rk, @enumFromInt(node_raw));
+        }
+    }
+
     fn emitDeclaresFromPatternImpl(self: *Parser, node: NodeIndex, kind: BindingKindU8) std.mem.Allocator.Error!void {
         if (node == .none) return;
         const idx = @intFromEnum(node);

@@ -724,6 +724,81 @@ test "parameter default value still resolves in the parameter scope (#53)" {
     }
 }
 
+test "arrow parameter default initializer resolves to a sibling parameter (#56)" {
+    // A parameter default is evaluated in the parameter scope, so `b = a` reads the
+    // parameter `a`. Arrow params are parsed via the cover grammar before the arrow
+    // scope exists, so the default's reference is re-homed into the arrow scope.
+    const cases = [_][]const u8{
+        "const f = (a, b = a) => b;", // plain arrow
+        "const f = (a: number, b = a) => b;", // typed (non-generic) arrow
+        "const f = async (a, b = a) => b;", // async arrow
+        "const f = <T>(a: T, b = a) => b;", // generic arrow
+        "const f = ({a} = {}, b = a) => b;", // destructured sibling
+    };
+    for (cases) |src| {
+        var r = try analyzeTsModuleSource(src);
+        defer r.deinit(testing.allocator);
+        const a = findSymbolByKind(&r, "a", .parameter) orelse return error.ParamNotFound;
+        // Exactly one read — the `a` in `b = a` (not double-emitted by the re-home).
+        try testing.expectEqual(@as(u32, 1), r.symbols.getRefRange(a).len());
+    }
+}
+
+test "arrow default and body both reference the same parameter (#56)" {
+    // The re-homed default ref is additive, not a replacement: `a` is read by both
+    // the default `b = a` and the body `a + b`, on the single param symbol.
+    var r = try analyzeTsModuleSource("const f = (a, b = a) => a + b;");
+    defer r.deinit(testing.allocator);
+    const a = findSymbolByKind(&r, "a", .parameter) orelse return error.ParamNotFound;
+    try testing.expectEqual(@as(u32, 2), r.symbols.getRefRange(a).len());
+}
+
+test "a write inside an arrow default re-homes to the parameter and marks it written (#56)" {
+    // The re-home must preserve the reference KIND: `(a = 1)` writes the parameter.
+    var r = try analyzeTsModuleSource("const f = (a, b = (a = 1)) => b;");
+    defer r.deinit(testing.allocator);
+    const a = findSymbolByKind(&r, "a", .parameter) orelse return error.ParamNotFound;
+    try testing.expectEqual(@as(u32, 1), r.symbols.getRefRange(a).len());
+    try testing.expect(r.symbols.getFlags(a).is_written);
+}
+
+test "arrow parameter self-default resolves to the parameter, not an outer binding (#56)" {
+    // `(x = x) => x`: BOTH the default `x` and the body `x` read the PARAMETER x
+    // (TDZ at runtime), not the outer `let x`.
+    var r = try analyzeTsModuleSource("let x = 0;\nconst f = (x = x) => x;");
+    defer r.deinit(testing.allocator);
+    const param_x = findSymbolByKind(&r, "x", .parameter) orelse return error.ParamNotFound;
+    try testing.expectEqual(@as(u32, 2), r.symbols.getRefRange(param_x).len());
+}
+
+test "arrow annotation stays outer while the default is re-homed to the param (#56)" {
+    // Combined guard with #53: in `(foo: foo.Foo = foo.bar) => {}` the SAME name
+    // `foo` resolves to the import in the annotation `foo.Foo` but to the parameter
+    // in the default `foo.bar`.
+    var r = try analyzeTsModuleSource(
+        \\import * as foo from 'foo';
+        \\const f = (foo: foo.Foo = foo.bar) => {};
+    );
+    defer r.deinit(testing.allocator);
+    const import_sym = findSymbolByKind(&r, "foo", .import_binding) orelse return error.ImportNotFound;
+    const param_sym = findSymbolByKind(&r, "foo", .parameter) orelse return error.ParamNotFound;
+    try testing.expectEqual(@as(u32, 1), r.symbols.getRefRange(import_sym).len()); // annotation foo.Foo
+    try testing.expectEqual(@as(u32, 1), r.symbols.getRefRange(param_sym).len()); // default foo.bar
+}
+
+test "reference nested in an arrow default keeps resolving to the outer binding (#56)" {
+    // Safety: a reference inside a default's OWN nested function/arrow belongs to
+    // that inner scope and must NOT be re-homed — `c` inside `() => c` still
+    // resolves to the outer `let c` (depth tracking skips nested scopes).
+    var r = try analyzeTsModuleSource("let c = 0;\nconst f = (b = () => c) => b;");
+    defer r.deinit(testing.allocator);
+    // The nested `c` must NOT be re-homed: no phantom `c` parameter is created...
+    try testing.expectEqual(@as(?SymbolId, null), findSymbolByKind(&r, "c", .parameter));
+    // ...and it still resolves to the outer `let c`.
+    const outer_c = findSymbolByKind(&r, "c", .let) orelse return error.OuterNotFound;
+    try testing.expect(r.symbols.getRefRange(outer_c).len() >= 1);
+}
+
 /// Count scopes of a given kind in the tree.
 fn countScopesOfKind(result: *const semantic.SemanticResult, want: ScopeKind) u32 {
     var n: u32 = 0;

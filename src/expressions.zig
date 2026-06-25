@@ -3158,6 +3158,9 @@ fn parseAsyncFunctionExpression(p: *Parser, async_tok: TokenIndex) Error!NodeInd
 fn parseAsyncParenArrowOrCall(p: *Parser, async_tok: TokenIndex, type_params: ast.SubRange) Error!NodeIndex {
     // Save position so we can reinterpret if needed.
     const open_paren = p.advance(); // consume `(`
+    // Mark the event stream so arrow-param default references emitted during the
+    // cover-grammar parse can be re-homed into the arrow scope once confirmed (#56).
+    const param_ev_mark = p.eventMark();
 
     // TS: if params look typed, parse as formal parameters directly
     if (p.is_ts and (p.peek() == .r_paren or looksLikeTsArrowParams(p))) {
@@ -3187,6 +3190,7 @@ fn parseAsyncParenArrowOrCall(p: *Parser, async_tok: TokenIndex, type_params: as
             defer p.in_async = saved_async;
             const arrow_scope_ev = try p.emitScopeOpen(.arrow_function, .none);
             try p.emitParamDeclaresFromRange(params_range);
+            try p.rehomeParamRefs(param_ev_mark, arrow_scope_ev);
             const body = try parseArrowBody(p);
             try p.emitScopeClose(.none);
             const extra = try p.addExtra(ast.ArrowData, .{
@@ -3347,6 +3351,7 @@ fn parseAsyncParenArrowOrCall(p: *Parser, async_tok: TokenIndex, type_params: as
         // scope-aware analyses like redeclaration / no-shadow / no-unused).
         const arrow_scope_ev = try p.emitScopeOpen(.arrow_function, .none);
         try p.emitParamDeclaresFromRange(params_range);
+        try p.rehomeParamRefs(param_ev_mark, arrow_scope_ev);
         const body = if (p.peek() == .l_brace)
             try parseBlockBodyWithStrictChecks(p, params_range, .none)
         else
@@ -3401,6 +3406,9 @@ fn parseAsyncParenArrowOrCall(p: *Parser, async_tok: TokenIndex, type_params: as
 
 fn parseParenthesized(p: *Parser) Error!NodeIndex {
     const open_paren = p.advance(); // consume `(`
+    // Mark the event stream so arrow-param default references emitted during the
+    // cover-grammar parse can be re-homed into the arrow scope once confirmed (#56).
+    const param_ev_mark = p.eventMark();
     // `in` is always allowed inside `(...)` (even in for-in init)
     const saved_allow_in_paren = p.allow_in;
     p.allow_in = true;
@@ -3466,6 +3474,7 @@ fn parseParenthesized(p: *Parser) Error!NodeIndex {
             defer p.in_async = saved_async_ts;
             const typed_arrow_ev = try p.emitScopeOpen(.arrow_function, .none);
             try p.emitParamDeclaresFromRange(params_range);
+            try p.rehomeParamRefs(param_ev_mark, typed_arrow_ev);
             // ConciseBody[?In]: restore outer allow_in before parsing body.
             p.allow_in = saved_allow_in_paren;
             const body = try parseArrowBody(p);
@@ -3775,11 +3784,13 @@ fn parseParenthesized(p: *Parser) Error!NodeIndex {
         defer { p.in_generator = saved_gen3; p.syncYieldLex(); }
         defer p.in_async = saved_async3;
 
-        // Arrow scope — params were parsed as expression identifiers and
-        // emitted reference events into the enclosing scope; those become
-        // orphan refs, but the arrow body's own refs resolve correctly here.
+        // Arrow scope — params were parsed as expression identifiers and emitted
+        // reference events into the enclosing scope. Param-name refs are cancelled
+        // by emitParamDeclaresFromRange; default-initializer refs are re-homed into
+        // the arrow scope by rehomeParamRefs so they can see the params (#56).
         const paren_arrow_ev = try p.emitScopeOpen(.arrow_function, .none);
         try p.emitParamDeclaresFromRange(params_range);
+        try p.rehomeParamRefs(param_ev_mark, paren_arrow_ev);
 
         // Arrow params: spec rejects duplicate parameter names always.
         try p.checkUniqueParams(params_range);
@@ -7317,6 +7328,9 @@ fn parseTsTypeAssertion(p: *Parser) Error!NodeIndex {
             // arrow's function scope below (same pattern as typed non-generic arrows).
             var params_range = ast.SubRange{ .start = 0, .end = 0 };
             var generic_arrow_return_type: ast.NodeIndex = .none;
+            // Mark the event stream so param default references can be re-homed
+            // into the arrow scope once the arrow is confirmed (#56).
+            const param_ev_mark = p.eventMark();
             const arrow_ok = blk: {
                 _ = p.advance(); // consume `(`
                 const saved_suppress = p.suppress_param_declares;
@@ -7349,6 +7363,7 @@ fn parseTsTypeAssertion(p: *Parser) Error!NodeIndex {
                     try p.emitDeclare(.type_param, tp_node);
                 }
                 try p.emitParamDeclaresFromRange(params_range);
+                try p.rehomeParamRefs(param_ev_mark, generic_arrow_ev);
                 const body = try parseArrowBody(p);
                 try p.emitScopeClose(.none);
                 const extra = try p.addExtra(ast.ArrowData, .{
