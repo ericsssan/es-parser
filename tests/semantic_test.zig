@@ -1600,6 +1600,11 @@ test "catch block is reachable when the try body has a throwable expression (#57
         "function* f(){ try { yield 1; return; } catch (err) { return err; } }", "err"));
     try testing.expectEqual(@as(u8, 1), try cfgSegReachable(
         "function f(){ try { a.b.c = 1; return; } catch (err) { return err; } }", "err"));
+    // Member READ and `new` are throwable too (distinct node tags from the call/write above).
+    try testing.expectEqual(@as(u8, 1), try cfgSegReachable(
+        "function f(){ try { a.b.c; return; } catch (err) { return err; } }", "err"));
+    try testing.expectEqual(@as(u8, 1), try cfgSegReachable(
+        "function f(){ try { new Foo(); return; } catch (err) { return err; } }", "err"));
 }
 
 test "catch stays unreachable when the try body cannot throw (#57)" {
@@ -1614,7 +1619,13 @@ test "catch stays unreachable when the try body cannot throw (#57)" {
 test "break to a labeled block makes the following statement reachable (#57)" {
     // `break A` transfers to AFTER the labeled statement, so `foo()` is reachable.
     try testing.expectEqual(@as(u8, 1), try cfgSegReachable("A: { break A; } foo();", "foo"));
-    try testing.expectEqual(@as(u8, 1), try cfgSegReachable("A: { if (x) break A; bar(); } foo();", "foo"));
+    // The break is the ONLY way to reach foo (the fall-through returns), so the
+    // post-label segment is reachable solely via the break edge — discriminates the fix.
+    try testing.expectEqual(@as(u8, 1), try cfgSegReachable("function f(){ A: { if (x) break A; return; } foo(); }", "foo"));
+    // Break to an OUTER label, from a nested block, and to an INNER label.
+    try testing.expectEqual(@as(u8, 1), try cfgSegReachable("A: B: { break A; } foo();", "foo"));
+    try testing.expectEqual(@as(u8, 1), try cfgSegReachable("A: { { break A; } } foo();", "foo"));
+    try testing.expectEqual(@as(u8, 1), try cfgSegReachable("A: B: { break B; } foo();", "foo"));
     // Labeled loops (the pre-existing path) still work.
     try testing.expectEqual(@as(u8, 1), try cfgSegReachable("A: for(;;) { break A; } q();", "q"));
     // No break, body always returns → the following statement is unreachable.

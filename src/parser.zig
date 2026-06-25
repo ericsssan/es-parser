@@ -4139,6 +4139,7 @@ pub const Parser = struct {
         try self.emitBranchOpen(.none); // keep branch compatibility for node_reachable
         const prev_in_try_body = self.in_try_body;
         self.in_try_body = true;
+        errdefer self.in_try_body = prev_in_try_body; // restore if the body parse errors
         const block = try self.parseBlockStatement();
         self.in_try_body = prev_in_try_body;
         try self.emitTryBodyEnd(.none);
