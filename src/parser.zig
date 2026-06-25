@@ -2464,6 +2464,13 @@ pub const Parser = struct {
     /// Classify a FunctionDeclaration's flavor by inspecting tokens around its name.
     /// Only plain (non-async, non-generator) FunctionDeclaration enjoys B.3.2 legacy semantics.
     pub fn parseBlockStatement(self: *Parser) Error!NodeIndex {
+        return self.parseBlockStatementWithScope(.block);
+    }
+
+    /// Parse `{ ... }`, opening a scope of `scope_kind` for its body. Callers that
+    /// want a plain block use `parseBlockStatement` (`.block`); namespace/module
+    /// bodies pass `.ts_namespace` so `var` stops at the namespace boundary.
+    pub fn parseBlockStatementWithScope(self: *Parser, scope_kind: ScopeKindU8) Error!NodeIndex {
         const lbrace = try self.expect(.l_brace);
         const prev_in_block = self.in_block;
         self.in_block = true;
@@ -2471,7 +2478,7 @@ pub const Parser = struct {
         const prev_in_case_clause = self.in_case_clause;
         self.in_case_clause = false;
         defer self.in_case_clause = prev_in_case_clause;
-        const scope_ev = try self.emitScopeOpen(.block, .none);
+        const scope_ev = try self.emitScopeOpen(scope_kind, .none);
         const range = try self.parseStatementList(.r_brace);
         _ = try self.expect(.r_brace);
         try self.emitScopeClose(.none);
@@ -6187,8 +6194,10 @@ pub const Parser = struct {
         // Rest parameter: `...binding`
         if (self.eat(.ellipsis)) |ellipsis_tok| {
             const binding = try self.parseBindingPattern();
-            if (!self.suppress_param_declares) try self.emitDeclaresFromPattern(binding, .parameter);
+            // Declare AFTER the type annotation: a parameter is not in scope for its
+            // own type annotation, so its identifiers resolve in the enclosing scope (#53).
             const rest_type_annotation = try self.parseOptionalTypeAnnotation();
+            if (!self.suppress_param_declares) try self.emitDeclaresFromPattern(binding, .parameter);
             return self.addNode(.{
                 .tag = .rest_element,
                 .main_token = ellipsis_tok,
@@ -6256,10 +6265,15 @@ pub const Parser = struct {
 
         const main_tok: u32 = self.tokIdx();
         const binding = try self.parseBindingPattern();
-        if (!self.suppress_param_declares) try self.emitDeclaresFromPattern(binding, .parameter);
 
         const is_optional_ts = if (self.is_ts) (self.eat(.question) != null) else false;
+        // Parse the type annotation BEFORE declaring the parameter: in TypeScript a
+        // parameter is not in scope for its own type annotation, so identifiers there
+        // (e.g. `foo` in `foo: foo.Foo`) resolve in the enclosing scope. The default
+        // value, parsed below, IS in the parameter scope — so the declare sits
+        // between them (#53).
         const param_type_annotation = try self.parseOptionalTypeAnnotation();
+        if (!self.suppress_param_declares) try self.emitDeclaresFromPattern(binding, .parameter);
 
         // Attach type annotation and optional flag to identifier binding.
         const binding_tag = self.node_tags_ptr[binding.toInt()];

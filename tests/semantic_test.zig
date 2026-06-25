@@ -643,6 +643,87 @@ fn findSymbolByKind(result: *const semantic.SemanticResult, name: []const u8, bi
     return null;
 }
 
+test "parameter type annotation resolves in the enclosing scope, not the param scope (#53)" {
+    // A parameter is not in scope for its OWN type annotation, so `foo` in
+    // `foo: foo.Foo` must resolve to the outer namespace import (a type_read),
+    // leaving the same-named parameter unused. The first six cases are genuine
+    // regression guards (pre-fix the parameter captured the reference); the arrow
+    // and function-type paths already resolved correctly and are pinned here as
+    // invariants so a future change can't regress them.
+    const cases = [_][]const u8{
+        "import * as foo from 'foo';\nclass A { constructor(foo: foo.Foo) {} }", // class constructor
+        "import * as foo from 'foo';\nfunction g(foo: foo.Foo) {}", // function declaration
+        "import * as foo from 'foo';\nclass A { m(foo: foo.Foo) {} }", // method
+        "import * as foo from 'foo';\nfunction g(...foo: foo.Foo[]) {}", // rest parameter
+        "import * as foo from 'foo';\nclass A { set p(foo: foo.Foo) {} }", // setter
+        "import * as foo from 'foo';\nclass A { constructor(private foo: foo.Foo) {} }", // parameter property
+        "import * as foo from 'foo';\nconst f = (foo: foo.Foo) => {};", // arrow (already correct — invariant)
+        "import * as foo from 'foo';\nlet h: (foo: foo.Foo) => void;", // function type (already correct — invariant)
+    };
+    for (cases) |src| {
+        var r = try analyzeTsModuleSource(src);
+        defer r.deinit(testing.allocator);
+        const import_sym = findSymbolByKind(&r, "foo", .import_binding) orelse return error.ImportNotFound;
+        // Every one of these contexts emits a `foo` parameter symbol, so assert its
+        // absence of references unconditionally (a future path that stops emitting it
+        // should fail loudly here, not silently skip the check).
+        const param_sym = findSymbolByKind(&r, "foo", .parameter) orelse return error.ParamNotFound;
+        // The type reference in `foo.Foo` resolves to the import...
+        try testing.expect(r.symbols.getRefRange(import_sym).len() >= 1);
+        // ...and the same-named parameter is left with zero references.
+        try testing.expectEqual(@as(u32, 0), r.symbols.getRefRange(param_sym).len());
+    }
+}
+
+test "param annotation resolves outward while the body resolves to the param (#53)" {
+    // Strongest single-source guard: the SAME name `foo` must resolve to the import
+    // in the annotation `foo.Foo` but to the parameter in the body `foo;`.
+    var r = try analyzeTsModuleSource(
+        \\import * as foo from 'foo';
+        \\function f(foo: foo.Foo) { foo; }
+    );
+    defer r.deinit(testing.allocator);
+    const import_sym = findSymbolByKind(&r, "foo", .import_binding) orelse return error.ImportNotFound;
+    const param_sym = findSymbolByKind(&r, "foo", .parameter) orelse return error.ParamNotFound;
+    try testing.expectEqual(@as(u32, 1), r.symbols.getRefRange(import_sym).len()); // the `foo.Foo` annotation
+    try testing.expectEqual(@as(u32, 1), r.symbols.getRefRange(param_sym).len()); // the body `foo;`
+}
+
+test "parameter default value still resolves in the parameter scope (#53)" {
+    // The declare moves after the TYPE annotation but stays before the DEFAULT, so
+    // a default initializer still sees the (now-declared) parameters.
+    {
+        // Sibling reference: `b = a` reads the parameter `a`.
+        var r = try analyzeTsModuleSource("function g(a: number, b = a) { b; }");
+        defer r.deinit(testing.allocator);
+        const param_a = findSymbolByKind(&r, "a", .parameter) orelse return error.ParamNotFound;
+        try testing.expect(r.symbols.getRefRange(param_a).len() >= 1);
+    }
+    {
+        // Self reference: `x = x` reads the parameter `x` (TDZ at runtime, but it
+        // resolves to the param, not an outer binding).
+        var r = try analyzeTsModuleSource("let x = 0;\nfunction g(x = x) { return x; }");
+        defer r.deinit(testing.allocator);
+        const param_x = findSymbolByKind(&r, "x", .parameter) orelse return error.ParamNotFound;
+        // 2 reads: the default `x` and the `return x`.
+        try testing.expectEqual(@as(u32, 2), r.symbols.getRefRange(param_x).len());
+    }
+    {
+        // The needle this fix threads: the SAME name `foo` appears in the annotation
+        // (resolves to the import) AND the default (resolves to the param), proving
+        // the declare sits exactly between them.
+        var r = try analyzeTsModuleSource(
+            \\import * as foo from 'foo';
+            \\function g(foo: foo.Foo = foo.bar) {}
+        );
+        defer r.deinit(testing.allocator);
+        const import_sym = findSymbolByKind(&r, "foo", .import_binding) orelse return error.ImportNotFound;
+        const param_sym = findSymbolByKind(&r, "foo", .parameter) orelse return error.ParamNotFound;
+        try testing.expectEqual(@as(u32, 1), r.symbols.getRefRange(import_sym).len()); // annotation `foo.Foo`
+        try testing.expectEqual(@as(u32, 1), r.symbols.getRefRange(param_sym).len()); // default `foo.bar`
+    }
+}
+
 test "arrow parameter default initializer resolves to a sibling parameter (#56)" {
     // A parameter default is evaluated in the parameter scope, so `b = a` reads the
     // parameter `a`. Arrow params are parsed via the cover grammar before the arrow
@@ -834,6 +915,102 @@ test "namespace declaration emits namespace_decl symbol in enclosing scope (TS)"
         try testing.expectEqual(@as(?SymbolId, null), findSymbol(&r, "foo"));
         try testing.expectEqual(@as(?SymbolId, null), findSymbol(&r, "'foo'"));
     }
+}
+
+test "namespace body opens a ts_namespace scope, not a plain block (#52)" {
+    // `namespace`, `module`, and ambient string `module "x"` bodies all open a
+    // ts_namespace scope (a var-scope) rather than the plain `.block` that
+    // parseBlockStatement would otherwise emit.
+    const cases = [_][]const u8{
+        "namespace N { }",
+        "module N { }",
+        "declare module 'foo' { }",
+    };
+    for (cases) |src| {
+        var r = try analyzeTsSource(src);
+        defer r.deinit(testing.allocator);
+        try testing.expectEqual(@as(u32, 1), countScopesOfKind(&r, .ts_namespace));
+        try testing.expectEqual(@as(u32, 0), countScopesOfKind(&r, .block));
+    }
+}
+
+test "ts_namespace scope is a var-scope flagged as a namespace body (#52)" {
+    var r = try analyzeTsSource("namespace N { var x = 1; }");
+    defer r.deinit(testing.allocator);
+    // Locate the ts_namespace scope and assert its flags were wired up.
+    var ns: ?ScopeId = null;
+    var i: u32 = 0;
+    while (i < r.scopes.len()) : (i += 1) {
+        const id = ScopeId.fromInt(i);
+        if (r.scopes.kind(id) == .ts_namespace) ns = id;
+    }
+    const nsid = ns orelse return error.NamespaceScopeNotFound;
+    const flags = r.scopes.getFlags(nsid);
+    try testing.expect(flags.is_var_scope);
+    try testing.expect(flags.is_namespace_body);
+}
+
+test "var stops at the namespace boundary instead of hoisting out (#52)" {
+    // TS compiles a namespace to an IIFE, so a `var` inside it is namespace-local
+    // — it must NOT hoist to the enclosing global scope.
+    {
+        // var declared directly in the namespace body.
+        var r = try analyzeTsSource("namespace N { var x = 1; }");
+        defer r.deinit(testing.allocator);
+        try expectSymbol(&r, "x", .@"var", .ts_namespace);
+    }
+    {
+        // var declared in a nested block still hoists only as far as the namespace.
+        var r = try analyzeTsSource("namespace N { { var y = 1; } }");
+        defer r.deinit(testing.allocator);
+        try expectSymbol(&r, "y", .@"var", .ts_namespace);
+    }
+}
+
+test "forward var-ref inside a namespace resolves to the namespace-scoped var (#52)" {
+    // A read that appears BEFORE the `var` declaration is left unresolved on the
+    // main pass and patched up by the retry walk (which uses the precomputed
+    // var_scope field). This exercises a different code path than the in-order
+    // case and confirms both paths agree on the ts_namespace scope.
+    var r = try analyzeTsSource("namespace N { x; var x = 1; }");
+    defer r.deinit(testing.allocator);
+    const x = findSymbol(&r, "x") orelse return error.SymbolNotFound;
+    // The `var x` is namespace-scoped...
+    try testing.expectEqual(ScopeKind.ts_namespace, r.scopes.kind(r.symbols.getScope(x)));
+    // ...and the forward `x;` reference resolved to it.
+    try testing.expect(r.symbols.getRefRange(x).len() >= 1);
+}
+
+test "module / ambient-module bodies also trap var (#52)" {
+    // The `module N` keyword path and the ambient string `module "x"` path both go
+    // through parseNamespaceOrModule, so their `var`s are namespace-scoped too.
+    {
+        var r = try analyzeTsSource("module N { var z = 1; }");
+        defer r.deinit(testing.allocator);
+        try expectSymbol(&r, "z", .@"var", .ts_namespace);
+    }
+    {
+        var r = try analyzeTsSource("declare module 'foo' { var w = 1; }");
+        defer r.deinit(testing.allocator);
+        try expectSymbol(&r, "w", .@"var", .ts_namespace);
+    }
+}
+
+test "let/const in a namespace bind to the ts_namespace scope (#52)" {
+    // Guards against a regression that reverts the body to `.block` (where let/const
+    // would still bind, but the scope kind would be wrong) or mis-hoists them.
+    var r = try analyzeTsSource("namespace N { let q = 1; const c = 2; }");
+    defer r.deinit(testing.allocator);
+    try expectSymbol(&r, "q", .let, .ts_namespace);
+    try expectSymbol(&r, "c", .@"const", .ts_namespace);
+}
+
+test "top-level var is not trapped by the namespace change (#52)" {
+    // Negative control: the new var-scope must not over-reach. A `var` at module
+    // top level still belongs to the global scope.
+    var r = try analyzeTsSource("var top = 1;");
+    defer r.deinit(testing.allocator);
+    try expectSymbol(&r, "top", .@"var", .global);
 }
 
 test "named class expression: name bound inside class scope" {
