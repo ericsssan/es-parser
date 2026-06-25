@@ -367,7 +367,7 @@ fn expectJsxTextLang(src: []const u8, lang: Token.Language, expected: []const [2
     const tags = result.tokens.items(.tag);
     const starts = result.tokens.items(.start);
     const lens = result.tokens.items(.len);
-    var got: [16][2]u32 = undefined;
+    var got: [64][2]u32 = undefined;
     var k: usize = 0;
     var i: usize = 0;
     while (i < result.tokens.len) : (i += 1) {
@@ -410,4 +410,47 @@ test "JSX text tokens are gated to plain JSX, not TSX / non-JSX (#61)" {
     // parser); a generic arrow must NOT be misread as a JSX element opening a body.
     try expectJsxTextLang("const f = <T,>() => 1;", .tsx, &.{});
     try expectJsxTextLang("<div>hi</div>", .tsx, &.{});
+}
+
+test "JSX text: nested-brace, parent-body and whitespace-only paths (#61)" {
+    // Object literal inside an expression container: the inner `}` must NOT close
+    // the container early (exercises the frame brace-count low bits) → no text.
+    try expectJsxText("<div>{ {a:1} }</div>", &.{});
+    // Trailing text in the PARENT body after a child element closes.
+    try expectJsxText("<a><b>x</b>y</a>", &.{ .{ 6, 7 }, .{ 11, 12 } });
+    // Whitespace-only text is still one jsx_text token.
+    try expectJsxText("<div>   </div>", &.{.{ 5, 8 }});
+}
+
+test "JSX text: a line terminator in text carries to the next token (#61)" {
+    var result = try Lexer.tokenizeWithLanguage(testing.allocator, "<div>l1\nl2</div>", .jsx);
+    defer result.deinit(testing.allocator);
+    const tags = result.tokens.items(.tag);
+    const nl = result.tokens.items(.has_newline_before);
+    var i: usize = 0;
+    while (tags[i] != .jsx_text) : (i += 1) {}
+    try testing.expect(!nl[i]); // the text token itself: no newline before it
+    try testing.expect(nl[i + 1]); // the following `<` sees the in-text newline
+}
+
+test "JSX text: deep nesting spills the inline frame stack (#61)" {
+    // >64 BODY frames forces the heap-grow path (jsx_frame_heap) — the only
+    // allocating path in the change; the inner text must still be one token.
+    const alloc = testing.allocator;
+    var src: std.ArrayListUnmanaged(u8) = .{ .items = &.{}, .capacity = 0 };
+    defer src.deinit(alloc);
+    var i: usize = 0;
+    while (i < 70) : (i += 1) try src.appendSlice(alloc, "<a>");
+    try src.append(alloc, 'x');
+    i = 0;
+    while (i < 70) : (i += 1) try src.appendSlice(alloc, "</a>");
+
+    var result = try Lexer.tokenizeWithLanguage(alloc, src.items, .jsx);
+    defer result.deinit(alloc);
+    const tags = result.tokens.items(.tag);
+    var k: usize = 0;
+    for (0..result.tokens.len) |idx| {
+        if (tags[idx] == .jsx_text) k += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), k);
 }
