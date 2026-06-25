@@ -631,6 +631,99 @@ fn findSymbol(result: *const semantic.SemanticResult, name: []const u8) ?SymbolI
     return null;
 }
 
+/// Find a symbol by name AND binding kind (disambiguates same-named bindings,
+/// e.g. an outer import vs. an inner parameter of the same name).
+fn findSymbolByKind(result: *const semantic.SemanticResult, name: []const u8, binding: BindingKind) ?SymbolId {
+    var i: u32 = 0;
+    while (i < result.symbols.count()) : (i += 1) {
+        const id = SymbolId.fromInt(i);
+        if (result.symbols.getBindingKind(id) == binding and
+            std.mem.eql(u8, result.symbols.getName(id), name)) return id;
+    }
+    return null;
+}
+
+test "parameter type annotation resolves in the enclosing scope, not the param scope (#53)" {
+    // A parameter is not in scope for its OWN type annotation, so `foo` in
+    // `foo: foo.Foo` must resolve to the outer namespace import (a type_read),
+    // leaving the same-named parameter unused. The first six cases are genuine
+    // regression guards (pre-fix the parameter captured the reference); the arrow
+    // and function-type paths already resolved correctly and are pinned here as
+    // invariants so a future change can't regress them.
+    const cases = [_][]const u8{
+        "import * as foo from 'foo';\nclass A { constructor(foo: foo.Foo) {} }", // class constructor
+        "import * as foo from 'foo';\nfunction g(foo: foo.Foo) {}", // function declaration
+        "import * as foo from 'foo';\nclass A { m(foo: foo.Foo) {} }", // method
+        "import * as foo from 'foo';\nfunction g(...foo: foo.Foo[]) {}", // rest parameter
+        "import * as foo from 'foo';\nclass A { set p(foo: foo.Foo) {} }", // setter
+        "import * as foo from 'foo';\nclass A { constructor(private foo: foo.Foo) {} }", // parameter property
+        "import * as foo from 'foo';\nconst f = (foo: foo.Foo) => {};", // arrow (already correct — invariant)
+        "import * as foo from 'foo';\nlet h: (foo: foo.Foo) => void;", // function type (already correct — invariant)
+    };
+    for (cases) |src| {
+        var r = try analyzeTsModuleSource(src);
+        defer r.deinit(testing.allocator);
+        const import_sym = findSymbolByKind(&r, "foo", .import_binding) orelse return error.ImportNotFound;
+        // Every one of these contexts emits a `foo` parameter symbol, so assert its
+        // absence of references unconditionally (a future path that stops emitting it
+        // should fail loudly here, not silently skip the check).
+        const param_sym = findSymbolByKind(&r, "foo", .parameter) orelse return error.ParamNotFound;
+        // The type reference in `foo.Foo` resolves to the import...
+        try testing.expect(r.symbols.getRefRange(import_sym).len() >= 1);
+        // ...and the same-named parameter is left with zero references.
+        try testing.expectEqual(@as(u32, 0), r.symbols.getRefRange(param_sym).len());
+    }
+}
+
+test "param annotation resolves outward while the body resolves to the param (#53)" {
+    // Strongest single-source guard: the SAME name `foo` must resolve to the import
+    // in the annotation `foo.Foo` but to the parameter in the body `foo;`.
+    var r = try analyzeTsModuleSource(
+        \\import * as foo from 'foo';
+        \\function f(foo: foo.Foo) { foo; }
+    );
+    defer r.deinit(testing.allocator);
+    const import_sym = findSymbolByKind(&r, "foo", .import_binding) orelse return error.ImportNotFound;
+    const param_sym = findSymbolByKind(&r, "foo", .parameter) orelse return error.ParamNotFound;
+    try testing.expectEqual(@as(u32, 1), r.symbols.getRefRange(import_sym).len()); // the `foo.Foo` annotation
+    try testing.expectEqual(@as(u32, 1), r.symbols.getRefRange(param_sym).len()); // the body `foo;`
+}
+
+test "parameter default value still resolves in the parameter scope (#53)" {
+    // The declare moves after the TYPE annotation but stays before the DEFAULT, so
+    // a default initializer still sees the (now-declared) parameters.
+    {
+        // Sibling reference: `b = a` reads the parameter `a`.
+        var r = try analyzeTsModuleSource("function g(a: number, b = a) { b; }");
+        defer r.deinit(testing.allocator);
+        const param_a = findSymbolByKind(&r, "a", .parameter) orelse return error.ParamNotFound;
+        try testing.expect(r.symbols.getRefRange(param_a).len() >= 1);
+    }
+    {
+        // Self reference: `x = x` reads the parameter `x` (TDZ at runtime, but it
+        // resolves to the param, not an outer binding).
+        var r = try analyzeTsModuleSource("let x = 0;\nfunction g(x = x) { return x; }");
+        defer r.deinit(testing.allocator);
+        const param_x = findSymbolByKind(&r, "x", .parameter) orelse return error.ParamNotFound;
+        // 2 reads: the default `x` and the `return x`.
+        try testing.expectEqual(@as(u32, 2), r.symbols.getRefRange(param_x).len());
+    }
+    {
+        // The needle this fix threads: the SAME name `foo` appears in the annotation
+        // (resolves to the import) AND the default (resolves to the param), proving
+        // the declare sits exactly between them.
+        var r = try analyzeTsModuleSource(
+            \\import * as foo from 'foo';
+            \\function g(foo: foo.Foo = foo.bar) {}
+        );
+        defer r.deinit(testing.allocator);
+        const import_sym = findSymbolByKind(&r, "foo", .import_binding) orelse return error.ImportNotFound;
+        const param_sym = findSymbolByKind(&r, "foo", .parameter) orelse return error.ParamNotFound;
+        try testing.expectEqual(@as(u32, 1), r.symbols.getRefRange(import_sym).len()); // annotation `foo.Foo`
+        try testing.expectEqual(@as(u32, 1), r.symbols.getRefRange(param_sym).len()); // default `foo.bar`
+    }
+}
+
 /// Count scopes of a given kind in the tree.
 fn countScopesOfKind(result: *const semantic.SemanticResult, want: ScopeKind) u32 {
     var n: u32 = 0;
