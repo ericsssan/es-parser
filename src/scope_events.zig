@@ -86,6 +86,10 @@ pub const EventKind = enum(u8) {
     /// A labeled statement begins.  node: labeled_stmt.  aux: 0=non-loop, 1=loop.
     label_open,
     label_close,
+    /// A potentially-throwing expression (call / member access / new / yield)
+    /// evaluated directly in a `try` block body. Makes the `catch` clause
+    /// reachable from the try entry. node: the expression node. aux unused.
+    throwable,
     /// `if (cond) consequent [else alternate]` — CodePath-specific events.
     /// node: if_stmt or if_else_stmt.  aux: 0=no-alternate, 1=has-alternate.
     if_open,
