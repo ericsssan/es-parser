@@ -1631,3 +1631,18 @@ test "break to a labeled block makes the following statement reachable (#57)" {
     // No break, body always returns → the following statement is unreachable.
     try testing.expectEqual(@as(u8, 0), try cfgSegReachable("function f(){ A: { return; } baz(); }", "baz"));
 }
+
+test "let with binding on next line declares a let binding, not a global (#59)" {
+    // `let\n x = 1` must declare `x` as a `let` (previously ASI made it `let;` plus
+    // an assignment to an undeclared global `x`).
+    var r = try analyzeSource("let\n    x = 1;\n    x;");
+    defer r.deinit(testing.allocator);
+    try expectSymbol(&r, "x", .let, .global);
+    const x = findSymbol(&r, "x") orelse return error.SymbolNotFound;
+    // 2 refs: the declarator init write and the `x;` read — both resolve to the binding.
+    try testing.expectEqual(@as(u32, 2), r.symbols.getRefRange(x).len());
+    // The array-destructuring form (the new `[`-branch) binds its names too.
+    var r2 = try analyzeSource("let\n    [a] = b;\n    a;");
+    defer r2.deinit(testing.allocator);
+    try expectSymbol(&r2, "a", .let, .global);
+}
