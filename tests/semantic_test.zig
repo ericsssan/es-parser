@@ -1639,5 +1639,10 @@ test "let with binding on next line declares a let binding, not a global (#59)" 
     defer r.deinit(testing.allocator);
     try expectSymbol(&r, "x", .let, .global);
     const x = findSymbol(&r, "x") orelse return error.SymbolNotFound;
-    try testing.expect(r.symbols.getRefRange(x).len() >= 1); // the `x;` usage resolves to it
+    // 2 refs: the declarator init write and the `x;` read — both resolve to the binding.
+    try testing.expectEqual(@as(u32, 2), r.symbols.getRefRange(x).len());
+    // The array-destructuring form (the new `[`-branch) binds its names too.
+    var r2 = try analyzeSource("let\n    [a] = b;\n    a;");
+    defer r2.deinit(testing.allocator);
+    try expectSymbol(&r2, "a", .let, .global);
 }

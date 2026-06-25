@@ -2630,7 +2630,12 @@ pub const Parser = struct {
                     if (next != .l_bracket) {
                         const could_be_binding = (next == .identifier or next == .l_brace or next.isKeyword());
                         if (!could_be_binding or self.hasNewLineBetween(self.tokIdx(), @intCast(self.tok_i + 1))) {
-                            return self.parseStatement();
+                            // `let` here is an identifier expression, not a declaration: a
+                            // LexicalDeclaration is forbidden in single-statement context, so
+                            // ASI fires after `let` (`let\n x` → body `let`, then `x` follows).
+                            // Parse the expression directly — NOT via parseStatement, which now
+                            // treats `let\n <id>` as a declaration in statement-list context (#59).
+                            return self.parseExprOrLabeledStatement();
                         }
                     }
                 }
@@ -2717,7 +2722,12 @@ pub const Parser = struct {
                     if (next != .l_bracket) {
                         const could_be_binding = (next == .identifier or next == .l_brace or next.isKeyword());
                         if (!could_be_binding or self.hasNewLineBetween(self.tokIdx(), @intCast(self.tok_i + 1))) {
-                            return self.parseStatement();
+                            // `let` here is an identifier expression, not a declaration: a
+                            // LexicalDeclaration is forbidden in single-statement context, so
+                            // ASI fires after `let` (`let\n x` → body `let`, then `x` follows).
+                            // Parse the expression directly — NOT via parseStatement, which now
+                            // treats `let\n <id>` as a declaration in statement-list context (#59).
+                            return self.parseExprOrLabeledStatement();
                         }
                     }
                 }
@@ -4123,7 +4133,21 @@ pub const Parser = struct {
         // We pass label_node (property_ident) — event_resolver reads label text from it.
         _ = try self.emitLabelOpen(is_loop_label, label_node);
 
-        const stmt = try self.parseStatement();
+        // `lbl: let\n x` — a LexicalDeclaration is not a valid LabelledItem, so ASI
+        // fires after `let` (the labeled body is just the `let` identifier
+        // expression). Parse it directly, not via parseStatement, which now treats
+        // `let\n <id>` as a declaration in statement-list context (#59).
+        const stmt = blk: {
+            if (!self.in_strict and self.peek() == .kw_let) {
+                const ln = self.peekAt(1);
+                if ((ln == .identifier or ln == .escaped_keyword or ln == .l_bracket) and
+                    self.hasNewLineBetween(self.tokIdx(), @intCast(self.tok_i + 1)))
+                {
+                    break :blk try self.parseExprOrLabeledStatement();
+                }
+            }
+            break :blk try self.parseStatement();
+        };
 
         const node = try self.addNode(.{
             .tag = .labeled_stmt,

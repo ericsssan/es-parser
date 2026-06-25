@@ -1070,3 +1070,23 @@ test "let followed by an operator is still an identifier expression (#59)" {
     try expectNoErrors(&tree);
     try testing.expect(firstNodeOfTag(&tree, .let_decl) == null);
 }
+
+test "let with newline binding stays an expression in single-statement contexts (#59)" {
+    // A LexicalDeclaration is forbidden as a single-statement body or labeled-item,
+    // so ASI fires after `let` there — `let\n x` is the `let` identifier expression,
+    // NOT a declaration (guards the statement-list fix from leaking into these
+    // delegated contexts).
+    const cases = [_][]const u8{
+        "if (a) let\n    x = 1",
+        "while (a) let\n    x = 1",
+        "for (;;) let\n    x = 1",
+        "lbl: let\n    x = 1",
+        "A: B: let\n    x = 1", // nested labels
+    };
+    for (cases) |src| {
+        var tree = try parseSource(src);
+        defer tree.deinit(testing.allocator);
+        try expectNoErrors(&tree);
+        try testing.expect(firstNodeOfTag(&tree, .let_decl) == null);
+    }
+}
