@@ -6393,8 +6393,17 @@ pub const Parser = struct {
                 }
                 // TS1214: strict reserved words cannot be used as import alias names in strict mode.
                 try self.checkStrictBinding(self.tokIdx());
+                const name_tok = self.tokIdx(); // the binding identifier `X` (before `=`)
                 _ = self.advance(); // eat name
                 _ = self.advance(); // eat '='
+                // Declare the local binding `X` so references resolve to it, mirroring
+                // the namespace (`import * as X`) and default-import paths (#64).
+                const local_node = try self.addNode(.{
+                    .tag = .identifier,
+                    .main_token = name_tok,
+                    .data = .{ .lhs = .none, .rhs = .none },
+                });
+                try self.emitDeclare(.import_binding, local_node);
                 // TS1202 (`import X = require("mod")` requires module: commonjs) is a
                 // semantic error keyed off the compiler's `module` setting, not a parse
                 // error — it depends on tsconfig that the parser doesn't see. Files
@@ -6429,11 +6438,18 @@ pub const Parser = struct {
                 // `require('...')` or qualified name `A.B.C`
                 const module_ref = try self.parseAssignmentExpression();
                 _ = self.eat(.semicolon);
-                return self.addNode(.{
+                const decl = try self.addNode(.{
                     .tag = .import_decl,
                     .main_token = import_tok,
                     .data = .{ .lhs = .none, .rhs = module_ref },
                 });
+                // Anchor the binding under the declaration. `import_decl` uses lhs as
+                // the import-equals discriminator (.none) and rhs as the module
+                // reference, so the binding has no data slot — link it via
+                // parent_fixups (child, parent) for parent-tree walks.
+                try self.parent_fixups.append(self.gpa, @intFromEnum(local_node));
+                try self.parent_fixups.append(self.gpa, @intFromEnum(decl));
+                return decl;
             }
             // Not an import alias — reset position
             self.tok_i = start_tok;
