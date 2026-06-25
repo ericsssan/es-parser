@@ -926,3 +926,71 @@ test "lang:js_ts angle-bracket type assertion parsed as TS (not JSX) (#32)" {
     defer tree.deinit(testing.allocator);
     try expectNoErrors(&tree);
 }
+
+// ── #62: parenthesized type as an arrow return type ───────────────────────
+
+fn hasNodeTag(tree: *const ast.Ast, tag: Node.Tag) bool {
+    const tags = tree.nodes.items(.tag);
+    var i: u32 = 0;
+    while (i < tree.nodes.len) : (i += 1) {
+        if (tags[i] == tag) return true;
+    }
+    return false;
+}
+
+test "arrow with a parenthesized return type parses, not an ErrorNode (#62)" {
+    // `(): (void) => {}` — the `: (` must read a parenthesized return TYPE, not a
+    // function type that swallows the arrow's own `=>`. Previously the whole arrow
+    // became an ErrorNode.
+    const cases = [_][]const u8{
+        "const f = (): (void) => {};",
+        "const f = (): (T | U) => x;",
+        "const f = (): (readonly string[]) => x;",
+        "const f = (x): (void) => {};",
+        "const o = { key: (): (void) => { x(); } };",
+        "const f = (): (() => void) => g;", // parenthesized function-type return
+    };
+    for (cases) |src| {
+        var tree = try parseTs(src);
+        defer tree.deinit(testing.allocator);
+        try expectNoErrors(&tree);
+        try testing.expect(hasNodeTag(&tree, .arrow_fn));
+        try testing.expect(!hasNodeTag(&tree, .error_node));
+    }
+    // js_ts mode parses it the same way.
+    var jt = try parseJsTs("const f = (): (void) => {};");
+    defer jt.deinit(testing.allocator);
+    try expectNoErrors(&jt);
+    try testing.expect(hasNodeTag(&jt, .arrow_fn));
+}
+
+test "parenthesized return type is a TSParenthesizedType; function types still parse (#62)" {
+    {
+        var tree = try parseTs("const f = (): (void) => {};");
+        defer tree.deinit(testing.allocator);
+        try testing.expect(hasNodeTag(&tree, .ts_parenthesized_type));
+    }
+    // Genuine function types must still be recognized (the heuristic that decides
+    // `( … ) =>` is a function type vs a parenthesized type must not regress).
+    const fn_types = [_][]const u8{
+        "type A = (a) => void;",
+        "type B = (a, b) => void;",
+        "type C = ({x}) => void;",
+        "type D = (...r: any[]) => void;",
+        "type E = (a?) => void;",
+        "type F = (a = 1) => void;",
+        "function A(): (public B) => C {}", // parameter-property modifier
+        "type G = ({}?: { x: string }) => void;", // optional destructuring param
+    };
+    for (fn_types) |src| {
+        var tree = try parseTs(src);
+        defer tree.deinit(testing.allocator);
+        try expectNoErrors(&tree);
+        try testing.expect(hasNodeTag(&tree, .ts_function_type));
+    }
+    // A bare parenthesized type stays a parenthesized type.
+    var pt = try parseTs("type T = (void);");
+    defer pt.deinit(testing.allocator);
+    try expectNoErrors(&pt);
+    try testing.expect(hasNodeTag(&pt, .ts_parenthesized_type));
+}

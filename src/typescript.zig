@@ -848,30 +848,67 @@ fn looksLikeFunctionTypeParams(p: *Parser) bool {
         }
     }
 
-    // Scan forward to find closing `)` and check for `=>`
+    // No annotation/optional/comma matched above, so the only remaining function-
+    // type forms are a single bare parameter: `(id) =>`, `(id, …) =>`, `({pat}) =>`,
+    // `([pat]) =>`, or `(id = default) =>`. Recognise them by skipping exactly ONE
+    // parameter binding and requiring a parameter-separator next (`:` `,` `=`) or a
+    // `)` immediately followed by `=>`.
+    //
+    // Crucially, a reserved keyword that forms a bare type on its own
+    // (`void`/`null`/`true`/`false`/`this`), a leading `(`, or a type operator after
+    // the first identifier (`T | U`, `T & U`, `T[]`) means the parens are a
+    // parenthesized TYPE — so a trailing `=>` belongs to an *enclosing* arrow, not a
+    // function type here. (Matches TS's isUnambiguouslyStartOfFunctionType: the old
+    // "scan to `)` then check `=>`" heuristic mis-read `(void) =>` etc. as fn types,
+    // discarding the enclosing arrow — see #62.)
     p.restore(saved);
     _ = p.advance(); // skip `(`
-    var depth: u32 = 1;
-    var limit: u32 = 0;
-    while (depth > 0 and !p.isAtEnd() and limit < 200) : (limit += 1) {
-        switch (p.peek()) {
-            .l_paren => {
-                depth += 1;
-                _ = p.advance();
-            },
-            .r_paren => {
-                depth -= 1;
-                if (depth == 0) {
-                    _ = p.advance(); // consume `)`
-                    return p.peek() == .arrow;
+    // Skip a leading parameter-property modifier (public/private/protected/readonly)
+    // when another binding token follows — `(public B) =>` is a function type
+    // (mirrors parseFunctionTypeParam). A modifier not followed by a binding stays
+    // the parameter name (`(public) =>`).
+    if (p.peekAt(1) == .identifier or p.peekAt(1) == .kw_this or
+        p.peekAt(1) == .l_brace or p.peekAt(1) == .l_bracket)
+    {
+        const is_modifier = p.peek() == .kw_readonly or (p.peek() == .identifier and blk: {
+            const txt = p.tokenText(p.tokIdx());
+            break :blk std.mem.eql(u8, txt, "public") or std.mem.eql(u8, txt, "private") or
+                std.mem.eql(u8, txt, "protected") or std.mem.eql(u8, txt, "readonly");
+        });
+        if (is_modifier) _ = p.advance();
+    }
+    switch (p.peek()) {
+        // Destructuring-pattern parameter — skip the balanced `{…}`/`[…]`.
+        .l_brace, .l_bracket => {
+            _ = p.advance();
+            var depth: u32 = 1;
+            var limit: u32 = 0;
+            while (depth > 0 and !p.isAtEnd() and limit < 200) : (limit += 1) {
+                switch (p.peek()) {
+                    .l_brace, .l_bracket => depth += 1,
+                    .r_brace, .r_bracket => depth -= 1,
+                    else => {},
                 }
                 _ = p.advance();
-            },
-            else => _ = p.advance(),
-        }
+            }
+            if (depth != 0) return false;
+        },
+        .identifier => _ = p.advance(),
+        // A keyword may name a parameter, except the reserved keywords that are a
+        // complete bare type by themselves.
+        else => |first| {
+            if (!first.isKeyword() or first == .kw_void or first == .kw_null or
+                first == .kw_true or first == .kw_false or first == .kw_this)
+                return false;
+            _ = p.advance();
+        },
     }
-
-    return false;
+    // After the first parameter binding: a separator (`:` `?` `=` `,`) or `) =>`.
+    return switch (p.peek()) {
+        .colon, .question, .comma, .equal => true,
+        .r_paren => p.peekAt(1) == .arrow,
+        else => false,
+    };
 }
 
 /// Parse a simple parenthesized type: `(Type)`.
