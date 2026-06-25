@@ -1021,3 +1021,25 @@ test "arrow's actual return_type node is the parenthesized type (#62)" {
     // The annotation's inner node (data.lhs) is the parenthesized type.
     try expectNodeTag(&tree, datas[ad.return_type.toInt()].lhs, .ts_parenthesized_type);
 }
+
+test "import-equals binding identifier is created and anchored to the declaration (#64)" {
+    const src = "import mod = require(\"./m\");";
+    var lr = try Lexer.tokenizeWithLanguage(testing.allocator, src, .ts);
+    defer lr.deinit(testing.allocator);
+    var tree = try Parser.parseWithOptions(testing.allocator, src, lr.tokens.slice(), .{ .language = .ts, .is_module = true });
+    defer tree.deinit(testing.allocator);
+    try expectNoErrors(&tree);
+    const decl = firstNodeOfTag(&tree, .import_decl) orelse return error.NoDecl;
+    const parents = try es_parser.parent_builder.buildParentsOnly(&tree, testing.allocator);
+    defer testing.allocator.free(parents);
+    // The binding identifier `mod` is created and parented directly to the
+    // import_decl (the `require(...)` call's own `require` identifier is parented
+    // to the call, so the only identifier child of the declaration is the binding).
+    const tags = tree.nodes.items(.tag);
+    var binding_children: u32 = 0;
+    var i: u32 = 0;
+    while (i < tree.nodes.len) : (i += 1) {
+        if (tags[i] == .identifier and parents[i] == @intFromEnum(decl)) binding_children += 1;
+    }
+    try testing.expectEqual(@as(u32, 1), binding_children);
+}

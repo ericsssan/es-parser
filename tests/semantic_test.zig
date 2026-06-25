@@ -1539,3 +1539,29 @@ test "conditional with a paren-expression alternate leaks no phantom scope (#62)
     }
     try testing.expectEqual(@as(u32, 1), b_params);
 }
+
+test "import-equals declares an import_binding that references resolve to (#64)" {
+    // `import X = require(...)` and `import X = Y.Z` must declare the local `X`,
+    // like `import * as X` and default imports — previously no symbol was created.
+    {
+        var r = try analyzeTsModuleSource("import mod = require(\"./m\");\nmod;");
+        defer r.deinit(testing.allocator);
+        const sym = findSymbolByKind(&r, "mod", .import_binding) orelse return error.ImportNotFound;
+        try testing.expect(r.symbols.getRefRange(sym).len() >= 1); // the `mod;` usage
+    }
+    {
+        var r = try analyzeTsModuleSource("import X = Y.Z;\nX;");
+        defer r.deinit(testing.allocator);
+        const sym = findSymbolByKind(&r, "X", .import_binding) orelse return error.ImportNotFound;
+        try testing.expect(r.symbols.getRefRange(sym).len() >= 1);
+    }
+}
+
+test "import-equals binding does not collide with a same-named reference (#64)" {
+    // `import C = N.C; class D extends C {}` — the `extends C` resolves to the
+    // import binding (the collision case from the issue), not a name-only fallback.
+    var r = try analyzeTsModuleSource("import C = N.C;\nclass D extends C {}");
+    defer r.deinit(testing.allocator);
+    const imp = findSymbolByKind(&r, "C", .import_binding) orelse return error.ImportNotFound;
+    try testing.expect(r.symbols.getRefRange(imp).len() >= 1); // `extends C`
+}
