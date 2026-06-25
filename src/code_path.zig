@@ -347,6 +347,15 @@ const LoopContext = struct {
     prev_break_target_is_switch: bool = false,
 };
 
+/// Break target for a labeled NON-loop statement (`A: { … break A; … }`). Loops
+/// and switches have their own break handling; this covers the remaining case so
+/// `break <label>` reaches the segment after the labeled statement (#57).
+const LabelBreakContext = struct {
+    upper: ?*LabelBreakContext,
+    label: []const u8,
+    break_fork: ForkContext,
+};
+
 // ── CodePathBuilder ──────────────────────────────────────────────
 
 pub const CodePathBuilder = struct {
@@ -407,7 +416,14 @@ pub const CodePathBuilder = struct {
     switch_context: ?*SwitchContext,
     try_context: ?*TryContext,
     loop_context: ?*LoopContext,
+    label_break_context: ?*LabelBreakContext,
     break_target_is_switch: bool,
+    /// Saved `try_context` per code-path nesting level. A nested function inside a
+    /// try body is its own code path with no enclosing try, so `enterCodePath`
+    /// clears `try_context` (pushing the old value here) and `exitCodePath` restores
+    /// it — keeping throwable expressions in nested functions from making the outer
+    /// catch reachable (#57). Arena-backed; freed with the arena.
+    cp_saved_try: std.ArrayList(?*TryContext),
 
     // ── ChoiceContext slab ───────────────────────────────────────
     // Pre-allocated pool of ChoiceContext structs — eliminates per-push
@@ -464,7 +480,9 @@ pub const CodePathBuilder = struct {
             .switch_context = null,
             .try_context = null,
             .loop_context = null,
+            .label_break_context = null,
             .break_target_is_switch = false,
+            .cp_saved_try = .empty,
             .choice_slab = &.{},
             .choice_slab_top = 0,
             .seg_id_pool = undefined,
@@ -900,6 +918,11 @@ pub const CodePathBuilder = struct {
         const upper = self.current_codepath;
         self.current_codepath = cp_id;
 
+        // A new code path (function/arrow/static-block/field-init) does not inherit
+        // the enclosing try — its throwable expressions can't reach the outer catch.
+        try self.cp_saved_try.append(self.allocator, self.try_context);
+        self.try_context = null;
+
         // Create initial segment
         const initial_seg = try self.newRootSegment();
 
@@ -1024,6 +1047,8 @@ pub const CodePathBuilder = struct {
         if (self.fork_context.upper) |upper_fc| {
             self.fork_context = upper_fc;
         }
+        // Restore the enclosing try context saved in enterCodePath.
+        if (self.cp_saved_try.pop()) |saved| self.try_context = saved;
     }
 
     // ── Segment event emission ───────────────────────────────
@@ -1690,18 +1715,55 @@ pub const CodePathBuilder = struct {
     /// Labeled `break lbl` — walks the LoopContext chain and adds to the
     /// matching loop's break_fork.  Falls back to innermost if not found.
     pub fn makeBreakLabeled(self: *CodePathBuilder, label: []const u8, node: NodeIndex) !void {
+        // A label is on exactly one statement: a loop (loop_context) or a non-loop
+        // statement (label_break_context). Route the break to whichever holds it.
         var lc = self.loop_context;
         while (lc) |ctx| : (lc = ctx.upper) {
             if (ctx.label.len > 0 and std.mem.eql(u8, ctx.label, label)) {
                 try ctx.break_fork.add(self.fork_context.head(), self);
-                break;
+                try self.makeUnreachable(node);
+                return;
             }
-        } else if (self.loop_context) |lc_inner| {
+        }
+        var lbc = self.label_break_context;
+        while (lbc) |ctx| : (lbc = ctx.upper) {
+            if (std.mem.eql(u8, ctx.label, label)) {
+                try ctx.break_fork.add(self.fork_context.head(), self);
+                try self.makeUnreachable(node);
+                return;
+            }
+        }
+        // Fallback (no matching label found — e.g. error-recovered input): innermost loop.
+        if (self.loop_context) |lc_inner| {
             if (!self.break_target_is_switch) {
                 try lc_inner.break_fork.add(self.fork_context.head(), self);
             }
         }
         try self.makeUnreachable(node);
+    }
+
+    pub fn pushLabelBreakContext(self: *CodePathBuilder, label: []const u8) !void {
+        const ctx = try self.allocator.create(LabelBreakContext);
+        ctx.* = .{
+            .upper = self.label_break_context,
+            .label = label,
+            .break_fork = newEmptyForkContext(self.allocator, self.fork_context, false),
+        };
+        self.label_break_context = ctx;
+    }
+
+    pub fn popLabelBreakContext(self: *CodePathBuilder, node: NodeIndex) !void {
+        const ctx = self.label_break_context orelse return;
+        self.label_break_context = ctx.upper;
+        // If anything broke to this label, the segment after the labeled statement is
+        // reachable from those break points (plus the body's normal exit). Merge them.
+        if (!ctx.break_fork.empty()) {
+            try ctx.break_fork.add(self.fork_context.head(), self);
+            try self.leaveFromCurrentSegment(node, .post);
+            const post_segs = try ctx.break_fork.makeNext(0, -1, self);
+            try self.fork_context.replaceHead(post_segs, self);
+            try self.forwardCurrentToHead(node, .post);
+        }
     }
 
     pub fn makeBreak(self: *CodePathBuilder, node: NodeIndex) !void {
@@ -1725,6 +1787,19 @@ pub const CodePathBuilder = struct {
             }
         }
         try self.makeUnreachable(node);
+    }
+
+    /// A potentially-throwing expression (call / member access / new / yield) was
+    /// evaluated directly in the current try body. Records that the catch clause is
+    /// reachable from the try entry — only the first one matters (mirrors ESLint's
+    /// makeFirstThrowablePathInTryBlock). The try_context is null inside nested
+    /// functions (saved/restored across code paths), so their throwables are ignored.
+    pub fn makeFirstThrowablePathInTryBlock(self: *CodePathBuilder, node: NodeIndex) !void {
+        _ = node;
+        const ctx = self.try_context orelse return;
+        if (ctx.position != .try_body or ctx.first_throwable_called) return;
+        ctx.first_throwable_called = true;
+        try ctx.thrown_fork.add(self.fork_context.head(), self);
     }
 
     pub fn makeThrow(self: *CodePathBuilder, node: NodeIndex) !void {

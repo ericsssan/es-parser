@@ -415,6 +415,11 @@ pub const Parser = struct {
     /// True when parsing inside a TypeScript namespace/module body (even non-ambient).
     /// Exports are valid in namespace bodies regardless of in_block.
     in_ts_namespace: bool = false,
+    /// True when parsing statements directly inside a `try` block body. Used to emit
+    /// `throwable` events for call/member/new/yield expressions so the CFG can make
+    /// the `catch` clause reachable. Stays set inside nested functions within the try
+    /// (the CFG scopes try_context per code path, so those events are ignored) (#57).
+    in_try_body: bool = false,
     /// True when parsing statements directly inside a switch case/default clause
     /// (not inside a nested block within the clause). Used to detect TS1547/TS1548.
     in_case_clause: bool = false,
@@ -975,7 +980,31 @@ pub const Parser = struct {
         self.node_data_ptr[result]       = node.data;
         self.nodes.len += 1;
         self.node_end_toks[result] = if (self.tok_i > 0) @intCast(self.tok_i - 1) else 0;
+        // Emit a `throwable` event for call/member/new/yield expressions evaluated in
+        // a try body, so the CFG makes the catch reachable (#57). `in_try_body` is
+        // almost always false — a single predictable bool read on the hot path.
+        if (self.in_try_body) {
+            @branchHint(.unlikely);
+            try self.maybeEmitThrowable(node.tag, NodeIndex.fromInt(result));
+        }
         return NodeIndex.fromInt(result);
+    }
+
+    /// Emit a `throwable` event if `tag` is a potentially-throwing expression
+    /// (CallExpression / MemberExpression / NewExpression / YieldExpression, and
+    /// their optional-chaining variants). Mirrors ESLint's makeFirstThrowablePath
+    /// triggers. Only called when `in_try_body` and event emission is on.
+    inline fn maybeEmitThrowable(self: *Parser, tag: Node.Tag, node: NodeIndex) !void {
+        if (!self.emit_scope_events) return;
+        switch (tag) {
+            .call_expr, .optional_call_expr, .new_expr,
+            .member_expr, .optional_member_expr,
+            .computed_member_expr, .optional_computed_member_expr,
+            .yield_expr, .yield_delegate => {
+                try self.evPush(.{ .kind = .throwable, .aux = 0, .node = @intFromEnum(node) });
+            },
+            else => {},
+        }
     }
 
     // ── Event cursor helpers ───────────────────────────────────────
@@ -1568,11 +1597,11 @@ pub const Parser = struct {
         return idx;
     }
 
-    pub inline fn emitLabelClose(self: *Parser, node: NodeIndex) !void {
+    pub inline fn emitLabelClose(self: *Parser, is_loop: bool, node: NodeIndex) !void {
         if (!self.emit_scope_events) return;
         try self.evPush(.{
             .kind = .label_close,
-            .aux = 0,
+            .aux = if (is_loop) 1 else 0,
             .node = @intFromEnum(node),
         });
     }
@@ -4096,7 +4125,7 @@ pub const Parser = struct {
                 .rhs = label_node,
             },
         });
-        try self.emitLabelClose(node);
+        try self.emitLabelClose(is_loop_label, node);
         return node;
     }
 
@@ -4108,7 +4137,10 @@ pub const Parser = struct {
         // so we pre-count: a finalizer flag patched in after parsing.
         const try_ev = try self.emitTryOpen(false, .none);
         try self.emitBranchOpen(.none); // keep branch compatibility for node_reachable
+        const prev_in_try_body = self.in_try_body;
+        self.in_try_body = true;
         const block = try self.parseBlockStatement();
+        self.in_try_body = prev_in_try_body;
         try self.emitTryBodyEnd(.none);
 
         var catch_node: NodeIndex = .none;

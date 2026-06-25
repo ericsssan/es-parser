@@ -792,10 +792,18 @@ fn resolveFullImpl(
             if (e.aux == 1) { // loop label — extract text for upcoming loop_open
                 // Defensive: out-of-range node on error-recovered input → no label.
                 pending_label = if (e.node >= ast.nodes.len) "" else ast.nodeName(@enumFromInt(e.node));
+            } else if (do_cfg) { // non-loop label — break target for `break <label>`
+                const lbl = if (e.node >= ast.nodes.len) "" else ast.nodeName(@enumFromInt(e.node));
+                try cpb.pushLabelBreakContext(lbl);
             }
         },
         .label_close => {
             pending_label = ""; // consumed or no loop found — clear either way
+            if (e.aux == 0 and do_cfg) try cpb.popLabelBreakContext(@enumFromInt(e.node));
+        },
+        .throwable => {
+            const n: NodeIndex = @enumFromInt(e.node);
+            if (do_cfg) try cpb.makeFirstThrowablePathInTryBlock(n);
         },
         .nop => {},
         }

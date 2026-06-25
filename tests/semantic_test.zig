@@ -1565,3 +1565,58 @@ test "import-equals binding does not collide with a same-named reference (#64)" 
     const imp = findSymbolByKind(&r, "C", .import_binding) orelse return error.ImportNotFound;
     try testing.expect(r.symbols.getRefRange(imp).len() >= 1); // `extends C`
 }
+
+/// Reachability (1/0) of the segment containing the first reference named `name`,
+/// read from the serialized CFG `seg_reachable` table the JS runner consumes.
+/// 99 = not found / no CFG. Used to pin `no-unreachable` behaviour (#57).
+fn cfgSegReachable(src: []const u8, name: []const u8) !u8 {
+    const allocator = testing.allocator;
+    var _lr = try Lexer.tokenizeWithOptions(allocator, src, .js, false);
+    defer _lr.deinit(allocator);
+    var tree = try Parser.parseWithOptions(allocator, src, _lr.tokens.slice(), .{ .emit_events = true });
+    defer tree.deinit(allocator);
+    var za = semantic.ZeroingAllocator.init(allocator);
+    const za_alloc = za.allocator();
+    var r = try semantic.SemanticAnalyzer.analyzeWithOptions(za_alloc, &tree, .{ .need_cfg = true });
+    defer r.deinit(za_alloc);
+    const cpr = r.code_path_result orelse return 99;
+    var ri: u32 = 0;
+    while (ri < r.references.count()) : (ri += 1) {
+        const node = r.references.getNode(ReferenceId.fromInt(ri));
+        if (std.mem.eql(u8, tree.nodeName(node), name)) {
+            const seg = r.references.list.items(.seg_id)[ri];
+            if (seg < cpr.seg_reachable.len) return cpr.seg_reachable[seg];
+        }
+    }
+    return 99;
+}
+
+test "catch block is reachable when the try body has a throwable expression (#57)" {
+    // The try body can throw before its `return`, so the catch is reachable. The
+    // throwable expression is a call / yield / member write respectively.
+    try testing.expectEqual(@as(u8, 1), try cfgSegReachable(
+        "function f(){ try { bar(); return; } catch (err) { return err; } }", "err"));
+    try testing.expectEqual(@as(u8, 1), try cfgSegReachable(
+        "function* f(){ try { yield 1; return; } catch (err) { return err; } }", "err"));
+    try testing.expectEqual(@as(u8, 1), try cfgSegReachable(
+        "function f(){ try { a.b.c = 1; return; } catch (err) { return err; } }", "err"));
+}
+
+test "catch stays unreachable when the try body cannot throw (#57)" {
+    // No throwable expression + the try body always exits → catch is dead (ESLint).
+    try testing.expectEqual(@as(u8, 0), try cfgSegReachable(
+        "function f(){ try { return; } catch (err) { return err; } }", "err"));
+    // A throwable inside a NESTED function does not make the outer catch reachable.
+    try testing.expectEqual(@as(u8, 0), try cfgSegReachable(
+        "function f(){ try { (function(){ q(); }); return; } catch (err) { return err; } }", "err"));
+}
+
+test "break to a labeled block makes the following statement reachable (#57)" {
+    // `break A` transfers to AFTER the labeled statement, so `foo()` is reachable.
+    try testing.expectEqual(@as(u8, 1), try cfgSegReachable("A: { break A; } foo();", "foo"));
+    try testing.expectEqual(@as(u8, 1), try cfgSegReachable("A: { if (x) break A; bar(); } foo();", "foo"));
+    // Labeled loops (the pre-existing path) still work.
+    try testing.expectEqual(@as(u8, 1), try cfgSegReachable("A: for(;;) { break A; } q();", "q"));
+    // No break, body always returns → the following statement is unreachable.
+    try testing.expectEqual(@as(u8, 0), try cfgSegReachable("function f(){ A: { return; } baz(); }", "baz"));
+}
