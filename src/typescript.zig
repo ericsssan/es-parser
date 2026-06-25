@@ -2135,7 +2135,9 @@ fn parseNamespaceOrModule(p: *Parser, node_tag: Node.Tag) Error!NodeIndex {
     p.in_ts_namespace = true;
     // If we're already in an ambient context (e.g. `declare namespace`), keep it set.
     // This allows `const x: T;` inside the body without initializer.
-    const body = try p.parseBlockStatement();
+    // Open a `ts_namespace` scope (a var-scope) so `var` declarations stop at the
+    // namespace boundary instead of hoisting to the enclosing function/global.
+    const body = try p.parseBlockStatementWithScope(.ts_namespace);
     p.is_module = prev_is_module;
     p.in_block = prev_in_block;
     p.in_function = prev_in_function;
