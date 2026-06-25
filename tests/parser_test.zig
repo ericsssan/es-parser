@@ -1043,3 +1043,30 @@ test "import-equals binding identifier is created and anchored to the declaratio
     }
     try testing.expectEqual(@as(u32, 1), binding_children);
 }
+
+test "let with a binding list on the next line is one declaration, not ASI (#59)" {
+    // There is no `[no LineTerminator here]` between `let` and its BindingList, so
+    // `let\n x` continues the LexicalDeclaration — it must NOT be `let;` + expression.
+    const cases = [_][]const u8{
+        "let\n    x = 1",
+        "let\n    x = {},\n    y = {}", // multiple declarators
+        "let\n    [a] = b", // array destructuring
+        "let\n    {a} = b", // object destructuring
+    };
+    for (cases) |src| {
+        var tree = try parseSource(src);
+        defer tree.deinit(testing.allocator);
+        try expectNoErrors(&tree);
+        try testing.expect(firstNodeOfTag(&tree, .let_decl) != null);
+        try testing.expect(firstNodeOfTag(&tree, .declarator) != null);
+    }
+}
+
+test "let followed by an operator is still an identifier expression (#59)" {
+    // `let\n instanceof x` is the expression `let instanceof x` (the operator
+    // continues the expression); ASI does not make a declaration here.
+    var tree = try parseSource("let\n    instanceof x");
+    defer tree.deinit(testing.allocator);
+    try expectNoErrors(&tree);
+    try testing.expect(firstNodeOfTag(&tree, .let_decl) == null);
+}

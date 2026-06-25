@@ -2344,6 +2344,14 @@ pub const Parser = struct {
                     if (!self.hasNewLineBetween(self.tokIdx(), @intCast(self.tok_i + 1))) {
                         return self.parseVariableDeclaration();
                     }
+                    // There is no `[no LineTerminator here]` restriction between `let`
+                    // and its BindingList: `let\n x`, `let\n [a] = …`, `let\n \u{…}`
+                    // continue the LexicalDeclaration, so ASI must NOT fire — the
+                    // ExpressionStatement lookahead forbids `let [`, and `let <id>` has no
+                    // valid expression parse either (#59).
+                    if (next == .identifier or next == .escaped_keyword or next == .l_bracket) {
+                        return self.parseVariableDeclaration();
+                    }
                     // With newline: `let\n{...} =` is still a destructuring declaration
                     // because `{...} = expr` has no valid parse as block + assignment.
                     if (next == .l_brace and self.looksLikeLetDestructuring()) {
