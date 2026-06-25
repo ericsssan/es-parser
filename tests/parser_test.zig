@@ -1036,10 +1036,10 @@ test "import-equals binding identifier is created and anchored to the declaratio
     // import_decl (the `require(...)` call's own `require` identifier is parented
     // to the call, so the only identifier child of the declaration is the binding).
     const tags = tree.nodes.items(.tag);
-    var binding: ?NodeIndex = null;
+    var binding_children: u32 = 0;
     var i: u32 = 0;
     while (i < tree.nodes.len) : (i += 1) {
-        if (tags[i] == .identifier and parents[i] == @intFromEnum(decl)) binding = NodeIndex.fromInt(i);
+        if (tags[i] == .identifier and parents[i] == @intFromEnum(decl)) binding_children += 1;
     }
-    try testing.expect(binding != null);
+    try testing.expectEqual(@as(u32, 1), binding_children);
 }
