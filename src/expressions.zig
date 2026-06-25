@@ -3589,6 +3589,19 @@ fn parseParenthesized(p: *Parser) Error!NodeIndex {
             // conditionals inside the body should NOT re-trigger our backtrack.
             const saved_cc = p.in_conditional_consequent;
             p.in_conditional_consequent = false;
+            // Open the arrow scope and declare the parameters into it (#60) — like
+            // every other arrow path — so the body parses inside the scope and refs
+            // to params resolve. Without this `(a, b): T => body` declared no params.
+            // Skip it when a conditional-consequent backtrack is still possible
+            // (saved_cc): emitting scope events here would orphan them on the
+            // backtrack below, so that rare ambiguous case keeps its prior behavior.
+            const emit_arrow_scope = !saved_cc;
+            var arrow_scope_ev: u32 = 0;
+            if (emit_arrow_scope) {
+                arrow_scope_ev = try p.emitScopeOpen(.arrow_function, .none);
+                try p.emitParamDeclaresFromRange(params_range);
+                try p.rehomeParamRefs(param_ev_mark, arrow_scope_ev);
+            }
             const body = if (p.peek() == .l_brace)
                 try parseBlockBodyWithStrictChecks(p, params_range, .none)
             else
@@ -3608,18 +3621,22 @@ fn parseParenthesized(p: *Parser) Error!NodeIndex {
                     try p.scratch.append(p.gpa, raw);
                 }
                 // Fall through to the bare-paren interpretation below.
+                // (emit_arrow_scope is false here, so no scope events were emitted.)
             } else {
+                if (emit_arrow_scope) try p.emitScopeClose(.none);
                 const extra = try p.addExtra(ast.ArrowData, .{
                     .params_start = params_range.start,
                     .params_end = params_range.end,
                     .body = body,
                     .return_type = ret_type_ann,
                 });
-                return p.addNode(.{
+                const arrow_node = try p.addNode(.{
                     .tag = .arrow_fn,
                     .main_token = open_paren,
                     .data = .{ .lhs = NodeIndex.fromInt(extra), .rhs = .none },
                 });
+                if (emit_arrow_scope) p.patchScopeOpenNode(arrow_scope_ev, arrow_node);
+                return arrow_node;
             }
         } else {
             // Type didn't parse or no `=>` — backtrack the type annotation only.
