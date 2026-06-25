@@ -839,6 +839,55 @@ test "typed-return concise arrow declares params in js_ts mode too (#60)" {
     defer r.deinit(testing.allocator);
     try expectSymbol(&r, "a", .parameter, .arrow_function);
     try expectSymbol(&r, "b", .parameter, .arrow_function);
+    // The body parses inside the new scope in js_ts mode too.
+    const a = findSymbolByKind(&r, "a", .parameter) orelse return error.ParamNotFound;
+    try testing.expectEqual(@as(u32, 1), r.symbols.getRefRange(a).len());
+}
+
+test "typed-return concise arrow declares unused params independent of use (#60)" {
+    // Declaration must happen even when the param is never referenced — guards
+    // against a regression that only created the symbol lazily on a reference.
+    var r = try analyzeTsModuleSource("const f = (a, b): number => 0;");
+    defer r.deinit(testing.allocator);
+    try expectSymbol(&r, "a", .parameter, .arrow_function);
+    try expectSymbol(&r, "b", .parameter, .arrow_function);
+    const a = findSymbolByKind(&r, "a", .parameter) orelse return error.ParamNotFound;
+    try testing.expectEqual(@as(u32, 0), r.symbols.getRefRange(a).len());
+}
+
+test "typed-return concise arrow declares rest and destructured params (#60)" {
+    {
+        // Rest param.
+        var r = try analyzeTsModuleSource("const f = (a, ...r): number => r.length;");
+        defer r.deinit(testing.allocator);
+        try expectSymbol(&r, "a", .parameter, .arrow_function);
+        const rest = findSymbolByKind(&r, "r", .parameter) orelse return error.ParamNotFound;
+        try testing.expectEqual(@as(u32, 1), r.symbols.getRefRange(rest).len());
+    }
+    {
+        // Destructured param.
+        var r = try analyzeTsModuleSource("const f = ({x}): number => x;");
+        defer r.deinit(testing.allocator);
+        const x = findSymbolByKind(&r, "x", .parameter) orelse return error.ParamNotFound;
+        try testing.expectEqual(ScopeKind.arrow_function, r.scopes.kind(r.symbols.getScope(x)));
+        try testing.expectEqual(@as(u32, 1), r.symbols.getRefRange(x).len());
+    }
+}
+
+test "typed-return concise arrow with a type-predicate return declares its param (#60)" {
+    // `a is string` is a TYPE position; the param is still declared, no crash.
+    var r = try analyzeTsModuleSource("const f = (a): a is string => true;");
+    defer r.deinit(testing.allocator);
+    try expectSymbol(&r, "a", .parameter, .arrow_function);
+}
+
+test "typed-return arrow in a conditional consequent still parses cleanly (#60)" {
+    // Regression pin for the `cond ? (a): T => body : alt` ambiguity the fix gates
+    // on (`!saved_cc`): this case intentionally keeps its prior no-scope behavior,
+    // but must still analyze without diagnostics.
+    var r = try analyzeTsModuleSource("const cc = c ? (a): number => a : 0;");
+    defer r.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 0), r.diagnostics.len);
 }
 
 /// Count scopes of a given kind in the tree.
