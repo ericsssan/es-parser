@@ -944,7 +944,9 @@ test "arrow with a parenthesized return type parses, not an ErrorNode (#62)" {
     // became an ErrorNode.
     const cases = [_][]const u8{
         "const f = (): (void) => {};",
-        "const f = (): (T | U) => x;",
+        "const f = (): (T | U) => x;", // union
+        "const f = (): (T & U) => x;", // intersection
+        "const f = (): (A extends B ? C : D) => x;", // conditional type
         "const f = (): (readonly string[]) => x;",
         "const f = (x): (void) => {};",
         "const o = { key: (): (void) => { x(); } };",
@@ -993,4 +995,29 @@ test "parenthesized return type is a TSParenthesizedType; function types still p
     defer pt.deinit(testing.allocator);
     try expectNoErrors(&pt);
     try testing.expect(hasNodeTag(&pt, .ts_parenthesized_type));
+}
+
+fn firstNodeOfTag(tree: *const ast.Ast, tag: Node.Tag) ?NodeIndex {
+    const tags = tree.nodes.items(.tag);
+    var i: u32 = 0;
+    while (i < tree.nodes.len) : (i += 1) {
+        if (tags[i] == tag) return NodeIndex.fromInt(i);
+    }
+    return null;
+}
+
+test "arrow's actual return_type node is the parenthesized type (#62)" {
+    // Pin the precise shape (not just `hasNodeTag` anywhere in the tree): the
+    // arrow's ArrowData.return_type is a TSTypeAnnotation wrapping the
+    // parenthesized type.
+    var tree = try parseTs("const f = (): (void) => {};");
+    defer tree.deinit(testing.allocator);
+    try expectNoErrors(&tree);
+    const datas = tree.nodes.items(.data);
+    const arrow = firstNodeOfTag(&tree, .arrow_fn) orelse return error.NoArrow;
+    const ad = tree.extraData(ast.ArrowData, @intFromEnum(datas[arrow.toInt()].lhs));
+    try testing.expect(ad.return_type != .none);
+    try expectNodeTag(&tree, ad.return_type, .ts_type_annotation);
+    // The annotation's inner node (data.lhs) is the parenthesized type.
+    try expectNodeTag(&tree, datas[ad.return_type.toInt()].lhs, .ts_parenthesized_type);
 }

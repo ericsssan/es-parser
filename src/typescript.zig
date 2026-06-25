@@ -893,12 +893,13 @@ fn looksLikeFunctionTypeParams(p: *Parser) bool {
             }
             if (depth != 0) return false;
         },
-        .identifier => _ = p.advance(),
+        .identifier, .kw_this => _ = p.advance(),
         // A keyword may name a parameter, except the reserved keywords that are a
-        // complete bare type by themselves.
+        // complete bare type by themselves. (`this` is accepted above — `(this) =>`
+        // is a function type in TS.)
         else => |first| {
             if (!first.isKeyword() or first == .kw_void or first == .kw_null or
-                first == .kw_true or first == .kw_false or first == .kw_this)
+                first == .kw_true or first == .kw_false)
                 return false;
             _ = p.advance();
         },

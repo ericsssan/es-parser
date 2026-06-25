@@ -1142,9 +1142,22 @@ pub const Parser = struct {
     }
 
     /// The current scope-event high-water mark. Paired with `rehomeParamRefs`
-    /// to bracket the events emitted while parsing an arrow's parameter list.
+    /// to bracket the events emitted while parsing an arrow's parameter list,
+    /// or with `resetEventsTo` to discard events emitted during a speculative
+    /// parse that is later backtracked.
     pub inline fn eventMark(self: *const Parser) u32 {
         return @intCast(self.ev_len);
+    }
+
+    /// Discard every scope event emitted at or after `mark` — the event-stream
+    /// analogue of restoring `tok_i`/`nodes`/`extra_data` after a speculative
+    /// parse fails. Stale `ref_event_idx` entries left pointing past the new
+    /// length are harmless: their consumers re-check `ev_idx < ev_len` and the
+    /// event's node before acting, and `emitReference` overwrites the slot when
+    /// the node index is reused after the backtrack.
+    pub inline fn resetEventsTo(self: *Parser, mark: u32) void {
+        if (!self.emit_scope_events) return;
+        if (mark < self.ev_len) self.ev_len = mark;
     }
 
     /// Re-home parameter default-initializer (and computed-key) references from
@@ -8790,6 +8803,20 @@ pub const Parser = struct {
         self.diagnostics.shrinkRetainingCapacity(s.diag_len);
         self.nodes.len = @intCast(s.nodes_len);
         self.extra_data.shrinkRetainingCapacity(s.extra_len);
+    }
+
+    /// Truncate the diagnostics list to `len`, freeing the message strings of the
+    /// discarded entries. emitDiagnostic allocPrints messages with `gpa` and the
+    /// tree's deinit frees them — but only those still in the list, so a plain
+    /// `shrinkRetainingCapacity` after a speculative parse would leak the dropped
+    /// messages. Use this when backtracking a speculation that may have diagnosed.
+    pub fn truncateDiagnostics(self: *Parser, len: usize) void {
+        var i = self.diagnostics.items.len;
+        while (i > len) {
+            i -= 1;
+            self.gpa.free(self.diagnostics.items[i].message);
+        }
+        self.diagnostics.shrinkRetainingCapacity(len);
     }
 
     /// Restore parser position from a checkpoint.

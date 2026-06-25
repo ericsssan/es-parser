@@ -3539,6 +3539,10 @@ fn parseParenthesized(p: *Parser) Error!NodeIndex {
         const saved_diag_len = p.diagnostics.items.len;
         const saved_nodes_len = p.nodes.len;
         const saved_extra_len = p.extra_data.items.len;
+        // Speculatively parsing the return type can emit scope events (e.g. a type
+        // that looks like a function type) — discard them if we backtrack so they
+        // don't leak into the enclosing scope (#62).
+        const saved_ev = p.eventMark();
         // Snapshot scratch contents so we can restore even after scratchPop.
         const params_count = p.scratch.items.len - scratch_top;
         var params_snapshot: [16]u32 = undefined;
@@ -3612,16 +3616,17 @@ fn parseParenthesized(p: *Parser) Error!NodeIndex {
             // Backtrack to bare-paren and let the caller see `:` again.
             if (saved_cc and p.peek() != .colon and can_snapshot) {
                 p.tok_i = saved_tok;
-                p.diagnostics.shrinkRetainingCapacity(saved_diag_len);
+                p.truncateDiagnostics(saved_diag_len);
                 p.nodes.len = @intCast(saved_nodes_len);
                 p.extra_data.shrinkRetainingCapacity(saved_extra_len);
+                p.resetEventsTo(saved_ev); // discard the speculative return-type's events
                 // Restore scratch contents (scratchPop above truncated to scratch_top).
                 p.scratch.shrinkRetainingCapacity(scratch_top);
                 for (params_snapshot[0..params_count]) |raw| {
                     try p.scratch.append(p.gpa, raw);
                 }
                 // Fall through to the bare-paren interpretation below.
-                // (emit_arrow_scope is false here, so no scope events were emitted.)
+                // (emit_arrow_scope is false here, so no arrow-scope events were emitted.)
             } else {
                 if (emit_arrow_scope) try p.emitScopeClose(.none);
                 const extra = try p.addExtra(ast.ArrowData, .{
@@ -3641,9 +3646,10 @@ fn parseParenthesized(p: *Parser) Error!NodeIndex {
         } else {
             // Type didn't parse or no `=>` — backtrack the type annotation only.
             p.tok_i = saved_tok;
-            p.diagnostics.shrinkRetainingCapacity(saved_diag_len);
+            p.truncateDiagnostics(saved_diag_len);
             p.nodes.len = @intCast(saved_nodes_len);
             p.extra_data.shrinkRetainingCapacity(saved_extra_len);
+            p.resetEventsTo(saved_ev); // discard the speculative return-type's events
         }
     }
 

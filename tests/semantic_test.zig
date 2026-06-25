@@ -1518,3 +1518,24 @@ test "overloaded interface method creates independent scopes per overload (#30)"
     }
     try testing.expectEqual(@as(u32, 2), count);
 }
+
+test "conditional with a paren-expression alternate leaks no phantom scope (#62)" {
+    // Speculatively parsing the consequent's typed-arrow return type tries the
+    // alternate `(b = 1)` as a function type, emitting scope/declare events; the
+    // backtrack must discard them so no phantom function scope or duplicate `b`
+    // parameter leaks into the graph.
+    var r = try analyzeTsSource("function f(b){ return c ? (b) : (b = 1) && b; }");
+    defer r.deinit(testing.allocator);
+    // Exactly one function scope (f); the discarded speculation adds none.
+    try testing.expectEqual(@as(u32, 1), countScopesOfKind(&r, .function));
+    try testing.expectEqual(@as(u32, 0), countScopesOfKind(&r, .arrow_function));
+    // Only the real `b` parameter — no phantom duplicate.
+    var b_params: u32 = 0;
+    var i: u32 = 0;
+    while (i < r.symbols.count()) : (i += 1) {
+        const id = SymbolId.fromInt(i);
+        if (r.symbols.getBindingKind(id) == .parameter and
+            std.mem.eql(u8, r.symbols.getName(id), "b")) b_params += 1;
+    }
+    try testing.expectEqual(@as(u32, 1), b_params);
+}
