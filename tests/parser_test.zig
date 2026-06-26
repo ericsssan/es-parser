@@ -1156,11 +1156,14 @@ test "TSX token remap keeps construct positions after JSX text edits (#70)" {
     // data-field token indices pointing at the right identifiers. Validated by
     // extracting the token text — a wrong remap yields the wrong text.
     const src =
-        "const x = <div>hello world</div>;\n" ++
-        "import {alpha, beta as b} from \"m\";\n" ++
-        "export {alpha as ax};\n" ++
-        "class C implements IFace {}\n" ++
-        "outer: for (;;) break outer;\n";
+        "const x = <div>hello world</div>;\n" ++ // multi-token JSX text shifts all that follows
+        "import {alpha, beta as b} from \"m\";\n" ++ // specifiers store NODE indices (must stay)
+        "class C implements IFace {}\n" ++ // impls: token index in extra_data
+        "enum Color { Red }\n" ++ // EnumData.name: token index in extra_data
+        "interface IFace { x: number }\n" ++ // InterfaceData.name: token index in extra_data
+        "type Alias = number;\n" ++ // TypeAliasData.name: token index in extra_data
+        "const e = <a aria-foo-bar=\"y\" />;\n" ++ // jsx_identifier.lhs: hyphenated end token
+        "outer: for (;;) break outer;\n"; // break_label: NODE index (must stay)
     var lr = try Lexer.tokenizeWithOptions(testing.allocator, src, .tsx, false);
     defer lr.deinit(testing.allocator);
     var tree = try Parser.parseWithLanguage(testing.allocator, src, lr.tokens.slice(), .tsx, true);
@@ -1172,23 +1175,39 @@ test "TSX token remap keeps construct positions after JSX text edits (#70)" {
     var got_beta = false;
     var got_break = false;
     var got_impl = false;
+    var got_enum = false;
+    var got_iface = false;
+    var got_alias = false;
+    var got_hyphen = false;
     for (tags, 0..) |tag, i| {
+        const lhsi = @intFromEnum(datas[i].lhs);
         switch (tag) {
             .import_specifier => {
-                // main_token = imported name token (remapped per node).
-                const n = tree.tokenText(mains[i]);
+                const n = tree.tokenText(mains[i]); // main_token = imported name token
                 if (std.mem.eql(u8, n, "alpha")) got_alpha = true;
                 if (std.mem.eql(u8, n, "beta")) got_beta = true;
             },
             .break_label => {
-                // lhs = label NODE; its main_token is the label token.
-                const lbl_node = @intFromEnum(datas[i].lhs);
+                const lbl_node = lhsi; // lhs = label NODE; its main_token is the label token
                 if (std.mem.eql(u8, tree.tokenText(mains[lbl_node]), "outer")) got_break = true;
             },
             .class_decl => {
-                // impls entries ARE token indices (remapped in extra_data).
-                const cd = tree.extraData(ast.ClassData, @intFromEnum(datas[i].lhs));
+                const cd = tree.extraData(ast.ClassData, lhsi);
                 if (cd.impls_start < cd.impls_end and std.mem.eql(u8, tree.tokenText(tree.extra_data[cd.impls_start]), "IFace")) got_impl = true;
+            },
+            // {Enum,Interface,TypeAlias}Data.name is a token index at extra_data offset 0.
+            .ts_enum_decl => if (std.mem.eql(u8, tree.tokenText(tree.extra_data[lhsi]), "Color")) {
+                got_enum = true;
+            },
+            .ts_interface_decl => if (std.mem.eql(u8, tree.tokenText(tree.extra_data[lhsi]), "IFace")) {
+                got_iface = true;
+            },
+            .ts_type_alias_decl => if (std.mem.eql(u8, tree.tokenText(tree.extra_data[lhsi]), "Alias")) {
+                got_alias = true;
+            },
+            // Hyphenated JSX name: lhs is the end token (`bar` of `aria-foo-bar`).
+            .jsx_identifier => if (datas[i].lhs != .none and std.mem.eql(u8, tree.tokenText(lhsi), "bar")) {
+                got_hyphen = true;
             },
             else => {},
         }
@@ -1197,4 +1216,8 @@ test "TSX token remap keeps construct positions after JSX text edits (#70)" {
     try testing.expect(got_beta);
     try testing.expect(got_break);
     try testing.expect(got_impl);
+    try testing.expect(got_enum);
+    try testing.expect(got_iface);
+    try testing.expect(got_alias);
+    try testing.expect(got_hyphen);
 }

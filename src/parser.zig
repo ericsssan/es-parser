@@ -8927,16 +8927,24 @@ pub const Parser = struct {
         for (self.node_end_toks[0..self.nodes.len]) |*et| {
             if (et.* < map.len) et.* = map[et.*];
         }
-        // The ONLY data fields that hold a token index are jsx_text_node.lhs (the
-        // token after the text run) and the per-class `implements` entries in
-        // extra_data. Everything else (break/continue labels, import/export
-        // specifiers) stores NODE indices despite the ast.zig "…token" wording, and
-        // must NOT be remapped.
+        // The token-index references that live OUTSIDE main_token/node_end_toks.
+        // Everything not listed here (break/continue labels, import/export
+        // specifiers, interface/alias `rhs` name idents, …) stores NODE indices
+        // despite some ast.zig "…token" wording, and must NOT be remapped.
         const datas = self.nodes.items(.data);
         for (node_tags, 0..) |tag, ni| {
             switch (tag) {
-                .jsx_text_node => {
+                // data.lhs is a token index: jsx_text_node = token after the run;
+                // jsx_identifier = end token of a hyphenated name (`aria-foo`), or .none.
+                .jsx_text_node, .jsx_identifier => {
                     if (datas[ni].lhs != .none) datas[ni].lhs = @enumFromInt(map[@intFromEnum(datas[ni].lhs)]);
+                },
+                // {Enum,Interface,TypeAlias}Data.name is a token index at extra_data
+                // offset 0 (it's each struct's first field). Read by ast.nodeName /
+                // the AST-buffer consumer, so a stale index gives the wrong name.
+                .ts_enum_decl, .ts_interface_decl, .ts_type_alias_decl => {
+                    const ex = @intFromEnum(datas[ni].lhs); // extra index; name is field 0
+                    self.extra_data.items[ex] = map[self.extra_data.items[ex]];
                 },
                 // ClassData is a flat run of u32 fields, so impls_start sits at its
                 // field index and impls_end is the next field; each entry in between
