@@ -904,11 +904,14 @@ pub const Parser = struct {
     /// @returns borrowed_from(self)
     pub fn tokenText(self: *const Parser, index: TokenIndex) []const u8 {
         const tag = self.tags_ptr[index];
-        // Variable-lexeme tokens (identifiers, literals, escaped_keyword, etc.) are the first
-        // 9 enum variants (0..identifier) plus the last 4 (escaped_keyword..jsx_text).
-        // A range check is cheaper than the 80-arm lexeme() switch for these common cases.
+        // Variable-lexeme tokens carry their own source text. They are the first 9
+        // enum variants (0..identifier) and the tail group escaped_keyword/at_sign/
+        // hashbang — a range check is cheaper than the 80-arm lexeme() switch. jsx_text
+        // is also variable-lexeme but sits before eof in the enum (outside the tail
+        // range), so it needs an explicit case; lexeme(.jsx_text) is null, so without
+        // this it would null-deref. (eof/invalid keep their fixed `<eof>`/`<invalid>`.)
         const ti = @intFromEnum(tag);
-        if (ti <= @intFromEnum(TokenTag.identifier) or ti >= @intFromEnum(TokenTag.escaped_keyword)) {
+        if (ti <= @intFromEnum(TokenTag.identifier) or ti >= @intFromEnum(TokenTag.escaped_keyword) or tag == .jsx_text) {
             const start = self.tok_starts_ptr[index];
             const len = self.tok_lens_ptr[index];
             return self.source[start .. start + len];

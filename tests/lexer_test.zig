@@ -357,3 +357,136 @@ test "only whitespace" {
 test "only comments" {
     try expectTokens("// comment\n/* block */", &.{});
 }
+
+// ── JSX text tokens (#61) ────────────────────────────────
+
+/// Collect the [start, end) byte ranges of every jsx_text token, in order.
+fn expectJsxTextLang(src: []const u8, lang: Token.Language, expected: []const [2]u32) !void {
+    var result = try Lexer.tokenizeWithLanguage(testing.allocator, src, lang);
+    defer result.deinit(testing.allocator);
+    const tags = result.tokens.items(.tag);
+    const starts = result.tokens.items(.start);
+    const lens = result.tokens.items(.len);
+    var got: [64][2]u32 = undefined;
+    var k: usize = 0;
+    var i: usize = 0;
+    while (i < result.tokens.len) : (i += 1) {
+        if (tags[i] == .jsx_text) {
+            got[k] = .{ starts[i], starts[i] + lens[i] };
+            k += 1;
+        }
+    }
+    try testing.expectEqual(expected.len, k);
+    for (expected, got[0..k]) |e, g| {
+        try testing.expectEqual(e[0], g[0]);
+        try testing.expectEqual(e[1], g[1]);
+    }
+}
+
+fn expectJsxText(src: []const u8, expected: []const [2]u32) !void {
+    try expectJsxTextLang(src, .jsx, expected);
+}
+
+test "JSX text child is one jsx_text token spanning whitespace (#61)" {
+    // The issue's repro: text before/after the expression container are each ONE
+    // jsx_text token including the leading "\n   " — matching espree/@typescript-eslint.
+    try expectJsxText("<div>\n   unrelated{\n        foo\n    }\n</div>", &.{ .{ 5, 18 }, .{ 37, 38 } });
+    // Multi-word text is one token, not several identifiers.
+    try expectJsxText("<div>hello world</div>", &.{.{ 5, 16 }});
+    // Nested elements: only the innermost text is jsx_text; adjacent tags have none.
+    try expectJsxText("<a><b>x</b></a>", &.{.{ 6, 7 }});
+    // Text inside a nested element within an expression container.
+    try expectJsxText("<div>{cond && <span>hi</span>}</div>", &.{.{ 20, 22 }});
+    // Fragment body.
+    try expectJsxText("<>frag</>", &.{.{ 2, 6 }});
+    // A self-closing element opens NO body. At top level the trailing text is then
+    // plain JS, not jsx_text — this fails if `<br/>` wrongly opens a body (genuinely
+    // exercises the `prev != .slash` guard; the old `<div><br/></div>` assertion
+    // passed even with that guard removed, since there was no text to capture).
+    try expectJsxText("<br/>tail", &.{});
+    // Text after a self-closing child belongs to the ENCLOSING element's body.
+    try expectJsxText("<x><br/>after</x>", &.{.{ 8, 13 }});
+}
+
+test "JSX text tokens are gated to plain JSX, not TSX / non-JSX (#61)" {
+    // Plain JS: `<` / `>` are operators, never JSX tags.
+    try expectJsxTextLang("a < b > c", .js, &.{});
+    // TSX keeps the prior token stream (the JSX-vs-generic ambiguity needs the
+    // parser); a generic arrow must NOT be misread as a JSX element opening a body.
+    try expectJsxTextLang("const f = <T,>() => 1;", .tsx, &.{});
+    try expectJsxTextLang("<div>hi</div>", .tsx, &.{});
+}
+
+test "JSX text: nested-brace, parent-body and whitespace-only paths (#61)" {
+    // Object literal inside an expression container: the inner `}` must NOT close
+    // the container early (exercises the frame brace-count low bits) → no text.
+    try expectJsxText("<div>{ {a:1} }</div>", &.{});
+    // Trailing text in the PARENT body after a child element closes.
+    try expectJsxText("<a><b>x</b>y</a>", &.{ .{ 6, 7 }, .{ 11, 12 } });
+    // Whitespace-only text is still one jsx_text token.
+    try expectJsxText("<div>   </div>", &.{.{ 5, 8 }});
+}
+
+test "JSX text: a line terminator in text carries to the next token (#61)" {
+    var result = try Lexer.tokenizeWithLanguage(testing.allocator, "<div>l1\nl2</div>", .jsx);
+    defer result.deinit(testing.allocator);
+    const tags = result.tokens.items(.tag);
+    const nl = result.tokens.items(.has_newline_before);
+    var i: usize = 0;
+    while (tags[i] != .jsx_text) : (i += 1) {}
+    try testing.expect(!nl[i]); // the text token itself: no newline before it
+    try testing.expect(nl[i + 1]); // the following `<` sees the in-text newline
+}
+
+test "JSX text: deep nesting spills the inline frame stack (#61)" {
+    // >64 BODY frames forces the heap-grow path (jsx_frame_heap) — the only
+    // allocating path in the change; the inner text must still be one token.
+    const alloc = testing.allocator;
+    var src: std.ArrayListUnmanaged(u8) = .{ .items = &.{}, .capacity = 0 };
+    defer src.deinit(alloc);
+    var i: usize = 0;
+    while (i < 70) : (i += 1) try src.appendSlice(alloc, "<a>");
+    try src.append(alloc, 'x');
+    i = 0;
+    while (i < 70) : (i += 1) try src.appendSlice(alloc, "</a>");
+
+    var result = try Lexer.tokenizeWithLanguage(alloc, src.items, .jsx);
+    defer result.deinit(alloc);
+    const tags = result.tokens.items(.tag);
+    var k: usize = 0;
+    for (0..result.tokens.len) |idx| {
+        if (tags[idx] == .jsx_text) k += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), k);
+}
+
+test "JSX text: a bare > or } ends the text run as its own token (#61)" {
+    // JSXText excludes `>` and `}`; a bare one ends the run and is lexed separately
+    // (the parser then rejects the stray token). `<div>a>b</div>` → "a", `>`, "b".
+    try expectJsxText("<div>a>b</div>", &.{ .{ 5, 6 }, .{ 7, 8 } });
+    // A leading `}` is its own r_brace token; the text run resumes after it.
+    try expectJsxText("<div>}x</div>", &.{.{ 6, 7 }});
+}
+
+test "JSX text: expression-container nesting spills the frame stack (#61)" {
+    // 64 BODY frames fill the inline stack, then a `{` pushes an EXPR frame at
+    // capacity — exercising the EXPR-container heap-grow site (the all-`<a>` spill
+    // test only hits the BODY-frame grow).
+    const alloc = testing.allocator;
+    var src: std.ArrayListUnmanaged(u8) = .{ .items = &.{}, .capacity = 0 };
+    defer src.deinit(alloc);
+    var i: usize = 0;
+    while (i < 64) : (i += 1) try src.appendSlice(alloc, "<a>");
+    try src.appendSlice(alloc, "{x}T"); // `{` pushes EXPR at sp==cap → grow; "T" is body text
+    i = 0;
+    while (i < 64) : (i += 1) try src.appendSlice(alloc, "</a>");
+
+    var result = try Lexer.tokenizeWithLanguage(alloc, src.items, .jsx);
+    defer result.deinit(alloc);
+    const tags = result.tokens.items(.tag);
+    var k: usize = 0;
+    for (0..result.tokens.len) |idx| {
+        if (tags[idx] == .jsx_text) k += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), k); // only "T"
+}
