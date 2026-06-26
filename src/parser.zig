@@ -401,6 +401,9 @@ pub const Parser = struct {
     /// `language == .ts or language == .tsx` per call.
     is_ts: bool,
     is_jsx: bool,
+    /// Set when a JSX text/gap node is built in TSX, so the post-parse pass
+    /// (`rewriteTsxJsxTextTokens`) only runs when there is something to rewrite (#70).
+    has_jsx_text: bool = false,
     /// True when parsing the immediate body of a `with` statement.
     /// TypeScript does not emit TS1108 for `return` inside a `with` body at top level.
     in_with: bool = false,
@@ -689,6 +692,12 @@ pub const Parser = struct {
 
         p.syncYieldLex();
         try p.parseProgram();
+
+        // TSX only: rewrite the token stream so each JSX text child is one jsx_text
+        // token (matching .jsx), remapping all token-index references (#70). Runs
+        // before the nodes/tokens/extra_data handoff below, and is a no-op unless a
+        // JSX text/gap node was built.
+        try p.rewriteTsxJsxTextTokens();
 
         // Transfer extra_data without a shrink-realloc memcpy. The pre-allocated
         // capacity (3/4 × token count) typically exceeds actual usage; rather than
@@ -8758,6 +8767,200 @@ pub const Parser = struct {
             self.tok_starts_ptr[m.idx] = m.start;
         }
         self.tok_mut_log.shrinkRetainingCapacity(log_top);
+    }
+
+    /// One rewrite of the TSX token stream derived from a JSX text/gap node (#70):
+    /// a `collapse` turns the run `[pos, pos+removed]` into one jsx_text token; an
+    /// `insert` materializes a whitespace gap as a jsx_text token before `pos`.
+    const JsxTokenEdit = struct { pos: u32, removed: u32, is_insert: bool, start: u32, len: u32 };
+
+    fn jsxEditLess(_: void, a: JsxTokenEdit, b: JsxTokenEdit) bool {
+        if (a.pos != b.pos) return a.pos < b.pos;
+        return @intFromBool(!a.is_insert) < @intFromBool(!b.is_insert); // inserts before collapses at the same pos
+    }
+
+    /// Post-parse, O(n): rewrite the TSX token stream so each JSX text child is one
+    /// `jsx_text` token (matching .jsx) — the context-free lexer can't do it in TSX
+    /// due to the `<T>` JSX-vs-generic ambiguity (#70). Driven by the FINAL
+    /// `jsx_text_node`/`jsx_gap_node`s (speculative ones were rolled back via
+    /// `nodes.len`, so no stale edits). Two in-place cursor passes — forward to
+    /// collapse runs (shrink), backward to insert gap tokens (grow, within the
+    /// lexer's spare capacity) — build an old→new token-index map, then every
+    /// token-index reference in the AST is remapped. In place because the token
+    /// array is owned by the caller (the Ast only borrows it).
+    pub fn rewriteTsxJsxTextTokens(self: *Parser) !void {
+        if (!self.has_jsx_text) return;
+        const gpa = self.gpa;
+
+        // 1. Collect collapse (text-run) and insert (gap) edits from the final nodes.
+        var collapses: std.ArrayListUnmanaged(JsxTokenEdit) = .empty;
+        defer collapses.deinit(gpa);
+        var inserts: std.ArrayListUnmanaged(JsxTokenEdit) = .empty;
+        defer inserts.deinit(gpa);
+        const node_tags = self.nodes.items(.tag);
+        const node_main = self.nodes.items(.main_token);
+        const node_data = self.nodes.items(.data);
+        const starts0 = self.tok_starts_ptr;
+        for (node_tags, 0..) |tag, ni| {
+            switch (tag) {
+                .jsx_text_node => {
+                    const first = node_main[ni];
+                    const next_tok = @intFromEnum(node_data[ni].lhs); // token index after the run
+                    const tstart = if (node_data[ni].rhs == .none) starts0[first] else @intFromEnum(node_data[ni].rhs);
+                    try collapses.append(gpa, .{ .pos = first, .removed = next_tok - first - 1, .is_insert = false, .start = tstart, .len = starts0[next_tok] - tstart });
+                },
+                .jsx_gap_node => {
+                    const prev_end = @intFromEnum(node_data[ni].lhs); // byte
+                    const cur_start = @intFromEnum(node_data[ni].rhs); // byte
+                    try inserts.append(gpa, .{ .pos = node_main[ni] + 1, .removed = 0, .is_insert = true, .start = prev_end, .len = cur_start - prev_end });
+                },
+                else => {},
+            }
+        }
+        if (collapses.items.len == 0 and inserts.items.len == 0) return;
+        std.mem.sort(JsxTokenEdit, collapses.items, {}, jsxEditLess);
+        std.mem.sort(JsxTokenEdit, inserts.items, {}, jsxEditLess);
+
+        const tags = self.tokens.items(.tag);
+        const tstarts = self.tokens.items(.start);
+        const tlens = self.tokens.items(.len);
+        const tnl = self.tokens.items(.has_newline_before);
+        const tesc = self.tokens.items(.has_unicode_escape);
+
+        // old token index -> index after pass 1 (collapses). Composed with pass 2 below.
+        const map = try gpa.alloc(u32, self.parsed_len);
+        defer gpa.free(map);
+
+        // 2. Forward pass: collapse runs in place (always shrinks → write <= read).
+        var r: u32 = 0;
+        var w: u32 = 0;
+        var ci: usize = 0;
+        while (r < self.parsed_len) {
+            if (ci < collapses.items.len and collapses.items[ci].pos == r) {
+                const e = collapses.items[ci];
+                tags[w] = .jsx_text;
+                tstarts[w] = e.start;
+                tlens[w] = e.len;
+                tnl[w] = tnl[r]; // newline-before from the run's first token (matches .jsx)
+                tesc[w] = false;
+                map[r] = w;
+                var k: u32 = 1;
+                while (k <= e.removed) : (k += 1) map[r + k] = w; // removed tokens fold into the jsx_text token
+                w += 1;
+                r += 1 + e.removed;
+                ci += 1;
+                continue;
+            }
+            if (w != r) {
+                tags[w] = tags[r];
+                tstarts[w] = tstarts[r];
+                tlens[w] = tlens[r];
+                tnl[w] = tnl[r];
+                tesc[w] = tesc[r];
+            }
+            map[r] = w;
+            w += 1;
+            r += 1;
+        }
+        const len1 = w;
+
+        // 3. Backward pass: insert gap tokens (grows). Bounded by spare capacity;
+        // any gaps that don't fit keep their (AST-correct) token-less gap node.
+        const cap: u32 = @intCast(self.tokens.capacity);
+        const eff_ins: u32 = @min(@as(u32, @intCast(inserts.items.len)), cap - len1);
+        const map2 = try gpa.alloc(u32, len1);
+        defer gpa.free(map2);
+        if (eff_ins > 0) {
+            // Insert positions in the post-collapse index space, ascending.
+            const qpos = try gpa.alloc(u32, eff_ins);
+            defer gpa.free(qpos);
+            for (0..eff_ins) |i| qpos[i] = map[inserts.items[i].pos];
+            const final_len = len1 + eff_ins;
+            self.tokens.len = final_len;
+            self.parsed_len = final_len;
+            // Re-capture the columns at the grown length so writes into the spare
+            // capacity (final_len > the original len) are in bounds.
+            const g_tags = self.tokens.items(.tag);
+            const g_starts = self.tokens.items(.start);
+            const g_lens = self.tokens.items(.len);
+            const g_nl = self.tokens.items(.has_newline_before);
+            const g_esc = self.tokens.items(.has_unicode_escape);
+            var rr: i64 = @as(i64, len1) - 1;
+            var ww: i64 = @as(i64, final_len) - 1;
+            var ii: i64 = @as(i64, eff_ins) - 1;
+            while (ww >= 0) {
+                while (ii >= 0 and rr < qpos[@intCast(ii)]) {
+                    const e = inserts.items[@intCast(ii)];
+                    const u: usize = @intCast(ww);
+                    g_tags[u] = .jsx_text;
+                    g_starts[u] = e.start;
+                    g_lens[u] = e.len;
+                    g_nl[u] = false;
+                    g_esc[u] = false;
+                    ww -= 1;
+                    ii -= 1;
+                }
+                if (rr >= 0) {
+                    const du: usize = @intCast(ww);
+                    const su: usize = @intCast(rr);
+                    if (du != su) {
+                        g_tags[du] = g_tags[su];
+                        g_starts[du] = g_starts[su];
+                        g_lens[du] = g_lens[su];
+                        g_nl[du] = g_nl[su];
+                        g_esc[du] = g_esc[su];
+                    }
+                    map2[su] = @intCast(ww);
+                    ww -= 1;
+                    rr -= 1;
+                }
+            }
+            // Compose: map[old] = map2[map1[old]].
+            for (map) |*m| m.* = map2[m.*];
+        } else {
+            self.tokens.len = len1;
+            self.parsed_len = len1;
+        }
+
+        // 4. Remap every token-index reference in the AST.
+        for (self.nodes.items(.main_token)) |*mt| mt.* = map[mt.*];
+        for (self.node_end_toks[0..self.nodes.len]) |*et| {
+            if (et.* < map.len) et.* = map[et.*];
+        }
+        // The token-index references that live OUTSIDE main_token/node_end_toks.
+        // Everything not listed here (break/continue labels, import/export
+        // specifiers, interface/alias `rhs` name idents, …) stores NODE indices
+        // despite some ast.zig "…token" wording, and must NOT be remapped.
+        const datas = self.nodes.items(.data);
+        for (node_tags, 0..) |tag, ni| {
+            switch (tag) {
+                // data.lhs is a token index: jsx_text_node = token after the run;
+                // jsx_identifier = end token of a hyphenated name (`aria-foo`), or .none.
+                .jsx_text_node, .jsx_identifier => {
+                    if (datas[ni].lhs != .none) datas[ni].lhs = @enumFromInt(map[@intFromEnum(datas[ni].lhs)]);
+                },
+                // {Enum,Interface,TypeAlias}Data.name is a token index at extra_data
+                // offset 0 (it's each struct's first field). Read by ast.nodeName /
+                // the AST-buffer consumer, so a stale index gives the wrong name.
+                .ts_enum_decl, .ts_interface_decl, .ts_type_alias_decl => {
+                    const ex = @intFromEnum(datas[ni].lhs); // extra index; name is field 0
+                    self.extra_data.items[ex] = map[self.extra_data.items[ex]];
+                },
+                // ClassData is a flat run of u32 fields, so impls_start sits at its
+                // field index and impls_end is the next field; each entry in between
+                // is a TokenIndex (the main_token of an implemented type reference).
+                .class_decl, .class_expr => {
+                    const off = comptime @offsetOf(ast.ClassData, "impls_start") / @sizeOf(u32);
+                    const cd_extra = @intFromEnum(datas[ni].lhs); // extra index of ClassData
+                    var j = self.extra_data.items[cd_extra + off]; // impls_start
+                    const impls_end = self.extra_data.items[cd_extra + off + 1]; // impls_end
+                    while (j < impls_end) : (j += 1) {
+                        self.extra_data.items[j] = map[self.extra_data.items[j]];
+                    }
+                },
+                else => {},
+            }
+        }
     }
 
     /// Return the current length of the scratch buffer.

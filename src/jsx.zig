@@ -362,6 +362,9 @@ fn emitJsxGap(p: *Parser, last_child_was_text: bool) !void {
     const prev_end = starts[p.tok_i - 1] + lens[p.tok_i - 1];
     const cur_start = starts[p.tok_i];
     if (prev_end < cur_start) {
+        // In TSX the post-parse pass materializes this whitespace gap as a jsx_text
+        // token (it is trivia with no token of its own) so the stream matches .jsx (#70).
+        if (p.is_ts) p.has_jsx_text = true;
         const gap_node = try p.addNode(.{
             .tag = .jsx_gap_node,
             .main_token = @intCast(p.tok_i - 1),
@@ -520,6 +523,12 @@ fn parseJsxChildren(p: *Parser) Error!SubRange {
                 if (next == .less_than or next == .l_brace or next == .eof) break;
                 _ = p.advance();
             }
+
+            // In TSX the run was lexed as ordinary JS tokens (the lexer can't resolve
+            // the JSX-vs-generic ambiguity). Flag the parse so the post-parse pass
+            // rewrites the .tsx token stream to one jsx_text token per run, matching
+            // .jsx (#70). In .jsx the lexer already emitted the token.
+            if (p.is_ts) p.has_jsx_text = true;
 
             // lhs = next_tok_idx (always): end position = tok_starts[lhs], absorbs trailing gap.
             // rhs = leading_gap_start byte (or .none): start override.

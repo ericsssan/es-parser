@@ -1090,3 +1090,134 @@ test "let with newline binding stays an expression in single-statement contexts 
         try testing.expect(firstNodeOfTag(&tree, .let_decl) == null);
     }
 }
+
+/// Collect the [start,end) ranges of jsx_text tokens in the parsed token stream.
+fn jsxTextRangesIn(source: []const u8, lang: es_parser.token.Language, out: *[16][2]u32) !usize {
+    var lr = try Lexer.tokenizeWithOptions(testing.allocator, source, lang, false);
+    defer lr.deinit(testing.allocator);
+    var tree = try Parser.parseWithLanguage(testing.allocator, source, lr.tokens.slice(), lang, true);
+    defer tree.deinit(testing.allocator);
+    const tags = tree.tokens.items(.tag);
+    const starts = tree.tokens.items(.start);
+    const lens = tree.tokens.items(.len);
+    var k: usize = 0;
+    var i: usize = 0;
+    while (i < tree.tokens.len) : (i += 1) {
+        if (tags[i] == .jsx_text) {
+            out[k] = .{ starts[i], starts[i] + lens[i] };
+            k += 1;
+        }
+    }
+    return k;
+}
+
+test "TSX JSX text emits jsx_text tokens, byte-identical to JSX (#70)" {
+    // The parser collapses the TSX text runs (lexed as JS tokens) into one jsx_text
+    // token and materializes whitespace gaps, so the .tsx token stream matches .jsx.
+    const cases = [_][]const u8{
+        "<div>\n   unrelated{\n        foo\n    }\n</div>", // the issue repro (content + trailing gap)
+        "<div>hello world</div>", // multi-word content
+        "<a><b>x</b></a>", // nested
+        "<div>\n  <a/>\n  <b/>\n</div>", // inter-element whitespace gaps
+        "<div>{x}\n</div>", // trailing gap after an expression container
+        "<Foo<string>>{x}</Foo>", // generic type args on a JSX element
+        "<div>{cond && <span>hi</span>}</div>", // nested JSX in a container
+    };
+    for (cases) |src| {
+        var jsx_buf: [16][2]u32 = undefined;
+        var tsx_buf: [16][2]u32 = undefined;
+        const jc = try jsxTextRangesIn(src, .jsx, &jsx_buf);
+        const tc = try jsxTextRangesIn(src, .tsx, &tsx_buf);
+        try testing.expectEqual(jc, tc);
+        for (jsx_buf[0..jc], tsx_buf[0..tc]) |j, t| {
+            try testing.expectEqual(j[0], t[0]);
+            try testing.expectEqual(j[1], t[1]);
+        }
+    }
+}
+
+test "TSX generic constructs are not misread as JSX text (#70)" {
+    // The JSX-vs-generic disambiguation must keep these free of jsx_text tokens.
+    // Unambiguous generic forms only — `<T>` (no comma/extends) is parsed as JSX in
+    // TSX (matching tsc), so it is intentionally NOT in this set.
+    const cases = [_][]const u8{
+        "const f = <T,>() => 1;",
+        "const h = <T extends U>(x: T) => x;",
+        "foo<Bar>(x);",
+    };
+    for (cases) |src| {
+        var buf: [16][2]u32 = undefined;
+        try testing.expectEqual(@as(usize, 0), try jsxTextRangesIn(src, .tsx, &buf));
+    }
+}
+
+test "TSX token remap keeps construct positions after JSX text edits (#70)" {
+    // JSX text before each construct shifts its tokens; the remap must keep the
+    // data-field token indices pointing at the right identifiers. Validated by
+    // extracting the token text — a wrong remap yields the wrong text.
+    const src =
+        "const x = <div>hello world</div>;\n" ++ // multi-token JSX text shifts all that follows
+        "import {alpha, beta as b} from \"m\";\n" ++ // specifiers store NODE indices (must stay)
+        "class C implements IFace {}\n" ++ // impls: token index in extra_data
+        "enum Color { Red }\n" ++ // EnumData.name: token index in extra_data
+        "interface IFace { x: number }\n" ++ // InterfaceData.name: token index in extra_data
+        "type Alias = number;\n" ++ // TypeAliasData.name: token index in extra_data
+        "const e = <a aria-foo-bar=\"y\" />;\n" ++ // jsx_identifier.lhs: hyphenated end token
+        "outer: for (;;) break outer;\n"; // break_label: NODE index (must stay)
+    var lr = try Lexer.tokenizeWithOptions(testing.allocator, src, .tsx, false);
+    defer lr.deinit(testing.allocator);
+    var tree = try Parser.parseWithLanguage(testing.allocator, src, lr.tokens.slice(), .tsx, true);
+    defer tree.deinit(testing.allocator);
+    const tags = tree.nodes.items(.tag);
+    const mains = tree.nodes.items(.main_token);
+    const datas = tree.nodes.items(.data);
+    var got_alpha = false;
+    var got_beta = false;
+    var got_break = false;
+    var got_impl = false;
+    var got_enum = false;
+    var got_iface = false;
+    var got_alias = false;
+    var got_hyphen = false;
+    for (tags, 0..) |tag, i| {
+        const lhsi = @intFromEnum(datas[i].lhs);
+        switch (tag) {
+            .import_specifier => {
+                const n = tree.tokenText(mains[i]); // main_token = imported name token
+                if (std.mem.eql(u8, n, "alpha")) got_alpha = true;
+                if (std.mem.eql(u8, n, "beta")) got_beta = true;
+            },
+            .break_label => {
+                const lbl_node = lhsi; // lhs = label NODE; its main_token is the label token
+                if (std.mem.eql(u8, tree.tokenText(mains[lbl_node]), "outer")) got_break = true;
+            },
+            .class_decl => {
+                const cd = tree.extraData(ast.ClassData, lhsi);
+                if (cd.impls_start < cd.impls_end and std.mem.eql(u8, tree.tokenText(tree.extra_data[cd.impls_start]), "IFace")) got_impl = true;
+            },
+            // {Enum,Interface,TypeAlias}Data.name is a token index at extra_data offset 0.
+            .ts_enum_decl => if (std.mem.eql(u8, tree.tokenText(tree.extra_data[lhsi]), "Color")) {
+                got_enum = true;
+            },
+            .ts_interface_decl => if (std.mem.eql(u8, tree.tokenText(tree.extra_data[lhsi]), "IFace")) {
+                got_iface = true;
+            },
+            .ts_type_alias_decl => if (std.mem.eql(u8, tree.tokenText(tree.extra_data[lhsi]), "Alias")) {
+                got_alias = true;
+            },
+            // Hyphenated JSX name: lhs is the end token (`bar` of `aria-foo-bar`).
+            .jsx_identifier => if (datas[i].lhs != .none and std.mem.eql(u8, tree.tokenText(lhsi), "bar")) {
+                got_hyphen = true;
+            },
+            else => {},
+        }
+    }
+    try testing.expect(got_alpha);
+    try testing.expect(got_beta);
+    try testing.expect(got_break);
+    try testing.expect(got_impl);
+    try testing.expect(got_enum);
+    try testing.expect(got_iface);
+    try testing.expect(got_alias);
+    try testing.expect(got_hyphen);
+}
