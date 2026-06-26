@@ -8760,6 +8760,72 @@ pub const Parser = struct {
         self.tok_mut_log.shrinkRetainingCapacity(log_top);
     }
 
+    /// Collapse the JSX text run `[first, end)` — lexed as ordinary JS tokens in
+    /// TSX, where the context-free lexer can't resolve the JSX-vs-generic
+    /// ambiguity — into a single `jsx_text` token at `first` spanning
+    /// `[new_start, new_start + new_len)`, dropping the now-redundant inner tokens
+    /// in place and advancing `tok_i` past the result (#70).
+    ///
+    /// Safe to do mid-parse WITHOUT remapping any token-index reference: JSX is
+    /// never parsed inside a backtracking speculative context (the `(...)` cover
+    /// grammar parses its contents once and reinterprets; every `tok_i` rewind is
+    /// around TS types, which never contain JSX), so no later backtrack can
+    /// resurrect the removed tokens — and because the AST is built left-to-right,
+    /// nodes created before the run point at unshifted tokens while nodes created
+    /// after (incl. the enclosing element's end-token) are built post-shift. The
+    /// `record_tok_muts` guard is belt-and-suspenders: a removal can't be undone by
+    /// the speculative journal, so if we ever WERE speculating we leave the JS
+    /// tokens (the pre-#70 TSX behavior) rather than corrupt the stream.
+    pub fn collapseJsxText(self: *Parser, first: TokenIndex, end: TokenIndex, new_start: u32, new_len: u32) void {
+        if (self.record_tok_muts) return;
+        self.tokens.items(.tag)[first] = .jsx_text;
+        self.tokens.items(.start)[first] = new_start;
+        self.tokens.items(.len)[first] = new_len;
+        self.tokens.items(.has_unicode_escape)[first] = false; // jsx_text never carries an escape flag (matches .jsx)
+        const removed = end - first - 1;
+        if (removed > 0) {
+            const dst = first + 1;
+            const tail = self.parsed_len - end; // tokens after the run
+            std.mem.copyForwards(TokenTag, self.tokens.items(.tag)[dst..][0..tail], self.tokens.items(.tag)[end..][0..tail]);
+            std.mem.copyForwards(u32, self.tokens.items(.start)[dst..][0..tail], self.tokens.items(.start)[end..][0..tail]);
+            std.mem.copyForwards(u32, self.tokens.items(.len)[dst..][0..tail], self.tokens.items(.len)[end..][0..tail]);
+            std.mem.copyForwards(bool, self.tokens.items(.has_newline_before)[dst..][0..tail], self.tokens.items(.has_newline_before)[end..][0..tail]);
+            std.mem.copyForwards(bool, self.tokens.items(.has_unicode_escape)[dst..][0..tail], self.tokens.items(.has_unicode_escape)[end..][0..tail]);
+            self.parsed_len -= removed;
+            self.tokens.len -= removed;
+        }
+        self.tok_i = first + 1;
+    }
+
+    /// Insert a single `jsx_text` token at index `at` (before the current token)
+    /// spanning `[start, start+len)`, used in TSX to materialize a pure-whitespace
+    /// JSX gap (which is trivia with no token of its own) so the token stream matches
+    /// .jsx (#70). Shifts the tail up by one within the lexer's spare token capacity;
+    /// returns the new token's index, or null if there's no room (the caller falls
+    /// back to the token-less gap node, which is still AST/ESTree-correct) or we're
+    /// speculating. Pointer-safe: never reallocates, so the cached column pointers
+    /// stay valid. `has_newline_before` is false on the gap token and unchanged on the
+    /// following token — matching how the .jsx lexer flags the same gap.
+    pub fn insertJsxGapToken(self: *Parser, at: TokenIndex, start: u32, len: u32) ?TokenIndex {
+        if (self.record_tok_muts) return null;
+        if (self.tokens.len >= self.tokens.capacity) return null;
+        const tail = self.parsed_len - at;
+        self.tokens.len += 1;
+        std.mem.copyBackwards(TokenTag, self.tokens.items(.tag)[at + 1 ..][0..tail], self.tokens.items(.tag)[at..][0..tail]);
+        std.mem.copyBackwards(u32, self.tokens.items(.start)[at + 1 ..][0..tail], self.tokens.items(.start)[at..][0..tail]);
+        std.mem.copyBackwards(u32, self.tokens.items(.len)[at + 1 ..][0..tail], self.tokens.items(.len)[at..][0..tail]);
+        std.mem.copyBackwards(bool, self.tokens.items(.has_newline_before)[at + 1 ..][0..tail], self.tokens.items(.has_newline_before)[at..][0..tail]);
+        std.mem.copyBackwards(bool, self.tokens.items(.has_unicode_escape)[at + 1 ..][0..tail], self.tokens.items(.has_unicode_escape)[at..][0..tail]);
+        self.tokens.items(.tag)[at] = .jsx_text;
+        self.tokens.items(.start)[at] = start;
+        self.tokens.items(.len)[at] = len;
+        self.tokens.items(.has_newline_before)[at] = false;
+        self.tokens.items(.has_unicode_escape)[at] = false;
+        self.parsed_len += 1;
+        self.tok_i += 1; // the current token shifted up by one
+        return at;
+    }
+
     /// Return the current length of the scratch buffer.
     pub fn scratchLen(self: *const Parser) usize {
         return self.scratch.items.len;

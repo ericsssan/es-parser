@@ -362,9 +362,19 @@ fn emitJsxGap(p: *Parser, last_child_was_text: bool) !void {
     const prev_end = starts[p.tok_i - 1] + lens[p.tok_i - 1];
     const cur_start = starts[p.tok_i];
     if (prev_end < cur_start) {
+        // In TSX the whitespace gap is trivia with no token; materialize it as a
+        // jsx_text token so the token stream matches .jsx (#70). The node's main_token
+        // becomes that token when it succeeds; otherwise it stays the previous token
+        // (the gap node's range comes from the byte offsets in lhs/rhs either way).
+        var gap_main: u32 = @intCast(p.tok_i - 1);
+        if (p.is_ts) {
+            if (p.insertJsxGapToken(@intCast(p.tok_i), prev_end, cur_start - prev_end)) |gap_idx| {
+                gap_main = gap_idx;
+            }
+        }
         const gap_node = try p.addNode(.{
             .tag = .jsx_gap_node,
-            .main_token = @intCast(p.tok_i - 1),
+            .main_token = gap_main,
             .data = .{
                 .lhs = NodeIndex.fromInt(prev_end),
                 .rhs = NodeIndex.fromInt(cur_start),
@@ -519,6 +529,17 @@ fn parseJsxChildren(p: *Parser) Error!SubRange {
                 const next = p.peek();
                 if (next == .less_than or next == .l_brace or next == .eof) break;
                 _ = p.advance();
+            }
+
+            // In TSX the run was lexed as ordinary JS tokens (the lexer can't resolve
+            // the JSX-vs-generic ambiguity, so #69's jsx_text tracking is gated to
+            // plain JSX). Now that the parser has committed to JSX, collapse the run
+            // into one jsx_text token so the token stream matches .jsx (#70). In .jsx
+            // the lexer already emitted a single jsx_text token, so this is skipped.
+            if (p.is_ts) {
+                const next_tok = p.tokIdx();
+                const text_start = leading_gap_start orelse starts[first_tok];
+                p.collapseJsxText(first_tok, next_tok, text_start, starts[next_tok] - text_start);
             }
 
             // lhs = next_tok_idx (always): end position = tok_starts[lhs], absorbs trailing gap.

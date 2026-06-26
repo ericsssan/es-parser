@@ -1090,3 +1090,63 @@ test "let with newline binding stays an expression in single-statement contexts 
         try testing.expect(firstNodeOfTag(&tree, .let_decl) == null);
     }
 }
+
+/// Collect the [start,end) ranges of jsx_text tokens in the parsed token stream.
+fn jsxTextRangesIn(source: []const u8, lang: es_parser.token.Language, out: *[16][2]u32) !usize {
+    var lr = try Lexer.tokenizeWithOptions(testing.allocator, source, lang, false);
+    defer lr.deinit(testing.allocator);
+    var tree = try Parser.parseWithLanguage(testing.allocator, source, lr.tokens.slice(), lang, true);
+    defer tree.deinit(testing.allocator);
+    const tags = tree.tokens.items(.tag);
+    const starts = tree.tokens.items(.start);
+    const lens = tree.tokens.items(.len);
+    var k: usize = 0;
+    var i: usize = 0;
+    while (i < tree.tokens.len) : (i += 1) {
+        if (tags[i] == .jsx_text) {
+            out[k] = .{ starts[i], starts[i] + lens[i] };
+            k += 1;
+        }
+    }
+    return k;
+}
+
+test "TSX JSX text emits jsx_text tokens, byte-identical to JSX (#70)" {
+    // The parser collapses the TSX text runs (lexed as JS tokens) into one jsx_text
+    // token and materializes whitespace gaps, so the .tsx token stream matches .jsx.
+    const cases = [_][]const u8{
+        "<div>\n   unrelated{\n        foo\n    }\n</div>", // the issue repro (content + trailing gap)
+        "<div>hello world</div>", // multi-word content
+        "<a><b>x</b></a>", // nested
+        "<div>\n  <a/>\n  <b/>\n</div>", // inter-element whitespace gaps
+        "<div>{x}\n</div>", // trailing gap after an expression container
+        "<Foo<string>>{x}</Foo>", // generic type args on a JSX element
+        "<div>{cond && <span>hi</span>}</div>", // nested JSX in a container
+    };
+    for (cases) |src| {
+        var jsx_buf: [16][2]u32 = undefined;
+        var tsx_buf: [16][2]u32 = undefined;
+        const jc = try jsxTextRangesIn(src, .jsx, &jsx_buf);
+        const tc = try jsxTextRangesIn(src, .tsx, &tsx_buf);
+        try testing.expectEqual(jc, tc);
+        for (jsx_buf[0..jc], tsx_buf[0..tc]) |j, t| {
+            try testing.expectEqual(j[0], t[0]);
+            try testing.expectEqual(j[1], t[1]);
+        }
+    }
+}
+
+test "TSX generic constructs are not misread as JSX text (#70)" {
+    // The JSX-vs-generic disambiguation must keep these free of jsx_text tokens.
+    // Unambiguous generic forms only — `<T>` (no comma/extends) is parsed as JSX in
+    // TSX (matching tsc), so it is intentionally NOT in this set.
+    const cases = [_][]const u8{
+        "const f = <T,>() => 1;",
+        "const h = <T extends U>(x: T) => x;",
+        "foo<Bar>(x);",
+    };
+    for (cases) |src| {
+        var buf: [16][2]u32 = undefined;
+        try testing.expectEqual(@as(usize, 0), try jsxTextRangesIn(src, .tsx, &buf));
+    }
+}
