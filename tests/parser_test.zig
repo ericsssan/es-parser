@@ -1150,3 +1150,51 @@ test "TSX generic constructs are not misread as JSX text (#70)" {
         try testing.expectEqual(@as(usize, 0), try jsxTextRangesIn(src, .tsx, &buf));
     }
 }
+
+test "TSX token remap keeps construct positions after JSX text edits (#70)" {
+    // JSX text before each construct shifts its tokens; the remap must keep the
+    // data-field token indices pointing at the right identifiers. Validated by
+    // extracting the token text — a wrong remap yields the wrong text.
+    const src =
+        "const x = <div>hello world</div>;\n" ++
+        "import {alpha, beta as b} from \"m\";\n" ++
+        "export {alpha as ax};\n" ++
+        "class C implements IFace {}\n" ++
+        "outer: for (;;) break outer;\n";
+    var lr = try Lexer.tokenizeWithOptions(testing.allocator, src, .tsx, false);
+    defer lr.deinit(testing.allocator);
+    var tree = try Parser.parseWithLanguage(testing.allocator, src, lr.tokens.slice(), .tsx, true);
+    defer tree.deinit(testing.allocator);
+    const tags = tree.nodes.items(.tag);
+    const mains = tree.nodes.items(.main_token);
+    const datas = tree.nodes.items(.data);
+    var got_alpha = false;
+    var got_beta = false;
+    var got_break = false;
+    var got_impl = false;
+    for (tags, 0..) |tag, i| {
+        switch (tag) {
+            .import_specifier => {
+                // main_token = imported name token (remapped per node).
+                const n = tree.tokenText(mains[i]);
+                if (std.mem.eql(u8, n, "alpha")) got_alpha = true;
+                if (std.mem.eql(u8, n, "beta")) got_beta = true;
+            },
+            .break_label => {
+                // lhs = label NODE; its main_token is the label token.
+                const lbl_node = @intFromEnum(datas[i].lhs);
+                if (std.mem.eql(u8, tree.tokenText(mains[lbl_node]), "outer")) got_break = true;
+            },
+            .class_decl => {
+                // impls entries ARE token indices (remapped in extra_data).
+                const cd = tree.extraData(ast.ClassData, @intFromEnum(datas[i].lhs));
+                if (cd.impls_start < cd.impls_end and std.mem.eql(u8, tree.tokenText(tree.extra_data[cd.impls_start]), "IFace")) got_impl = true;
+            },
+            else => {},
+        }
+    }
+    try testing.expect(got_alpha);
+    try testing.expect(got_beta);
+    try testing.expect(got_break);
+    try testing.expect(got_impl);
+}
