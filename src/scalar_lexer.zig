@@ -486,6 +486,26 @@ pub const Token = struct {
     has_unicode_escape: bool = false,
 };
 
+/// Top bit of a JSX frame marks an expression container (vs an element body);
+/// the low bits count its nested object/block braces (#61).
+const JSX_EXPR_BIT: u32 = 0x8000_0000;
+
+/// Per-call JSX element-body tracking state (#61). Comptime-conditional: returns a
+/// zero-size struct when text tokenization is off, so the non-JSX / TSX instantiation
+/// of the lexer carries no frame array and no tracking fields at all.
+fn JsxState(comptime enabled: bool) type {
+    if (!enabled) return struct {};
+    return struct {
+        in_text: bool = false,
+        closing: bool = false, // the `<` just seen begins a closing tag `</…`
+        sp: u32 = 0,
+        frame_inline: [64]u32 = undefined,
+        frame_ptr: [*]u32 = undefined,
+        frame_cap: u32 = 64,
+        frame_heap: ?[]u32 = null,
+        text_nl: bool = false, // last jsx_text token contained a line terminator
+    };
+}
 
 /// Tokenize `src` into a `TokenList` using the default options, matching
 /// `Lexer.tokenizeWithLanguage`. `language` selects the TS keyword set and JSX.
@@ -584,19 +604,17 @@ fn tokenizeScalarImpl(
     // each an element BODY (text context) or an expression container EXPR (JS
     // context). `<tag>` pushes BODY, `</tag>` pops it; `{` inside a body pushes EXPR
     // and its matching `}` pops it (the frame's low bits count nested object/block
-    // braces so the right `}` closes the container). `jsx_in_text` caches "top frame
-    // is a BODY and we are outside any tag header" — the single bit the hot loop
-    // tests. All of this is gated on is_jsx, so non-JSX lexing is unchanged.
-    const JSX_EXPR_BIT: u32 = 0x8000_0000;
-    var jsx_in_text = false;
-    var jsx_closing = false; // the `<` just seen begins a closing tag `</…`
-    var jsx_sp: u32 = 0;
-    var jsx_frame_inline: [64]u32 = undefined;
-    var jsx_frame_ptr: [*]u32 = &jsx_frame_inline;
-    var jsx_frame_cap: u32 = jsx_frame_inline.len;
-    var jsx_frame_heap: ?[]u32 = null;
-    var jsx_text_nl = false; // last jsx_text token contained a line terminator
-    defer if (jsx_frame_heap) |h| alloc.free(h);
+    // braces so the right `}` closes the container). `in_text` caches "top frame is a
+    // BODY and we are outside any tag header" — the single bit the hot loop tests.
+    //
+    // The whole struct is comptime-empty when jsx_text_mode is false, so the non-JSX
+    // (and TSX) instantiation of this worker carries none of it — no frame array on
+    // the stack, no structural-switch code — and is byte-for-byte identical to before.
+    var jx: JsxState(jsx_text_mode) = .{};
+    if (jsx_text_mode) jx.frame_ptr = &jx.frame_inline;
+    defer if (jsx_text_mode) {
+        if (jx.frame_heap) |h| alloc.free(h);
+    };
     // Annex B HTML comments (`<!--` / `-->`) are enabled only in non-module
     // scripts with annex_b set.
     const annex_b = opts.annex_b;
@@ -638,20 +656,20 @@ fn tokenizeScalarImpl(
         // one indirect branch instead of the former 11-deep if/else chain.
         // No-token cases (whitespace, comments, BOM/LS/PS) `continue`;
         // token-producing cases set `tag`/`i` and fall to the shared emit tail.
-        if (jsx_text_mode and jsx_in_text and c != '<' and c != '{' and c != '>' and c != '}') {
+        if (jsx_text_mode and jx.in_text and c != '<' and c != '{' and c != '>' and c != '}') {
             // JSX text child (#61): in element-body context, everything up to the
             // next `<` (tag) or `{` (expression container) is one literal jsx_text
             // token, surrounding whitespace included. JSXText excludes `> }` too, so
             // a bare `>`/`}` ends the run and is lexed as its own token — which the
-            // parser rejects, matching the reference. `jsx_in_text` is false for all
-            // non-JSX input, so this branch never fires off the JSX path.
+            // parser rejects, matching the reference. `jx.in_text` is only ever set
+            // when jsx_text_mode is on, so this branch is dead code off the JSX path.
             @branchHint(.unlikely);
             var j = i + 1;
             var nl = c == '\n' or c == '\r';
             while (j < n and src[j] != '<' and src[j] != '{' and src[j] != '>' and src[j] != '}') : (j += 1) {
                 if (src[j] == '\n' or src[j] == '\r') nl = true;
             }
-            jsx_text_nl = nl;
+            jx.text_nl = nl;
             tag = .jsx_text;
             i = j;
         } else if (c == ' ' or c == '\t' or c == 0x0B or c == 0x0C) {
@@ -980,102 +998,129 @@ fn tokenizeScalarImpl(
         // expression container; `>` closes a header — entering the element body
         // (opening tag) or leaving it (closing tag). See the var block above.
         if (is_jsx) {
-            switch (tag) {
-                .less_than => {
-                    // In a body a `<` is always a tag (text can't contain a bare `<`);
-                    // elsewhere fall back to the expression-position heuristic.
-                    if (jsx_in_text or Lex.regexAllowed(prev)) {
-                        const nb: u8 = if (i < n) src[i] else 0;
-                        if (nb == '/') {
-                            // Closing tag `</…>` — only meaningful directly in a body.
-                            if (jsx_sp > 0 and (jsx_frame_ptr[jsx_sp - 1] & JSX_EXPR_BIT) == 0) {
-                                jsx_closing = true;
-                                jsx_tag_depth += 1; // header until the matching `>`
+            if (jsx_text_mode) {
+                // Full JSX structure tracking (element bodies + expression containers)
+                // so body text becomes jsx_text tokens (#61). Compiled only into the
+                // plain-JSX instantiation.
+                switch (tag) {
+                    .less_than => {
+                        // In a body a `<` is always a tag (text can't contain a bare
+                        // `<`); elsewhere fall back to the expression-position heuristic.
+                        if (jx.in_text or Lex.regexAllowed(prev)) {
+                            const nb: u8 = if (i < n) src[i] else 0;
+                            if (nb == '/') {
+                                // Closing tag `</…>` — only meaningful inside a body.
+                                if (jx.sp > 0 and (jx.frame_ptr[jx.sp - 1] & JSX_EXPR_BIT) == 0) {
+                                    jx.closing = true;
+                                    jsx_tag_depth += 1; // header until the matching `>`
+                                }
+                            } else {
+                                const opens = nb == '>' or nb == '_' or nb == '$' or
+                                    (nb >= 'a' and nb <= 'z') or (nb >= 'A' and nb <= 'Z') or nb >= 0x80;
+                                if (opens) jsx_tag_depth += 1;
                             }
-                        } else {
+                        }
+                    },
+                    .l_brace => {
+                        if (jsx_tag_depth > 0) {
+                            jsx_brace_nest += 1; // brace inside a tag header
+                        } else if (jx.sp > 0) {
+                            const top = jx.frame_ptr[jx.sp - 1];
+                            if (top & JSX_EXPR_BIT == 0) {
+                                // `{` in a body opens an expression container.
+                                if (jx.sp == jx.frame_cap) {
+                                    const new_cap = jx.frame_cap * 2;
+                                    const grown = try alloc.alloc(u32, new_cap);
+                                    @memcpy(grown[0..jx.frame_cap], jx.frame_ptr[0..jx.frame_cap]);
+                                    if (jx.frame_heap) |h| alloc.free(h);
+                                    jx.frame_heap = grown;
+                                    jx.frame_ptr = grown.ptr;
+                                    jx.frame_cap = new_cap;
+                                }
+                                jx.frame_ptr[jx.sp] = JSX_EXPR_BIT;
+                                jx.sp += 1;
+                            } else {
+                                jx.frame_ptr[jx.sp - 1] = top + 1; // nested object/block brace
+                            }
+                        }
+                    },
+                    .r_brace => {
+                        if (jsx_brace_nest > 0) {
+                            jsx_brace_nest -= 1;
+                        } else if (jx.sp > 0) {
+                            const top = jx.frame_ptr[jx.sp - 1];
+                            if (top & JSX_EXPR_BIT != 0) {
+                                if (top & ~JSX_EXPR_BIT > 0) {
+                                    jx.frame_ptr[jx.sp - 1] = top - 1; // close a nested brace
+                                } else {
+                                    jx.sp -= 1; // close the expression container
+                                }
+                            }
+                        }
+                    },
+                    .greater_than => {
+                        if (jx.closing) {
+                            // `>` of a closing tag `</…>` — leave the element body.
+                            jx.closing = false;
+                            jsx_tag_depth -= 1;
+                            if (jx.sp > 0 and (jx.frame_ptr[jx.sp - 1] & JSX_EXPR_BIT) == 0) jx.sp -= 1;
+                        } else if (jsx_tag_depth > 0 and jsx_brace_nest == 0) {
+                            jsx_tag_depth -= 1;
+                            // Opening-tag header closed: enter the body unless self-closing `/>`.
+                            if (prev != .slash) {
+                                if (jx.sp == jx.frame_cap) {
+                                    const new_cap = jx.frame_cap * 2;
+                                    const grown = try alloc.alloc(u32, new_cap);
+                                    @memcpy(grown[0..jx.frame_cap], jx.frame_ptr[0..jx.frame_cap]);
+                                    if (jx.frame_heap) |h| alloc.free(h);
+                                    jx.frame_heap = grown;
+                                    jx.frame_ptr = grown.ptr;
+                                    jx.frame_cap = new_cap;
+                                }
+                                jx.frame_ptr[jx.sp] = 0; // BODY frame
+                                jx.sp += 1;
+                            }
+                        }
+                    },
+                    else => {},
+                }
+                // Recompute the hot-loop text-context bit: top frame is a body and we
+                // are outside any tag header / attribute brace.
+                jx.in_text = jx.sp > 0 and (jx.frame_ptr[jx.sp - 1] & JSX_EXPR_BIT) == 0 and
+                    jsx_tag_depth == 0 and jsx_brace_nest == 0;
+            } else {
+                // TSX / non-text JSX: only the opening-tag-header depth and attribute
+                // brace nesting needed to classify attribute strings (identical to the
+                // pre-#61 lexer). No element-body / text tracking.
+                switch (tag) {
+                    .less_than => {
+                        if (Lex.regexAllowed(prev)) {
+                            const nb: u8 = if (i < n) src[i] else 0;
                             const opens = nb == '>' or nb == '_' or nb == '$' or
                                 (nb >= 'a' and nb <= 'z') or (nb >= 'A' and nb <= 'Z') or nb >= 0x80;
                             if (opens) jsx_tag_depth += 1;
                         }
-                    }
-                },
-                .l_brace => {
-                    if (jsx_tag_depth > 0) {
-                        jsx_brace_nest += 1; // brace inside a tag header
-                    } else if (jsx_sp > 0) {
-                        const top = jsx_frame_ptr[jsx_sp - 1];
-                        if (top & JSX_EXPR_BIT == 0) {
-                            // `{` in a body opens an expression container.
-                            if (jsx_sp == jsx_frame_cap) {
-                                const new_cap = jsx_frame_cap * 2;
-                                const grown = try alloc.alloc(u32, new_cap);
-                                @memcpy(grown[0..jsx_frame_cap], jsx_frame_ptr[0..jsx_frame_cap]);
-                                if (jsx_frame_heap) |h| alloc.free(h);
-                                jsx_frame_heap = grown;
-                                jsx_frame_ptr = grown.ptr;
-                                jsx_frame_cap = new_cap;
-                            }
-                            jsx_frame_ptr[jsx_sp] = JSX_EXPR_BIT;
-                            jsx_sp += 1;
-                        } else {
-                            jsx_frame_ptr[jsx_sp - 1] = top + 1; // nested object/block brace
-                        }
-                    }
-                },
-                .r_brace => {
-                    if (jsx_brace_nest > 0) {
+                    },
+                    .l_brace => if (jsx_tag_depth > 0) {
+                        jsx_brace_nest += 1;
+                    },
+                    .r_brace => if (jsx_brace_nest > 0) {
                         jsx_brace_nest -= 1;
-                    } else if (jsx_sp > 0) {
-                        const top = jsx_frame_ptr[jsx_sp - 1];
-                        if (top & JSX_EXPR_BIT != 0) {
-                            if (top & ~JSX_EXPR_BIT > 0) {
-                                jsx_frame_ptr[jsx_sp - 1] = top - 1; // close a nested brace
-                            } else {
-                                jsx_sp -= 1; // close the expression container
-                            }
-                        }
-                    }
-                },
-                .greater_than => {
-                    if (jsx_closing) {
-                        // `>` of a closing tag `</…>` — leave the element body.
-                        jsx_closing = false;
+                    },
+                    .greater_than => if (jsx_tag_depth > 0 and jsx_brace_nest == 0) {
                         jsx_tag_depth -= 1;
-                        if (jsx_sp > 0 and (jsx_frame_ptr[jsx_sp - 1] & JSX_EXPR_BIT) == 0) jsx_sp -= 1;
-                    } else if (jsx_tag_depth > 0 and jsx_brace_nest == 0) {
-                        jsx_tag_depth -= 1;
-                        // Opening-tag header closed: enter the body unless self-closing `/>`.
-                        // Gated to plain JSX — see jsx_text_mode. (No body pushed in TSX, so
-                        // jsx_sp stays 0 and all body/expr/text tracking stays inert.)
-                        if (prev != .slash and jsx_text_mode) {
-                            if (jsx_sp == jsx_frame_cap) {
-                                const new_cap = jsx_frame_cap * 2;
-                                const grown = try alloc.alloc(u32, new_cap);
-                                @memcpy(grown[0..jsx_frame_cap], jsx_frame_ptr[0..jsx_frame_cap]);
-                                if (jsx_frame_heap) |h| alloc.free(h);
-                                jsx_frame_heap = grown;
-                                jsx_frame_ptr = grown.ptr;
-                                jsx_frame_cap = new_cap;
-                            }
-                            jsx_frame_ptr[jsx_sp] = 0; // BODY frame
-                            jsx_sp += 1;
-                        }
-                    }
-                },
-                else => {},
+                    },
+                    else => {},
+                }
             }
-            // Recompute the hot-loop text-context bit: top frame is a body and we
-            // are outside any tag header / attribute brace.
-            jsx_in_text = jsx_sp > 0 and (jsx_frame_ptr[jsx_sp - 1] & JSX_EXPR_BIT) == 0 and
-                jsx_tag_depth == 0 and jsx_brace_nest == 0;
         }
 
         prev_kind = if (isPropertyAccess(prev) and tag.isKeyword()) .identifier else tag;
         // A jsx_text token may span line terminators; carry that to the next token's
         // has_newline_before. Comptime-gated so non-JSX keeps the plain `saw_nl = false`.
         if (jsx_text_mode) {
-            saw_nl = jsx_text_nl;
-            jsx_text_nl = false;
+            saw_nl = jx.text_nl;
+            jx.text_nl = false;
         } else {
             saw_nl = false;
         }
